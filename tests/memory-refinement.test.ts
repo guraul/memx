@@ -81,7 +81,7 @@ describe("refineMemory", () => {
         return "[]";
       },
     };
-    await refineMemory(sampleSignals, llm, "", "opencode/deepseek-v4-flash-free");
-    expect(capturedModel).toBe("opencode/deepseek-v4-flash-free");
+    await refineMemory(sampleSignals, llm, "", "opencode/mimo-v2.6-flash-free");
+    expect(capturedModel).toBe("opencode/mimo-v2.6-flash-free");
   });
 });

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/memx-config.json",
-  "refinementModel": "opencode/deepseek-v4-flash-free",
+  "refinementModel": "opencode/mimo-v2.6-flash-free",
   "maxSignalsPerSession": 20,
   "autoBackupCount": 5
 }

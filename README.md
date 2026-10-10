@@ -108,7 +108,7 @@ Customize via `~/.opencode/memx.config.json`:
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `refinementModel` | `string` | `opencode/deepseek-v4-flash-free` | Refinement model (`provider/model` format) |
+| `refinementModel` | `string` | `opencode/mimo-v2.6-flash-free` | Refinement model (`provider/model` format) |
 | `maxSignalsPerSession` | `number` | `20` | Signal buffer max size |
 | `autoBackupCount` | `number` | `5` | Backup retention count |
 | `throttleMinutes` | `number` | `10` | Refinement throttle interval (minutes) |
@@ -196,7 +196,7 @@ Manually triggers style + project memory refinement (use when `session.idle` doe
 
 - **`session.idle` doesn't fire**: This event only fires when the session is truly idle (after a turn fully ends). Continuous tool calls / active turns delay it indefinitely. Use the `reflect` tool to trigger manually.
 - **Code changes not taking effect**: Plugins load once at startup; you must restart OpenCode after modifying `src/`. Changes to `~/.opencode/memx.config.json` take effect immediately (read at each refinement).
-- **Refinement model**: Default `opencode/deepseek-v4-flash-free` (built-in free model, no API key needed). DeepSeek official keys are invalid in this environment; don't configure `deepseek/*` models.
+- **Refinement model**: Default `opencode/mimo-v2.6-flash-free` (built-in free model, no API key needed). DeepSeek official keys are invalid in this environment; don't configure `deepseek/*` models.
 - **Logs**: Located at `~/.local/share/opencode/log/opencode.log`. Plugin `app.log` messages don't show the `service` field; search `level=ERROR` for errors, `Updated USER.md` or `Updated MEMORY.md` for successful writes.
 - **LLM output debugging**: Each refinement logs `llm raw(N): ...` (400-char truncation) to verify the LLM's raw return is valid JSON.
 

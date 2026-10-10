@@ -18,7 +18,7 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 - **Entry point**: `src/index.ts` exports `MemxPlugin` (V2 `Plugin` 函数). Entry must export ONLY the plugin - extra exported functions get invoked as plugins and crash OpenCode (`plugin config hook failed`)
 - **Hooks**: `event` (订阅 `session.idle` + `session.deleted`) + `tool.reflect` (手动触发双轨提炼) + `dispose`
 - **Install**: `~/.config/opencode/plugins/opencode-memx.ts` re-exports `MemxPlugin` from `src/index`
-- **Model override**: `~/.opencode/memx.config.json` 的 `refinementModel` (`provider/model` 格式), 运行时每次读取 - 改配置**无需重启**. Default: `opencode/deepseek-v4-flash-free` (内置免费模型, 无需 key; deepseek 官方 key 无效, 不要用)
+- **Model override**: `~/.opencode/memx.config.json` 的 `refinementModel` (`provider/model` 格式), 运行时每次读取 - 改配置**无需重启**. Default: `opencode/mimo-v2.6-flash-free` (内置免费模型, 无需 key; deepseek 官方 key 无效, 不要用)
 - **LLM calls**: 子会话 `client.session.create` -> `session.prompt` (body 带 `system` + `model`) -> `session.delete` (finally), 见 `src/session-llm.ts`
 - **Track 1 paths**: `~/.opencode/USER.md` (hardcoded in `src/user-md.ts`)
 - **Track 2 paths**: `~/.opencode/MEMORY.md` (index) + `~/.opencode/projects/<slug>/.mem/*.md` (content), hardcoded in `src/memory-md.ts`. Slug derived from plugin's `directory` context via `deriveSlug()` in `src/memory-types.ts`

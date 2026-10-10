@@ -108,7 +108,7 @@ bash install.sh
 
 | 字段 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `refinementModel` | `string` | `opencode/deepseek-v4-flash-free` | 提炼模型（`provider/model` 格式） |
+| `refinementModel` | `string` | `opencode/mimo-v2.6-flash-free` | 提炼模型（`provider/model` 格式） |
 | `maxSignalsPerSession` | `number` | `20` | 信号缓冲区上限 |
 | `autoBackupCount` | `number` | `5` | 备份保留数 |
 | `throttleMinutes` | `number` | `10` | 提炼节流间隔（分钟） |
@@ -196,7 +196,7 @@ Rewriting auth middleware for compliance.
 
 - **`session.idle` 迟迟不触发**：该事件只在会话真正空闲（一轮回复完全结束）后触发，连续工具调用 / 活跃回合会无限延迟。直接调用 `reflect` 工具手动触发。
 - **改代码不生效**：插件在 OpenCode 启动时加载一次，修改 `src/` 后必须重启 OpenCode；修改 `~/.opencode/memx.config.json` 则即时生效（每次提炼时重新读取）。
-- **提炼模型**：默认 `opencode/deepseek-v4-flash-free`（内置免费模型，无需 API key）。deepseek 官方 key 在当前环境无效，不要配置 `deepseek/*` 模型。
+- **提炼模型**：默认 `opencode/mimo-v2.6-flash-free`（内置免费模型，无需 API key）。deepseek 官方 key 在当前环境无效，不要配置 `deepseek/*` 模型。
 - **日志**：位于 `~/.local/share/opencode/log/opencode.log`。插件的 `app.log` 消息不显示 `service` 字段，排查时搜索 `level=ERROR`，成功写入搜索 `Updated USER.md` 或 `Updated MEMORY.md`。
 - **LLM 输出排查**：每次提炼会记录 `llm raw(N): ...`（400 字符截断），可确认 LLM 原始返回是否合法 JSON。
 

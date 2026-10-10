@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { z } from "zod";
 
 const MemxConfigSchema = z.object({
-  refinementModel: z.string().optional().default("opencode/deepseek-v4-flash-free"),
+  refinementModel: z.string().optional().default("opencode/mimo-v2.6-flash-free"),
   maxSignalsPerSession: z.number().int().positive().optional().default(20),
   autoBackupCount: z.number().int().positive().optional().default(5),
   throttleMinutes: z.number().int().positive().optional().default(10),
