@@ -1,7 +1,7 @@
 {
-  "name": "opencode-memx",
+  "name": "memx",
   "version": "0.1.0",
-  "description": "User style memory plugin for OpenCode V2 — extracts and persists cross-session preferences",
+  "description": "Dual-track memory plugin for OpenCode — user style + project memory across sessions",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
@@ -25,13 +25,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/guraul/opencode-memx.git"
+    "url": "git+https://github.com/guraul/memx.git"
   },
   "author": "",
   "bugs": {
-    "url": "https://github.com/guraul/opencode-memx/issues"
+    "url": "https://github.com/guraul/memx/issues"
   },
-  "homepage": "https://github.com/guraul/opencode-memx#readme",
+  "homepage": "https://github.com/guraul/memx#readme",
   "dependencies": {
     "@opencode-ai/plugin": "^1.18.12",
     "zod": "^4.4.3"

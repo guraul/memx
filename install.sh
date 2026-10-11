@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# opencode-memx installer
+# memx installer
 # Usage: bash install.sh [repo-path]
-# Default repo-path: ~/.config/opencode-memx
+# Default repo-path: ~/.config/memx
 
-REPO_PATH="${1:-$HOME/.config/opencode-memx}"
+REPO_PATH="${1:-$HOME/.config/memx}"
 OCP_CONFIG_DIR="$HOME/.config/opencode"
 OCP_DATA_DIR="$HOME/.opencode"
 
-echo "=== opencode-memx installer ==="
+echo "=== memx installer ==="
 echo "Repo path: $REPO_PATH"
 echo "Config dir: $OCP_CONFIG_DIR"
 echo ""
@@ -20,7 +20,7 @@ if [ -d "$REPO_PATH/.git" ]; then
   git -C "$REPO_PATH" pull --ff-only
 else
   echo "[1/5] Cloning repo..."
-  git clone https://github.com/guraul/opencode-memx.git "$REPO_PATH"
+  git clone https://github.com/guraul/memx.git "$REPO_PATH"
 fi
 echo ""
 
@@ -33,10 +33,10 @@ echo ""
 # Step 3: Create plugin entry
 echo "[3/5] Creating plugin entry..."
 mkdir -p "$OCP_CONFIG_DIR/plugins"
-cat > "$OCP_CONFIG_DIR/plugins/opencode-memx.ts" <<EOF
+cat > "$OCP_CONFIG_DIR/plugins/memx.ts" <<EOF
 export { MemxPlugin } from "$REPO_PATH/src/index";
 EOF
-echo "  -> $OCP_CONFIG_DIR/plugins/opencode-memx.ts"
+echo "  -> $OCP_CONFIG_DIR/plugins/memx.ts"
 echo ""
 
 # Step 4: Ensure package.json has dependencies
@@ -84,6 +84,6 @@ echo "=== Installation complete ==="
 echo ""
 echo "Next steps:"
 echo "  1. Restart OpenCode"
-echo "  2. Run /status to verify opencode-memx is loaded"
+echo "  2. Run /status to verify memx is loaded"
 echo "  3. (Optional) Create ~/.config/opencode/AGENTS.md with the signal marking prompts"
-echo "     See: https://github.com/guraul/opencode-memx#installation"
+echo "     See: https://github.com/guraul/memx#installation"
