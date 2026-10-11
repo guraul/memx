@@ -26,45 +26,6 @@ import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } 
 import { deriveSlug } from "../../core/memory-types";
 import { runHealthCheck, autoFix, formatHealthLog } from "../../core/health/memory-health";
 
-/** v2 message.list 形状（user 扁平 {text}；assistant {content:[{type,text}]}，附录 A 消息形状行） */
-export interface V2Message {
-  type: string;
-  text?: string;
-  content?: Array<{ type: string; text?: string }>;
-}
-
-export interface LastTurn {
-  user: string;
-  assistant: string;
-}
-
-/** v2 消息形状的最后一轮提取（user → 其后第一条 assistant） */
-export function extractLastTurn(msgs: V2Message[]): LastTurn | null {
-  let lastUserIdx = -1;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i]!.type === "user") {
-      lastUserIdx = i;
-      break;
-    }
-  }
-  if (lastUserIdx === -1) return null;
-
-  const userText = msgs[lastUserIdx]!.text ?? "";
-
-  let assistantText = "";
-  for (let i = msgs.length - 1; i > lastUserIdx; i--) {
-    if (msgs[i]!.type === "assistant") {
-      assistantText = (msgs[i]!.content ?? [])
-        .filter((c) => c.type === "text")
-        .map((c) => c.text ?? "")
-        .join("");
-      break;
-    }
-  }
-
-  return { user: userText, assistant: assistantText };
-}
-
 export default Plugin.define({
   id: "memx",
   async setup(ctx) {
@@ -75,6 +36,19 @@ export default Plugin.define({
     let refinementInFlight = false;
     let currentSlug = deriveSlug(ctx.location.directory ?? "");
     const controller = new AbortController();
+
+    // #82 事件缓存（方案：rpc 改事件流取回复，用户 2026-10-11 拍板——宿主未注册 message.list）：
+    // - inbox.delivered 携带用户 prompt 文本（每会话最新一条）
+    // - text.ended 携带 assistant 全文（每会话最新一条）
+    // 捕获时机（execution.succeeded）紧跟回合结束，缓存必然是热的。
+    const lastUserBySession = new Map<string, { text: string; ts: number }>();
+    const assistantBySession = new Map<string, { text: string; ts: number }>();
+    const extractPromptText = (prompt: unknown): string => {
+      const p = prompt as { text?: string; parts?: Array<{ type?: string; text?: string }> } | undefined;
+      if (!p) return "";
+      if (typeof p.text === "string") return p.text;
+      return (p.parts ?? []).filter((x) => x.type === "text").map((x) => x.text ?? "").join("");
+    };
 
     // #4 拍板：v2 无 app.log → ctx.storage 结构化诊断（memx_status / memx doctor 消费）
     type Diag = {
@@ -129,6 +103,7 @@ export default Plugin.define({
           onRemoved: (id) => {
             childSessions.delete(id);
           },
+          getReply: (id) => assistantBySession.get(id)?.text ?? "",
         });
         const proposals = await refine(signals, llm, existingContent, config.refinementModel);
 
@@ -156,7 +131,7 @@ export default Plugin.define({
         return `[memx] 已写入 ${proposals.length} 条`;
       } catch (err) {
         diag.failures++;
-        diag.lastError = String(err);
+        diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
         diag.updatedAt = new Date().toISOString();
         void persistDiag();
         throw err;
@@ -188,6 +163,7 @@ export default Plugin.define({
           onRemoved: (id) => {
             childSessions.delete(id);
           },
+          getReply: (id) => assistantBySession.get(id)?.text ?? "",
         });
         const proposals = await refineMemory(signals, llm, existingIndex, config.refinementModel);
 
@@ -225,7 +201,7 @@ export default Plugin.define({
         return `[memx] 已写入 ${proposals.length} 条记忆${healthMsg}`;
       } catch (err) {
         diag.failures++;
-        diag.lastError = String(err);
+        diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
         diag.updatedAt = new Date().toISOString();
         void persistDiag();
         throw err;
@@ -234,27 +210,18 @@ export default Plugin.define({
       }
     }
 
-    // #53 实测：ctx.session 不含 message.list → ctx.rpc.call 逃生口（handoff 硬点②）
-    async function fetchSessionMessages(sessionID: string): Promise<V2Message[]> {
-      const res = (await (ctx.rpc as { call: (method: string, input: unknown) => Promise<unknown> }).call(
-        "message.list",
-        { sessionID, order: "desc", limit: 10 },
-      )) as { data?: V2Message[] } | V2Message[];
-      return Array.isArray(res) ? res : (res?.data ?? []);
-    }
-
-    async function captureFromSession(sessionID: string): Promise<void> {
-      const msgs = await fetchSessionMessages(sessionID);
-      const last = extractLastTurn(msgs);
-      if (last) {
-        const signals = captureSignals(last.user, last.assistant);
-        buffer.pushAll(signals);
-        const memSignals = captureMemorySignals(last.assistant);
-        memoryBuffer.pushAll(memSignals);
-        diag.captured += signals.length + memSignals.length;
-        diag.updatedAt = new Date().toISOString();
-        void persistDiag();
-      }
+    // #82：捕获改读事件缓存（用户拍板）——不再依赖任何 rpc/message.list
+    function captureFromSession(sessionID: string): void {
+      const user = lastUserBySession.get(sessionID);
+      const assistant = assistantBySession.get(sessionID);
+      if (!user || !assistant) return; // 缓存未热（serve 重启后首轮）→ 交给下一次回合
+      const signals = captureSignals(user.text, assistant.text);
+      buffer.pushAll(signals);
+      const memSignals = captureMemorySignals(assistant.text);
+      memoryBuffer.pushAll(memSignals);
+      diag.captured += signals.length + memSignals.length;
+      diag.updatedAt = new Date().toISOString();
+      void persistDiag();
     }
 
     async function flushAll(sessionID: string, force: boolean): Promise<void> {
@@ -270,9 +237,23 @@ export default Plugin.define({
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           try {
             const type = event.type as string;
-            if (type !== "session.execution.succeeded" && type !== "session.deleted") continue;
             const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID as string;
             if (!sessionID) continue;
+            // 事件缓存更新（先于 execution.succeeded 闸门）
+            if (type === "session.inbox.delivered") {
+              const d = event.data as { prompt?: unknown };
+              const text = extractPromptText(d.prompt);
+              if (text) lastUserBySession.set(sessionID, { text, ts: Date.now() });
+              continue;
+            }
+            if (type === "session.text.ended") {
+              const d = event.data as { text?: string };
+              if (typeof d.text === "string" && d.text.trim()) {
+                assistantBySession.set(sessionID, { text: d.text, ts: Date.now() });
+              }
+              continue;
+            }
+            if (type !== "session.execution.succeeded" && type !== "session.deleted") continue;
             if (childSessions.has(sessionID)) {
               if (type === "session.deleted") childSessions.delete(sessionID);
               continue;
@@ -283,14 +264,14 @@ export default Plugin.define({
             await flushAll(sessionID, type === "session.deleted");
           } catch (err) {
             diag.failures++;
-            diag.lastError = String(err);
+            diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
             diag.updatedAt = new Date().toISOString();
             void persistDiag();
             // errors must never escape the loop
           }
         }
       } catch (err) {
-        diag.lastError = String(err);
+        diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
         void persistDiag();
       }
     })();
