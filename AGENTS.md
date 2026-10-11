@@ -35,6 +35,8 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 
 ## Architecture
 
+> ✅ **2026-10-11 阶段 1 分层落地**：`src/` 已重排为 `core/`（signals/refine/store/health/llm/config/types，**零宿主依赖**——禁 import `@opencode*`）+ `hosts/opencode/`（插件壳 index.ts + session-llm 适配）+ `cli/`（doctor，阶段 4）。行为等价迁移，113 测试全绿。**当前依赖仍是 v1 SDK**（`@opencode-ai/plugin ^1.18.12`）；V2 移植 = 阶段 2（API 映射见 docs/handoff/handoff-20261011.md 附录 A）。下文架构描述按 v1 现状读。
+
 ```
 src/
   types.ts             - StyleSignal, StyleProposal, Zod schemas (Track 1)
