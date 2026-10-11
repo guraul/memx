@@ -262,21 +262,22 @@ export default Plugin.define({
       await runMemoryRefinement(sessionID, force);
     }
 
-    // 事件订阅：session.idle（捕获+提炼）/ session.deleted（清登记）。
-    // v2 负载是 event.data.sessionID（handoff 硬坑 8）。
+    // 事件订阅：session.execution.succeeded（捕获+提炼——#82 实测 v2 不发 session.idle，
+    // 每轮必发的是 execution.succeeded，语义=回合结束即捕获时机，用户 2026-10-11 拍板）/
+    // session.deleted（清登记）。v2 负载是 event.data.sessionID（handoff 硬坑 8）。
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           try {
             const type = event.type as string;
-            if (type !== "session.idle" && type !== "session.deleted") continue;
+            if (type !== "session.execution.succeeded" && type !== "session.deleted") continue;
             const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID as string;
             if (!sessionID) continue;
             if (childSessions.has(sessionID)) {
               if (type === "session.deleted") childSessions.delete(sessionID);
               continue;
             }
-            if (type === "session.idle") {
+            if (type === "session.execution.succeeded") {
               await captureFromSession(sessionID);
             }
             await flushAll(sessionID, type === "session.deleted");
