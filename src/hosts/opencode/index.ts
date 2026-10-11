@@ -1,5 +1,10 @@
-import type { Plugin } from "@opencode-ai/plugin";
-import { tool } from "@opencode-ai/plugin";
+// memx · opencode v2 插件壳（阶段 2，handoff-20261011 附录 A 施工图）
+// 职责：事件订阅（session.idle/deleted）→ 信号捕获 → core 提炼 → 写盘；
+//       工具注册（reflect/forget/memx_status，经 ctx.tool.transform）；
+//       storage 结构化诊断（v2 无 app.log，#4 拍板）；
+//       子会话提炼的 context hook 全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
+// 红线：本文件只 export default 插件；所有 hook try-catch，错误绝不抛回宿主。
+import { Plugin } from "@opencode/plugin";
 import { SignalBuffer, captureSignals } from "../../core/signals/signal-capture";
 import { refine } from "../../core/refine/refinement";
 import type { LLMClient } from "../../core/refine/refinement";
@@ -21,44 +26,37 @@ import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } 
 import { deriveSlug } from "../../core/memory-types";
 import { runHealthCheck, autoFix, formatHealthLog } from "../../core/health/memory-health";
 
-const buffer = new SignalBuffer();
-const memoryBuffer = new MemorySignalBuffer();
-const childSessionIDs = new Set<string>();
-let refinementInFlight = false;
-let currentSlug = "";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** v2 message.list 形状（user 扁平 {text}；assistant {content:[{type,text}]}，附录 A 消息形状行） */
+export interface V2Message {
+  type: string;
+  text?: string;
+  content?: Array<{ type: string; text?: string }>;
 }
 
-interface LastTurn {
+export interface LastTurn {
   user: string;
   assistant: string;
 }
 
-export function extractLastTurn(
-  msgs: Array<{ info: { role: string }; parts: Array<{ type: string; text?: string }> }>,
-): LastTurn | null {
+/** v2 消息形状的最后一轮提取（user → 其后第一条 assistant） */
+export function extractLastTurn(msgs: V2Message[]): LastTurn | null {
   let lastUserIdx = -1;
   for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i]!.info.role === "user") {
+    if (msgs[i]!.type === "user") {
       lastUserIdx = i;
       break;
     }
   }
   if (lastUserIdx === -1) return null;
 
-  const userText = msgs[lastUserIdx]!.parts
-    .filter((p) => p.type === "text")
-    .map((p) => p.text ?? "")
-    .join("");
+  const userText = msgs[lastUserIdx]!.text ?? "";
 
   let assistantText = "";
   for (let i = msgs.length - 1; i > lastUserIdx; i--) {
-    if (msgs[i]!.info.role === "assistant") {
-      assistantText = msgs[i]!.parts
-        .filter((p) => p.type === "text")
-        .map((p) => p.text ?? "")
+    if (msgs[i]!.type === "assistant") {
+      assistantText = (msgs[i]!.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
         .join("");
       break;
     }
@@ -67,235 +65,333 @@ export function extractLastTurn(
   return { user: userText, assistant: assistantText };
 }
 
-async function runRefinement(client: any, _sessionID: string, force = false): Promise<string> {
-  if (buffer.length === 0) return "[memx] 无信号，跳过";
+export default Plugin.define({
+  id: "memx",
+  async setup(ctx) {
+    const buffer = new SignalBuffer();
+    const memoryBuffer = new MemorySignalBuffer();
+    // 活跃子会话集合：sessionID → system 提炼提示词（context hook 按 ∈ 集合过滤）
+    const childSessions = new Map<string, string>();
+    let refinementInFlight = false;
+    let currentSlug = deriveSlug(ctx.location.directory ?? "");
+    const controller = new AbortController();
 
-  const config = await loadMemxConfig();
-  if (!force && !shouldRun(config.throttleMinutes)) return "[memx] 节流中，跳过";
-
-  if (refinementInFlight) {
-    if (!force) return "[memx] 提炼进行中，跳过";
-    while (refinementInFlight) await sleep(200);
-  }
-  refinementInFlight = true;
-  try {
-    markRun();
-    const signals = buffer.getAll();
-    const existingContent = readUserMd();
-    const llm: LLMClient = createSessionLLMClient(client, config.refinementModel, (id) => {
-      childSessionIDs.add(id);
-    });
-    const proposals = await refine(signals, llm, existingContent, config.refinementModel);
-
-    if (proposals.length === 0) {
-      return "[memx] 无可提炼偏好";
-    }
-
-    let content = existingContent;
-    for (const proposal of proposals) {
-      content = applyProposal(proposal, content);
-    }
-
-    if (isOverLimit(content)) {
-      backupUserMd();
-      const sections = parseUserMd(content);
-      content = serializeUserMd(sections);
-    }
-
-    writeUserMd(content);
-    buffer.clear();
-
-    try {
-      await client.app.log({
-        body: {
-          service: "memx",
-          level: "info",
-          message: `Updated USER.md: ${proposals.length} items`,
-        },
-      });
-    } catch {
-      // logging must never escape the hook
-    }
-
-    return `[memx] 已写入 ${proposals.length} 条`;
-  } finally {
-    refinementInFlight = false;
-  }
-}
-
-async function runMemoryRefinement(client: any, _sessionID: string, force = false): Promise<string> {
-  if (memoryBuffer.length === 0) return "[memx] 无记忆信号，跳过";
-
-  const config = await loadMemxConfig();
-  if (!force && !shouldRun(config.throttleMinutes)) return "[memx] 节流中，跳过";
-
-  if (refinementInFlight) {
-    if (!force) return "[memx] 提炼进行中，跳过";
-    while (refinementInFlight) await sleep(200);
-  }
-  refinementInFlight = true;
-  try {
-    markRun();
-    const signals = memoryBuffer.getAll();
-    const existingIndex = readMemoryIndex();
-    const llm: LLMClient = createSessionLLMClient(client, config.refinementModel, (id) => {
-      childSessionIDs.add(id);
-    });
-    const proposals = await refineMemory(signals, llm, existingIndex, config.refinementModel);
-
-    if (proposals.length === 0) {
-      return "[memx] 无可提炼记忆";
-    }
-
-    let indexContent = existingIndex;
-    for (const proposal of proposals) {
-      indexContent = applyMemoryProposal(proposal, indexContent, currentSlug);
-    }
-
-    writeMemoryIndex(indexContent);
-    memoryBuffer.clear();
-
-    // Run health check + auto-fix (dead links, orphan files)
-    let healthMsg = "";
-    try {
-      const report = runHealthCheck(indexContent, currentSlug);
-      if (report.deadLinks.length > 0 || report.orphanFiles.length > 0 || report.escalated.length > 0) {
-        const { newIndex, logs } = autoFix(report, indexContent, currentSlug);
-        if (logs.length > 0) {
-          writeMemoryIndex(newIndex + "\n" + formatHealthLog(logs));
-          healthMsg = `, health: ${logs.length} fixes`;
-        }
-      }
-    } catch {
-      // health check must never block refinement
-    }
-
-    try {
-      await client.app.log({
-        body: {
-          service: "memx",
-          level: "info",
-          message: `Updated MEMORY.md: ${proposals.length} items${healthMsg}`,
-        },
-      });
-    } catch {
-      // logging must never escape the hook
-    }
-
-    return `[memx] 已写入 ${proposals.length} 条记忆${healthMsg}`;
-  } finally {
-    refinementInFlight = false;
-  }
-}
-
-export const MemxPlugin: Plugin = async ({ client, directory }) => {
-  currentSlug = deriveSlug(directory ?? "");
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.idle" && event.type !== "session.deleted") return;
+    // #4 拍板：v2 无 app.log → ctx.storage 结构化诊断（memx_status / memx doctor 消费）
+    type Diag = {
+      captured: number;
+      refinements: number;
+      written: number;
+      failures: number;
+      lastError: string;
+      updatedAt: string;
+    };
+    const diag: Diag = {
+      captured: 0,
+      refinements: 0,
+      written: 0,
+      failures: 0,
+      lastError: "",
+      updatedAt: new Date().toISOString(),
+    };
+    const persistDiag = async (): Promise<void> => {
       try {
-        const sessionID = (event as any).properties.sessionID as string;
-        if (childSessionIDs.has(sessionID)) {
-          if (event.type === "session.deleted") childSessionIDs.delete(sessionID);
-          return;
-        }
-
-        if (event.type === "session.idle") {
-          const res = await client.session.messages({ path: { id: sessionID } });
-          const msgs = res.data ?? [];
-          const last = extractLastTurn(msgs);
-          if (last) {
-            const signals = captureSignals(last.user, last.assistant);
-            buffer.pushAll(signals);
-            const memSignals = captureMemorySignals(last.assistant);
-            memoryBuffer.pushAll(memSignals);
-          }
-        }
-        await runRefinement(client, sessionID, event.type === "session.deleted");
-        await runMemoryRefinement(client, sessionID, event.type === "session.deleted");
-        childSessionIDs.delete(sessionID);
-      } catch (err) {
-        try {
-          await client.app.log({
-            body: {
-              service: "memx",
-              level: "error",
-              message: String(err),
-            },
-          });
-        } catch {
-          // logging must never escape the hook
-        }
+        await ctx.storage.set("diag", { ...diag });
+      } catch {
+        // diagnostics must never escape
       }
-    },
+    };
+    void persistDiag();
 
-    tool: {
-      reflect: tool({
-        description: "手动触发 User Style + Project Memory 提炼（当 session.idle 未触发时使用）",
-        args: {},
-        async execute(_args, ctx) {
-          try {
-            const res = await client.session.messages({ path: { id: ctx.sessionID } });
-            const msgs = res.data ?? [];
-            const last = extractLastTurn(msgs);
-            if (last) {
-              const signals = captureSignals(last.user, last.assistant);
-              buffer.pushAll(signals);
-              const memSignals = captureMemorySignals(last.assistant);
-              memoryBuffer.pushAll(memSignals);
+    function sleep(ms: number): Promise<void> {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function runRefinement(_sessionID: string, force = false): Promise<string> {
+      if (buffer.length === 0) return "[memx] 无信号，跳过";
+
+      const config = await loadMemxConfig();
+      if (!force && !shouldRun(config.throttleMinutes)) return "[memx] 节流中，跳过";
+
+      if (refinementInFlight) {
+        if (!force) return "[memx] 提炼进行中，跳过";
+        while (refinementInFlight) await sleep(200);
+      }
+      refinementInFlight = true;
+      try {
+        markRun();
+        diag.refinements++;
+        const signals = buffer.getAll();
+        const existingContent = readUserMd();
+        const llm: LLMClient = createSessionLLMClient(ctx, config.refinementModel, {
+          onCreated: (id, system) => {
+            childSessions.set(id, system);
+          },
+          onRemoved: (id) => {
+            childSessions.delete(id);
+          },
+        });
+        const proposals = await refine(signals, llm, existingContent, config.refinementModel);
+
+        if (proposals.length === 0) {
+          return "[memx] 无可提炼偏好";
+        }
+
+        let content = existingContent;
+        for (const proposal of proposals) {
+          content = applyProposal(proposal, content);
+        }
+
+        if (isOverLimit(content)) {
+          backupUserMd();
+          const sections = parseUserMd(content);
+          content = serializeUserMd(sections);
+        }
+
+        writeUserMd(content);
+        buffer.clear();
+        diag.written += proposals.length;
+        diag.updatedAt = new Date().toISOString();
+        void persistDiag();
+
+        return `[memx] 已写入 ${proposals.length} 条`;
+      } catch (err) {
+        diag.failures++;
+        diag.lastError = String(err);
+        diag.updatedAt = new Date().toISOString();
+        void persistDiag();
+        throw err;
+      } finally {
+        refinementInFlight = false;
+      }
+    }
+
+    async function runMemoryRefinement(_sessionID: string, force = false): Promise<string> {
+      if (memoryBuffer.length === 0) return "[memx] 无记忆信号，跳过";
+
+      const config = await loadMemxConfig();
+      if (!force && !shouldRun(config.throttleMinutes)) return "[memx] 节流中，跳过";
+
+      if (refinementInFlight) {
+        if (!force) return "[memx] 提炼进行中，跳过";
+        while (refinementInFlight) await sleep(200);
+      }
+      refinementInFlight = true;
+      try {
+        markRun();
+        diag.refinements++;
+        const signals = memoryBuffer.getAll();
+        const existingIndex = readMemoryIndex();
+        const llm: LLMClient = createSessionLLMClient(ctx, config.refinementModel, {
+          onCreated: (id, system) => {
+            childSessions.set(id, system);
+          },
+          onRemoved: (id) => {
+            childSessions.delete(id);
+          },
+        });
+        const proposals = await refineMemory(signals, llm, existingIndex, config.refinementModel);
+
+        if (proposals.length === 0) {
+          return "[memx] 无可提炼记忆";
+        }
+
+        let indexContent = existingIndex;
+        for (const proposal of proposals) {
+          indexContent = applyMemoryProposal(proposal, indexContent, currentSlug);
+        }
+
+        writeMemoryIndex(indexContent);
+        memoryBuffer.clear();
+
+        // Run health check + auto-fix (dead links, orphan files)
+        let healthMsg = "";
+        try {
+          const report = runHealthCheck(indexContent, currentSlug);
+          if (report.deadLinks.length > 0 || report.orphanFiles.length > 0 || report.escalated.length > 0) {
+            const { newIndex, logs } = autoFix(report, indexContent, currentSlug);
+            if (logs.length > 0) {
+              writeMemoryIndex(newIndex + "\n" + formatHealthLog(logs));
+              healthMsg = `, health: ${logs.length} fixes`;
             }
-            const styleResult = await runRefinement(client, ctx.sessionID, true);
-            const memoryResult = await runMemoryRefinement(client, ctx.sessionID, true);
-            return `${styleResult} | ${memoryResult}`;
+          }
+        } catch {
+          // health check must never block refinement
+        }
+
+        diag.written += proposals.length;
+        diag.updatedAt = new Date().toISOString();
+        void persistDiag();
+
+        return `[memx] 已写入 ${proposals.length} 条记忆${healthMsg}`;
+      } catch (err) {
+        diag.failures++;
+        diag.lastError = String(err);
+        diag.updatedAt = new Date().toISOString();
+        void persistDiag();
+        throw err;
+      } finally {
+        refinementInFlight = false;
+      }
+    }
+
+    // #53 实测：ctx.session 不含 message.list → ctx.rpc.call 逃生口（handoff 硬点②）
+    async function fetchSessionMessages(sessionID: string): Promise<V2Message[]> {
+      const res = (await (ctx.rpc as { call: (method: string, input: unknown) => Promise<unknown> }).call(
+        "message.list",
+        { sessionID, order: "desc", limit: 10 },
+      )) as { data?: V2Message[] } | V2Message[];
+      return Array.isArray(res) ? res : (res?.data ?? []);
+    }
+
+    async function captureFromSession(sessionID: string): Promise<void> {
+      const msgs = await fetchSessionMessages(sessionID);
+      const last = extractLastTurn(msgs);
+      if (last) {
+        const signals = captureSignals(last.user, last.assistant);
+        buffer.pushAll(signals);
+        const memSignals = captureMemorySignals(last.assistant);
+        memoryBuffer.pushAll(memSignals);
+        diag.captured += signals.length + memSignals.length;
+        diag.updatedAt = new Date().toISOString();
+        void persistDiag();
+      }
+    }
+
+    async function flushAll(sessionID: string, force: boolean): Promise<void> {
+      await runRefinement(sessionID, force);
+      await runMemoryRefinement(sessionID, force);
+    }
+
+    // 事件订阅：session.idle（捕获+提炼）/ session.deleted（清登记）。
+    // v2 负载是 event.data.sessionID（handoff 硬坑 8）。
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          try {
+            const type = event.type as string;
+            if (type !== "session.idle" && type !== "session.deleted") continue;
+            const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID as string;
+            if (!sessionID) continue;
+            if (childSessions.has(sessionID)) {
+              if (type === "session.deleted") childSessions.delete(sessionID);
+              continue;
+            }
+            if (type === "session.idle") {
+              await captureFromSession(sessionID);
+            }
+            await flushAll(sessionID, type === "session.deleted");
           } catch (err) {
-            return `[memx] 失败: ${err}`;
+            diag.failures++;
+            diag.lastError = String(err);
+            diag.updatedAt = new Date().toISOString();
+            void persistDiag();
+            // errors must never escape the loop
+          }
+        }
+      } catch (err) {
+        diag.lastError = String(err);
+        void persistDiag();
+      }
+    })();
+
+    // 子会话提炼的组装管线钩子：全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
+    // 命中时整体替换 system（不是 push——v1 body.system 是替换语义）、temperature 0.2、清空 tools。
+    ctx.session
+      .hook("context", (event) => {
+        try {
+          const system = childSessions.get(event.sessionID);
+          if (system === undefined) return; // 非子会话：零开销放行
+          event.system = [{ type: "text", text: system }] as typeof event.system;
+          event.options.temperature = 0.2;
+          event.tools = {};
+        } catch {
+          // hook must never escape
+        }
+      })
+      .catch(() => {
+        // hook registration must never crash setup
+      });
+
+    // 工具注册（阶段 2）：reflect / forget / memx_status（handoff §4 阶段 2）
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "reflect",
+        description: "手动触发 User Style + Project Memory 提炼（当 session.idle 未触发时使用）",
+        input: { type: "object", properties: {}, required: [] },
+        async execute(_input, toolCtx) {
+          try {
+            await captureFromSession(toolCtx.sessionID);
+            const styleResult = await runRefinement(toolCtx.sessionID, true);
+            const memoryResult = await runMemoryRefinement(toolCtx.sessionID, true);
+            return { content: `${styleResult} | ${memoryResult}` };
+          } catch (err) {
+            return { content: `[memx] 失败: ${String(err)}` };
           }
         },
-      }),
+      });
 
-      forget: tool({
-        description: "Forget project memories matching a keyword. Moves matching .mem/*.md files to .trash and removes their index entries. Use when user says 'forget/forget/remember to delete X'.",
-        args: {
-          keyword: tool.schema.string().describe("Search keyword to match memory title, hook, or filename"),
+      editor.add({
+        name: "forget",
+        description:
+          "Forget project memories matching a keyword. Moves matching .mem/*.md files to .trash and removes their index entries. Use when user says 'forget/忘记/记住删除 X'.",
+        input: {
+          type: "object",
+          properties: { keyword: { type: "string", description: "Search keyword to match memory title, hook, or filename" } },
+          required: ["keyword"],
         },
-        async execute(args, _ctx) {
+        async execute(args) {
+          const keyword = (args as { keyword?: string }).keyword ?? "";
           try {
-            const keyword = args.keyword;
-            if (!keyword.trim()) return "[memx] forget: keyword is required";
+            if (!keyword.trim()) return { content: "[memx] forget: keyword is required" };
             const existingIndex = readMemoryIndex();
             const { newIndex, removed } = forgetMemory(keyword, existingIndex, currentSlug);
             if (removed.length === 0) {
-              return `[memx] forget: no memories matched "${keyword}"`;
+              return { content: `[memx] forget: no memories matched "${keyword}"` };
             }
             writeMemoryIndex(newIndex);
-            try {
-              await client.app.log({
-                body: {
-                  service: "memx",
-                  level: "info",
-                  message: `Forgot ${removed.length} memories matching "${keyword}": ${removed.join(", ")}`,
-                },
-              });
-            } catch {
-              // logging must never escape
-            }
-            return `[memx] forgot ${removed.length} memories: ${removed.join(", ")}`;
+            return { content: `[memx] forgot ${removed.length} memories: ${removed.join(", ")}` };
           } catch (err) {
-            return `[memx] forget failed: ${err}`;
+            return { content: `[memx] forget failed: ${String(err)}` };
           }
         },
-      }),
-    },
+      });
 
-    dispose: async () => {
+      editor.add({
+        name: "memx_status",
+        description: "Show memx structured diagnostics: capture/refinement/written counters, failures, last error.",
+        input: { type: "object", properties: {}, required: [] },
+        async execute() {
+          try {
+            const stored = (await ctx.storage.get("diag")) as Partial<Diag> | undefined;
+            const d = { ...diag, ...(stored ?? {}) };
+            return {
+              content: [
+                `[memx] 诊断`,
+                `captured: ${d.captured}`,
+                `refinements: ${d.refinements}`,
+                `written: ${d.written}`,
+                `failures: ${d.failures}`,
+                `lastError: ${d.lastError || "无"}`,
+                `updatedAt: ${d.updatedAt}`,
+              ].join("\n"),
+            };
+          } catch (err) {
+            return { content: `[memx] status failed: ${String(err)}` };
+          }
+        },
+      });
+    });
+
+    // Cleanup = () => Promise<void> | void（flush on exit, never throw）
+    return async () => {
       try {
-        await runRefinement(client, "", true);
-        await runMemoryRefinement(client, "", true);
+        await flushAll("", true);
       } catch {
         // flush on exit, never throw
       }
       buffer.clear();
       memoryBuffer.clear();
-    },
-  };
-};
+      controller.abort();
+    };
+  },
+});

@@ -33,8 +33,9 @@
   },
   "homepage": "https://github.com/guraul/memx#readme",
   "dependencies": {
-    "@opencode-ai/plugin": "^1.18.12",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@opencode/plugin": "^2.0.26",
+    "@opencode/client": "^2.0.26"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
