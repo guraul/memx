@@ -5,7 +5,7 @@ import { join } from "path";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-test-home" };
+  return { ...actual, homedir: () => "/tmp/opencode-memx-test-home-config" };
 });
 
 beforeAll(() => {
@@ -13,7 +13,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  rmSync("/tmp/opencode-memx-test-home", { recursive: true, force: true });
+  rmSync("/tmp/opencode-memx-test-home-config", { recursive: true, force: true });
 });
 
 const configPath = getConfigPath();
@@ -26,7 +26,7 @@ describe("loadMemxConfig throttleMinutes", () => {
   });
 
   it("reads throttleMinutes from config file", async () => {
-    mkdirSync(join("/tmp/opencode-memx-test-home", ".opencode"), { recursive: true });
+    mkdirSync(join("/tmp/opencode-memx-test-home-config", ".opencode"), { recursive: true });
     writeFileSync(configPath, JSON.stringify({ throttleMinutes: 5 }), "utf-8");
     const config = await loadMemxConfig();
     expect(config.throttleMinutes).toBe(5);

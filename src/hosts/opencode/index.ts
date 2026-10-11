@@ -26,6 +26,45 @@ import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } 
 import { deriveSlug } from "../../core/memory-types";
 import { runHealthCheck, autoFix, formatHealthLog } from "../../core/health/memory-health";
 
+/** v2 会话消息形状（session.context 返回：user 扁平 {text}；assistant {content:[{type,text}]}） */
+export interface V2Message {
+  type: string;
+  text?: string;
+  content?: Array<{ type: string; text?: string }>;
+}
+
+export interface LastTurn {
+  user: string;
+  assistant: string;
+}
+
+/** v2 消息形状的最后一轮提取（user → 其后第一条 assistant） */
+export function extractLastTurn(msgs: V2Message[]): LastTurn | null {
+  let lastUserIdx = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]!.type === "user") {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx === -1) return null;
+
+  const userText = msgs[lastUserIdx]!.text ?? "";
+
+  let assistantText = "";
+  for (let i = msgs.length - 1; i > lastUserIdx; i--) {
+    if (msgs[i]!.type === "assistant") {
+      assistantText = (msgs[i]!.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("");
+      break;
+    }
+  }
+
+  return { user: userText, assistant: assistantText };
+}
+
 export default Plugin.define({
   id: "memx",
   async setup(ctx) {
@@ -37,18 +76,6 @@ export default Plugin.define({
     let currentSlug = deriveSlug(ctx.location.directory ?? "");
     const controller = new AbortController();
 
-    // #82 事件缓存（方案：rpc 改事件流取回复，用户 2026-10-11 拍板——宿主未注册 message.list）：
-    // - inbox.delivered 携带用户 prompt 文本（每会话最新一条）
-    // - text.ended 携带 assistant 全文（每会话最新一条）
-    // 捕获时机（execution.succeeded）紧跟回合结束，缓存必然是热的。
-    const lastUserBySession = new Map<string, { text: string; ts: number }>();
-    const assistantBySession = new Map<string, { text: string; ts: number }>();
-    const extractPromptText = (prompt: unknown): string => {
-      const p = prompt as { text?: string; parts?: Array<{ type?: string; text?: string }> } | undefined;
-      if (!p) return "";
-      if (typeof p.text === "string") return p.text;
-      return (p.parts ?? []).filter((x) => x.type === "text").map((x) => x.text ?? "").join("");
-    };
 
     // #4 拍板：v2 无 app.log → ctx.storage 结构化诊断（memx_status / memx doctor 消费）
     type Diag = {
@@ -56,10 +83,22 @@ export default Plugin.define({
       refinements: number;
       written: number;
       failures: number;
+      version?: string;
       lastError: string;
+      evtCounts?: Record<string, number>;
+      rawInbox?: string;
+      rawTextEnded?: string;
+      lastCapture?: {
+        userLen: number;
+        assistantLen: number;
+        styleHit: boolean;
+        signalCount: number;
+        sessionID: string;
+      };
       updatedAt: string;
     };
     const diag: Diag = {
+      version: "v2-e2e-3",
       captured: 0,
       refinements: 0,
       written: 0,
@@ -103,7 +142,6 @@ export default Plugin.define({
           onRemoved: (id) => {
             childSessions.delete(id);
           },
-          getReply: (id) => assistantBySession.get(id)?.text ?? "",
         });
         const proposals = await refine(signals, llm, existingContent, config.refinementModel);
 
@@ -163,7 +201,6 @@ export default Plugin.define({
           onRemoved: (id) => {
             childSessions.delete(id);
           },
-          getReply: (id) => assistantBySession.get(id)?.text ?? "",
         });
         const proposals = await refineMemory(signals, llm, existingIndex, config.refinementModel);
 
@@ -210,16 +247,25 @@ export default Plugin.define({
       }
     }
 
-    // #82：捕获改读事件缓存（用户拍板）——不再依赖任何 rpc/message.list
-    function captureFromSession(sessionID: string): void {
-      const user = lastUserBySession.get(sessionID);
-      const assistant = assistantBySession.get(sessionID);
-      if (!user || !assistant) return; // 缓存未热（serve 重启后首轮）→ 交给下一次回合
-      const signals = captureSignals(user.text, assistant.text);
+    // #82 实测定案：取消息用 ctx.session.context（SessionDomain 确认方法，返回完整
+    // messages）——rpc message.list 宿主未注册、inbox.delivered 无负载（均实测）
+    async function captureFromSession(sessionID: string): Promise<void> {
+      const res = (await ctx.session.context({ sessionID })) as { messages?: V2Message[] };
+      const msgs = res?.messages ?? [];
+      const last = extractLastTurn(msgs as V2Message[]);
+      if (!last) return;
+      const signals = captureSignals(last.user, last.assistant);
       buffer.pushAll(signals);
-      const memSignals = captureMemorySignals(assistant.text);
+      const memSignals = captureMemorySignals(last.assistant);
       memoryBuffer.pushAll(memSignals);
       diag.captured += signals.length + memSignals.length;
+      diag.lastCapture = {
+        userLen: last.user.length,
+        assistantLen: last.assistant.length,
+        styleHit: /STYLE_SIGNAL/.test(last.assistant),
+        signalCount: signals.length,
+        sessionID,
+      };
       diag.updatedAt = new Date().toISOString();
       void persistDiag();
     }
@@ -237,20 +283,13 @@ export default Plugin.define({
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
           try {
             const type = event.type as string;
+            // #82 端到端诊断：按类型计数 + 采样 data 形状（定位缓存未填充问题）
+            diag.evtCounts = diag.evtCounts ?? {};
+            diag.evtCounts[type] = (diag.evtCounts[type] ?? 0) + 1;
             const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID as string;
-            if (!sessionID) continue;
-            // 事件缓存更新（先于 execution.succeeded 闸门）
-            if (type === "session.inbox.delivered") {
-              const d = event.data as { prompt?: unknown };
-              const text = extractPromptText(d.prompt);
-              if (text) lastUserBySession.set(sessionID, { text, ts: Date.now() });
-              continue;
-            }
-            if (type === "session.text.ended") {
-              const d = event.data as { text?: string };
-              if (typeof d.text === "string" && d.text.trim()) {
-                assistantBySession.set(sessionID, { text: d.text, ts: Date.now() });
-              }
+            if (!sessionID) {
+              if (!diag.rawInbox) diag.rawInbox = "NO_SESSION_ID:" + JSON.stringify(event.data ?? null).slice(0, 300);
+              void persistDiag();
               continue;
             }
             if (type !== "session.execution.succeeded" && type !== "session.deleted") continue;

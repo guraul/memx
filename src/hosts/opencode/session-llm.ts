@@ -1,9 +1,8 @@
-// memx · opencode v2 子会话提炼 LLM 适配器（阶段 2；#82 拍板：回复经事件缓存取，
-// 不依赖 message.list/rpc）。
-// 语义：session.create（model 创建时定）→ 注册 system 到 context hook 活跃集合 →
-//       session.prompt（提交回执）→ session.wait → 从 assistantBySession 缓存取全文 →
+// memx · opencode v2 子会话提炼 LLM 适配器（阶段 2；#82 定案：回复经
+// ctx.session.context 取——rpc message.list 宿主未注册，inbox.delivered 无负载）。
+// 语义：session.create（model 创建时定）→ context hook 注册 system →
+//       session.prompt（提交回执）→ session.wait → session.context 取 assistant 全文 →
 //       finally session.remove + 移出活跃集合。
-// 运行时未知（wait 语义）在端到端校准（handoff §8-4）。
 import type { LLMClient } from "../../core/refine/refinement";
 
 export interface SessionLLMHooks {
@@ -11,8 +10,11 @@ export interface SessionLLMHooks {
   onCreated: (sessionID: string, system: string) => void;
   /** 子会话删除后回调（活跃集合移除） */
   onRemoved: (sessionID: string) => void;
-  /** 从事件缓存读取该子会话的 assistant 全文（text.ended 已落地时非空） */
-  getReply: (sessionID: string) => string;
+}
+
+async function fetchMessages(ctx: any, sessionID: string): Promise<any[]> {
+  const res = (await ctx.session.context({ sessionID })) as { messages?: any[] };
+  return res?.messages ?? [];
 }
 
 export function createSessionLLMClient(
@@ -38,9 +40,14 @@ export function createSessionLLMClient(
           text: params.messages[0]?.content ?? "",
         });
 
-        // wait：session.wait 在 SessionDomain（类型确认）；等回合结束后读缓存
+        // wait：SessionDomain 确认有 wait（等回合结束后 context 里已有 assistant 回复）
         await ctx.session.wait({ sessionID: childSessionID });
-        const text = hooks.getReply(childSessionID);
+        const msgs = await fetchMessages(ctx, childSessionID);
+        const assistant = [...msgs].reverse().find((m) => m?.type === "assistant");
+        const text = ((assistant?.content ?? []) as Array<{ type: string; text?: string }>)
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join("");
         return text;
       } finally {
         if (childSessionID) {

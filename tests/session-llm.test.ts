@@ -1,8 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import { createSessionLLMClient } from "../src/hosts/opencode/session-llm";
 
-/** v2 形状的 mock ctx：session.create/prompt/wait/remove；回复经 getReply 缓存钩子 */
-function createMockCtx(opts: { createdId?: string; reply?: string; promptError?: Error; removeError?: Error }) {
+/** v2 形状的 mock ctx：session.create/prompt/wait/remove/context（messages 经 context 取） */
+function createMockCtx(opts: {
+  createdId?: string;
+  messages?: Array<{ type: string; text?: string; content?: Array<{ type: string; text?: string }> }>;
+  promptError?: Error;
+}) {
   const calls: string[] = [];
   const ctx: any = {
     session: {
@@ -20,63 +24,71 @@ function createMockCtx(opts: { createdId?: string; reply?: string; promptError?:
       }),
       remove: vi.fn(async () => {
         calls.push("remove");
-        if (opts.removeError) throw opts.removeError;
+      }),
+      context: vi.fn(async () => {
+        calls.push("context");
+        return { messages: opts.messages ?? [] };
       }),
     },
   };
   return { ctx, calls };
 }
 
-describe("createSessionLLMClient（v2，事件缓存取回复）", () => {
-  it("创建 → prompt → wait → getReply 取缓存 → remove；model 透传给 create", async () => {
-    const { ctx, calls } = createMockCtx({ createdId: "child-1", reply: "Hello World" });
-    const hooks = { onCreated: vi.fn(), onRemoved: vi.fn(), getReply: vi.fn(() => "Hello World") };
+const REPLY = [
+  { type: "assistant", content: [{ type: "text", text: "Hello" }, { type: "text", text: " World" }] },
+];
+
+describe("createSessionLLMClient（v2，回复经 session.context）", () => {
+  it("创建 → prompt → wait → context 取回复 → remove；model 透传", async () => {
+    const { ctx, calls } = createMockCtx({ createdId: "child-1", messages: REPLY });
+    const hooks = { onCreated: vi.fn(), onRemoved: vi.fn() };
     const llm = createSessionLLMClient(ctx, "opencode/mimo-v2.6-flash-free", hooks);
     const result = await llm.chat({
       system: "You are helpful",
       messages: [{ role: "user", content: "Hi" }],
     });
     expect(result).toBe("Hello World");
-    expect(calls).toEqual(["create", "prompt", "wait", "remove"]);
+    expect(calls).toEqual(["create", "prompt", "wait", "context", "remove"]);
     expect(ctx.session.create).toHaveBeenCalledWith(
       expect.objectContaining({ title: "memx-refinement", model: "opencode/mimo-v2.6-flash-free" }),
     );
     expect(ctx.session.prompt).toHaveBeenCalledWith({ sessionID: "child-1", text: "Hi" });
-    expect(hooks.getReply).toHaveBeenCalledWith("child-1");
     expect(hooks.onCreated).toHaveBeenCalledWith("child-1", "You are helpful");
     expect(hooks.onRemoved).toHaveBeenCalledWith("child-1");
   });
 
-  it("缓存未命中（getReply 空）返回空字符串，不抛错", async () => {
-    const { ctx } = createMockCtx({ createdId: "child-2", reply: "" });
-    const llm = createSessionLLMClient(ctx, undefined, { onCreated: vi.fn(), onRemoved: vi.fn(), getReply: () => "" });
+  it("assistant 只取 content 里的 text（reasoning 不计）", async () => {
+    const { ctx } = createMockCtx({
+      createdId: "child-2",
+      messages: [{ type: "assistant", content: [{ type: "reasoning", text: "thinking" }, { type: "text", text: "ok" }] }],
+    });
+    const llm = createSessionLLMClient(ctx, undefined, { onCreated: vi.fn(), onRemoved: vi.fn() });
     const result = await llm.chat({ system: "", messages: [{ role: "user", content: "Hi" }] });
-    expect(result).toBe("");
+    expect(result).toBe("ok");
   });
 
   it("prompt 失败也要 remove 子会话并移出活跃集合", async () => {
     const { ctx, calls } = createMockCtx({ createdId: "child-err", promptError: new Error("LLM failed") });
     const onRemoved = vi.fn();
-    const llm = createSessionLLMClient(ctx, undefined, { onCreated: vi.fn(), onRemoved, getReply: () => "" });
+    const llm = createSessionLLMClient(ctx, undefined, { onCreated: vi.fn(), onRemoved });
     await expect(llm.chat({ system: "", messages: [{ role: "user", content: "Hi" }] })).rejects.toThrow("LLM failed");
     expect(calls).toContain("remove");
     expect(onRemoved).toHaveBeenCalledWith("child-err");
   });
 
   it("无 model 时不传 model 字段", async () => {
-    const { ctx } = createMockCtx({ createdId: "child-3", reply: "ok" });
-    const llm = createSessionLLMClient(ctx, undefined, { onCreated: vi.fn(), onRemoved: vi.fn(), getReply: () => "ok" });
+    const { ctx } = createMockCtx({ createdId: "child-3", messages: REPLY });
+    const llm = createSessionLLMClient(ctx, undefined, { onCreated: vi.fn(), onRemoved: vi.fn() });
     await llm.chat({ system: "", messages: [{ role: "user", content: "Hi" }] });
     expect(ctx.session.create.mock.calls[0][0]).not.toHaveProperty("model");
   });
 
   it("onCreated/onRemoved 构成活跃集合的登记/移除对", async () => {
-    const { ctx } = createMockCtx({ createdId: "child-pair", reply: "ok" });
+    const { ctx } = createMockCtx({ createdId: "child-pair", messages: REPLY });
     const events: string[] = [];
     const llm = createSessionLLMClient(ctx, undefined, {
       onCreated: (id) => events.push("+" + id),
       onRemoved: (id) => events.push("-" + id),
-      getReply: () => "ok",
     });
     await llm.chat({ system: "", messages: [{ role: "user", content: "Hi" }] });
     expect(events).toEqual(["+child-pair", "-child-pair"]);
