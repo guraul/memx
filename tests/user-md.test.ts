@@ -7,9 +7,9 @@ import {
   writeUserMd,
   readUserMd,
   backupUserMd,
-} from "../src/user-md";
+} from "../src/core/store/user-md";
 import { existsSync, unlinkSync, mkdirSync, rmSync } from "fs";
-import type { StyleProposal } from "../src/types";
+import type { StyleProposal } from "../src/core/types";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();

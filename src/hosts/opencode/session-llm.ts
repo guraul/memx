@@ -1,4 +1,4 @@
-import type { LLMClient } from "./refinement";
+import type { LLMClient } from "../../core/refine/refinement";
 
 export function createSessionLLMClient(
   client: any,

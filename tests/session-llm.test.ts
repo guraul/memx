@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createSessionLLMClient } from "../src/session-llm";
+import { createSessionLLMClient } from "../src/hosts/opencode/session-llm";
 
 function createMockClient(opts: {
   createdId?: string;

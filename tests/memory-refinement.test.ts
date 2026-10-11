@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { refineMemory } from "../src/memory-refinement";
-import type { LLMClient } from "../src/refinement";
-import type { MemorySignal } from "../src/memory-types";
+import { refineMemory } from "../src/core/refine/memory-refinement";
+import type { LLMClient } from "../src/core/refine/refinement";
+import type { MemorySignal } from "../src/core/memory-types";
 
 function createMockLLM(response: string): LLMClient {
   return { chat: async () => response };

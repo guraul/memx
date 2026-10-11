@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { captureMemorySignals, MemorySignalBuffer } from "../src/memory-capture";
-import type { MemorySignal } from "../src/memory-types";
+import { captureMemorySignals, MemorySignalBuffer } from "../src/core/signals/memory-capture";
+import type { MemorySignal } from "../src/core/memory-types";
 
 describe("captureMemorySignals", () => {
   it("parses valid MEMORY_SIGNAL comment from AI message", () => {

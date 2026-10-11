@@ -1,20 +1,24 @@
-import type { MemorySignal } from "./memory-types";
-import { MemorySignalSchema } from "./memory-types";
+import type { StyleSignal } from "../types";
+import { StyleSignalSchema } from "../types";
 
 const MAX_BUFFER_SIZE = 20;
 
-const MEMORY_SIGNAL_RE = /<!--\s*MEMORY_SIGNAL:\s*(\{.+?\})\s*-->/;
+const STYLE_SIGNAL_RE = /<!--\s*STYLE_SIGNAL:\s*(\{.+?\})\s*-->/;
 
-export function captureMemorySignals(aiMessage: string): MemorySignal[] {
-  const signals: MemorySignal[] = [];
+export function captureSignals(_userMessage: string, aiMessage: string): StyleSignal[] {
+  return parseStyleSignalComments(aiMessage);
+}
+
+function parseStyleSignalComments(aiMessage: string): StyleSignal[] {
+  const signals: StyleSignal[] = [];
   let match: RegExpExecArray | null;
 
-  const re = new RegExp(MEMORY_SIGNAL_RE.source, "g");
+  const re = new RegExp(STYLE_SIGNAL_RE.source, "g");
   while ((match = re.exec(aiMessage)) !== null) {
     try {
       const raw = match[1]!;
       const parsed = JSON.parse(raw);
-      const result = MemorySignalSchema.safeParse(parsed);
+      const result = StyleSignalSchema.safeParse(parsed);
       if (result.success) {
         signals.push(result.data);
       }
@@ -26,10 +30,10 @@ export function captureMemorySignals(aiMessage: string): MemorySignal[] {
   return signals;
 }
 
-export class MemorySignalBuffer {
-  private signals: MemorySignal[] = [];
+export class SignalBuffer {
+  private signals: StyleSignal[] = [];
 
-  push(signal: MemorySignal): void {
+  push(signal: StyleSignal): void {
     if (this.signals.some((s) => s.evidence === signal.evidence)) return;
     if (this.signals.length >= MAX_BUFFER_SIZE) {
       this.signals.shift();
@@ -37,13 +41,13 @@ export class MemorySignalBuffer {
     this.signals.push(signal);
   }
 
-  pushAll(newSignals: MemorySignal[]): void {
+  pushAll(newSignals: StyleSignal[]): void {
     for (const s of newSignals) {
       this.push(s);
     }
   }
 
-  getAll(): MemorySignal[] {
+  getAll(): StyleSignal[] {
     return [...this.signals];
   }
 

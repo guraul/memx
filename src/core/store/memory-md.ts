@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readdirSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import type { MemoryProposal } from "./memory-types";
+import type { MemoryProposal } from "../memory-types";
 export interface MemoryIndexSection {
   slug: string;
   entries: MemoryIndexEntry[];

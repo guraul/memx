@@ -1,8 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { SignalBuffer, captureSignals } from "./signal-capture";
-import { refine } from "./refinement";
-import type { LLMClient } from "./refinement";
+import { SignalBuffer, captureSignals } from "../../core/signals/signal-capture";
+import { refine } from "../../core/refine/refinement";
+import type { LLMClient } from "../../core/refine/refinement";
 import { createSessionLLMClient } from "./session-llm";
 import {
   readUserMd,
@@ -12,14 +12,14 @@ import {
   parseUserMd,
   serializeUserMd,
   backupUserMd,
-} from "./user-md";
-import { loadMemxConfig } from "./config";
-import { shouldRun, markRun } from "./throttle";
-import { MemorySignalBuffer, captureMemorySignals } from "./memory-capture";
-import { refineMemory } from "./memory-refinement";
-import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } from "./memory-md";
-import { deriveSlug } from "./memory-types";
-import { runHealthCheck, autoFix, formatHealthLog } from "./memory-health";
+} from "../../core/store/user-md";
+import { loadMemxConfig } from "../../core/config";
+import { shouldRun, markRun } from "../../core/llm/throttle";
+import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/memory-capture";
+import { refineMemory } from "../../core/refine/memory-refinement";
+import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } from "../../core/store/memory-md";
+import { deriveSlug } from "../../core/memory-types";
+import { runHealthCheck, autoFix, formatHealthLog } from "../../core/health/memory-health";
 
 const buffer = new SignalBuffer();
 const memoryBuffer = new MemorySignalBuffer();

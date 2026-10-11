@@ -1,24 +1,20 @@
-import type { StyleSignal } from "./types";
-import { StyleSignalSchema } from "./types";
+import type { MemorySignal } from "../memory-types";
+import { MemorySignalSchema } from "../memory-types";
 
 const MAX_BUFFER_SIZE = 20;
 
-const STYLE_SIGNAL_RE = /<!--\s*STYLE_SIGNAL:\s*(\{.+?\})\s*-->/;
+const MEMORY_SIGNAL_RE = /<!--\s*MEMORY_SIGNAL:\s*(\{.+?\})\s*-->/;
 
-export function captureSignals(_userMessage: string, aiMessage: string): StyleSignal[] {
-  return parseStyleSignalComments(aiMessage);
-}
-
-function parseStyleSignalComments(aiMessage: string): StyleSignal[] {
-  const signals: StyleSignal[] = [];
+export function captureMemorySignals(aiMessage: string): MemorySignal[] {
+  const signals: MemorySignal[] = [];
   let match: RegExpExecArray | null;
 
-  const re = new RegExp(STYLE_SIGNAL_RE.source, "g");
+  const re = new RegExp(MEMORY_SIGNAL_RE.source, "g");
   while ((match = re.exec(aiMessage)) !== null) {
     try {
       const raw = match[1]!;
       const parsed = JSON.parse(raw);
-      const result = StyleSignalSchema.safeParse(parsed);
+      const result = MemorySignalSchema.safeParse(parsed);
       if (result.success) {
         signals.push(result.data);
       }
@@ -30,10 +26,10 @@ function parseStyleSignalComments(aiMessage: string): StyleSignal[] {
   return signals;
 }
 
-export class SignalBuffer {
-  private signals: StyleSignal[] = [];
+export class MemorySignalBuffer {
+  private signals: MemorySignal[] = [];
 
-  push(signal: StyleSignal): void {
+  push(signal: MemorySignal): void {
     if (this.signals.some((s) => s.evidence === signal.evidence)) return;
     if (this.signals.length >= MAX_BUFFER_SIZE) {
       this.signals.shift();
@@ -41,13 +37,13 @@ export class SignalBuffer {
     this.signals.push(signal);
   }
 
-  pushAll(newSignals: StyleSignal[]): void {
+  pushAll(newSignals: MemorySignal[]): void {
     for (const s of newSignals) {
       this.push(s);
     }
   }
 
-  getAll(): StyleSignal[] {
+  getAll(): MemorySignal[] {
     return [...this.signals];
   }
 

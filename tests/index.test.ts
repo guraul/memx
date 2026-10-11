@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractLastTurn } from "../src/index";
+import { extractLastTurn } from "../src/hosts/opencode/index";
 
 describe("extractLastTurn", () => {
   it("returns null when no user message exists", () => {

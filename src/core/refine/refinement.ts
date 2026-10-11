@@ -1,7 +1,7 @@
-import type { StyleSignal, StyleProposal } from "./types";
-import { StyleProposalArraySchema } from "./types";
+import type { StyleSignal, StyleProposal } from "../types";
+import { StyleProposalArraySchema } from "../types";
 import { REFINEMENT_SYSTEM_PROMPT } from "./prompts";
-import { readUserMd } from "./user-md";
+import { readUserMd } from "../store/user-md";
 
 export interface LLMClient {
   chat(params: {

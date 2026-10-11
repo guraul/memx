@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readdirSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import type { UserMdSection, StyleProposal } from "./types";
-import { CATEGORY_HEADERS, HEADER_TO_CATEGORY, CATEGORIES, type Category } from "./types";
+import type { UserMdSection, StyleProposal } from "../types";
+import { CATEGORY_HEADERS, HEADER_TO_CATEGORY, CATEGORIES, type Category } from "../types";
 
 const ENTRY_REGEX = /^- (~~)?\[(\d{4}-\d{2}-\d{2})\]\s+(.+?)(~~)?(?:\s+\(Deprecated:.*\))?$/;
 

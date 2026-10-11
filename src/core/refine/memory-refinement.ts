@@ -1,7 +1,7 @@
-import type { MemorySignal, MemoryProposal } from "./memory-types";
-import { MemoryProposalArraySchema } from "./memory-types";
+import type { MemorySignal, MemoryProposal } from "../memory-types";
+import { MemoryProposalArraySchema } from "../memory-types";
 import { MEMORY_REFINEMENT_SYSTEM_PROMPT } from "./memory-prompts";
-import { readMemoryIndex } from "./memory-md";
+import { readMemoryIndex } from "../store/memory-md";
 import type { LLMClient } from "./refinement";
 
 function buildUserMessage(signals: MemorySignal[], existingIndex: string): string {

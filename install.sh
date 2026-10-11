@@ -34,7 +34,7 @@ echo ""
 echo "[3/5] Creating plugin entry..."
 mkdir -p "$OCP_CONFIG_DIR/plugins"
 cat > "$OCP_CONFIG_DIR/plugins/memx.ts" <<EOF
-export { MemxPlugin } from "$REPO_PATH/src/index";
+export { MemxPlugin } from "$REPO_PATH/src/hosts/opencode/index";
 EOF
 echo "  -> $OCP_CONFIG_DIR/plugins/memx.ts"
 echo ""
