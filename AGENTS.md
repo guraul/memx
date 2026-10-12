@@ -30,8 +30,8 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 - **Concurrency guard**: `runRefinement` + `runMemoryRefinement` share mutex (`refinementInFlight`), `markRun()` fires BEFORE the LLM call - both prevent child-session storms / duplicate writes when events overlap. Throttle is **in-memory only** (`lastRunAt`), so restarting the host resets it
 - **Child-session guard**: `childSessions` map (sessionID → system) for the `context` hook, PLUS `childSessionIds` set that lives until the child's `session.deleted` event is consumed - see the self-excitation trap in Quirks. Both are populated in `onCreated`
 - **Diagnostics**: v2 has no `client.app.log` - structured diagnostics go to `ctx.storage` under `"diag:" + deriveSlug(ctx.location.directory)`. **The tool output is not the truth** (`memx_status` prints fixed fields only); read the kv row directly: `sqlite3 ~/.local/share/opencode/opencode.db "SELECT value FROM kv WHERE key LIKE 'plugin:%'"` (namespace = `plugin:` + "memx" as 4 hex digits per char)
-- **Loading mechanism**: `~/.config/opencode/opencode.json` 的 `instructions` 数组让宿主在会话启动时自动把 `USER.md` + `MEMORY.md` 注入主 AI 的 system prompt
-- **AGENTS.md prompts**: `~/.config/opencode/AGENTS.md` 含主 AI 提示词（User Style Signal Marking + Project Memory Signal Marking + Project Memory Loading）
+- **Loading mechanism**: **插件自己在 `context` hook 里追加**三块 SystemPart 到 `event.system`——`~/.opencode/memx-protocol.md`（协议）+ `USER.md`（画像）+ `MEMORY.md`（索引），每块硬上限 200 行 / 25KB，截断时追加可见提示行。**⚠️ `opencode.json` 的 `instructions` 在 v2.0.26 是死字段**（宿主只从 AGENTS.md 组装，全仓无消费方），不要指望它注入。注入范围由 `memx.config.json` 的 `inject.{enabled,includeAgents,excludeAgents}` 控制，**代码里不硬编码任何 agent 名**
+- **AGENTS.md prompts**: `~/.config/opencode/AGENTS.md` 是宿主唯一验证过的指令通道（memx **不写**它，见 Quirks 的所有权缺口）
 
 ## Architecture
 
@@ -79,6 +79,10 @@ tests/                         - 12 文件 / 137 测试（基线，低于即回�
 - **`ctx.storage` 的键是全局的**：所有 memx 实例（任何进程、任何目录）写同一行，后写者覆盖先写者，`lastError`/`failures` 会被抹掉。键已按目录隔离成 `"diag:" + deriveSlug(directory)`（首次出现时用旧全局值做一次性种子迁移）。注意**同目录多实例仍会打架**（`opencode run --server` 客户端也会实例化插件）——排查时优先看 serve 日志而不是 kv 行。
 - **子会话自激循环**（2026-10-12 实测，10 秒生成 106 个子会话）：`session-llm` 的 `finally` 先 `remove` 再 `onRemoved`，`childSessions` 在 `session.deleted` 事件到达**之前**就被清空了；事件处理器只看 `childSessions` 就会把"自己删自己的子会话"误判成用户删会话，而那一支是 `force=true` → 再生子会话 → 无限循环，且绕过节流。`childSessionIds` 集合就是为此存在：它活到 deleted 事件被消费掉。
 - **写盘必须保留非受管内容**：USER.md / MEMORY.md 的 parse 只投影受管集合（分类小节 + `- [日期]` 条目），其余（协议块、用户自写标题、散文、未知 `##` 小节）现在由 `preamble` / `section.extras` 原样带回。曾经因为直接丢弃，首次成功提炼就把 USER.md 的协议块冲掉了——协议块没了，AI 就不会再发 STYLE_SIGNAL，memx 从第二轮起静默失效。
+- **`context` hook 是全插件最要害的一段**：每个 step 都跑在宿主组装管线上，写坏 `event.system` 的表现是"模型静默变笨"而不是报错。两条分支**顺序固定**：子会话（提炼）先判、**整体替换** system + temperature 0.2、注入绝不参与；其余会话**只 append 绝不替换**——hook 触发时 `event.system` 已含 `agent.system` + AGENTS.md 合并正文（`model-request.ts:110-116`），替换会抹掉宿主内容。hook 内不 await、任何异常退化为"不注入"，绝不半途写坏。
+- **注入不伤缓存**：宿主 `cache:"auto"` 的断点打在"最后一个 distinct system part"，我们追加在尾部 → 注入内容**落在缓存前缀之内**。失效只发生在 USER.md/MEMORY.md 被改写时（节流 10 分钟 + 仅有信号时写，一个会话通常 0-1 次）。免费档走的是 opencode 网关，不在 `RESPECTS_INLINE_HINTS` 白名单（`cache-policy.ts:40-52`），靠提供商隐式前缀缓存，逻辑同理。
+- **注入频率**：每个 step 一次；文件读走 `stat(mtimeMs+size)` 缓存，诊断写盘节流 5s。提炼（LLM 调用 + 写盘）每回合最多一次，10 分钟节流。
+- **⚠️ 所有权缺口（未修）**：协议只约束"不要重复上报已记录的事实"，**没约束"不要改 AGENTS.md"**。2026-10-12 e2e 实测：模型把测试对话里的偏好当成用户真实偏好，自行写进全局 `~/.config/opencode/AGENTS.md`（10→26 行，已人工回滚）。而 AGENTS.md 是每会话必注入的竞争通道——在补上该约束前，system 前缀存在被模型自行改掉的风险。参照：Aider 把 conventions 文件标只读，就是为了不让模型改自己的记忆。
 - **Src changes require an OpenCode restart** - plugins load once at startup; touching the entry file does NOT hot-reload. Config file changes apply immediately.
 - **`exactOptionalPropertyTypes`** in tsconfig: optional fields like `target_line?: number` cannot be explicitly set to `undefined`. Use `target_line != null` checks instead of loose equality. Use `.nullish()` in Zod for nullable optional fields.
 - **`noUncheckedIndexedAccess`**: array access returns `T | undefined`. Always use `[0] ?? fallback`.
