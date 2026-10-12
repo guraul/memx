@@ -31,7 +31,7 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
 | **主 AI 发 HTML 注释标记** | 主 AI 拿完整对话上下文，识别偏好的能力远超正则。用户看不到注释，插件解析。 |
 | **子 AI 批量提炼** | 去重、冲突检测、schema 校验由 Stage 2 子会话 LLM 完成，主 AI 只负责"识别信号" |
 | **自动写入 + 备份** | 去掉了人工确认环节，每次写入前自动备份 + 保留最近 5 版 |
-| **`instructions` 加载** | `~/.config/opencode/opencode.json` 的 `instructions` 数组让宿主在会话启动时自动把 `USER.md` + `MEMORY.md` 注入主 AI 的 system prompt |
+| **`instructions` 加载** | `~/.config/opencode/opencode.json` 的 `instructions` 数组让宿主在会话启动时自动把 `USER.md` + `MEMORY.md` + `memx-protocol.md` 注入主 AI 的 system prompt：前两个是累积数据，第三个是"怎么发信号"的协议 |
 | **按项目隔离** | Track 2 的 `.mem/` 目录按工作目录 slug 隔离（`/root/project/foo` -> `root-project-foo`），跨项目记忆互不污染 |
 
 ## 双轨管道
@@ -67,7 +67,9 @@ cd memx
 bash install.sh
 ```
 
-脚本会自动克隆到 `~/.config/memx`，安装 npm 依赖，创建插件入口，声明依赖，配置 `opencode.json` 的 `instructions`。完成后重启 OpenCode，`/status` 验证即可。
+脚本会自动克隆到 `~/.config/memx`，安装 npm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并配置 `opencode.json` 的 `instructions`。完成后重启 OpenCode，`/status` 验证即可。
+
+> **信号协议从 `USER.md` 搬到了独立文件**。协议正文现在只存在于 `src/core/protocol-template.ts`，由 `scripts/sync-protocol.ts` 落盘并经 `instructions` 注入。**不要**再把协议块手写进 `~/.opencode/USER.md`——那是 memx 每次提炼都会重写的数据文件，协议放里面会被抹掉。
 
 ### 手动安装
 
@@ -91,16 +93,27 @@ bash install.sh
    { "dependencies": { "zod": "^4.4.3", "@opencode-ai/plugin": "^1.18.11" } }
    ```
 
-4. 在 `~/.config/opencode/opencode.json` 加 `instructions` 字段，让 USER.md + MEMORY.md 自动注入主 AI 的 system prompt：
+4. 写出信号协议文件（协议正文的唯一真源是 `src/core/protocol-template.ts`，不要手改产物）：
+   ```bash
+   node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # 幂等，内容一致不重写
+   ```
+
+5. 在 `~/.config/opencode/opencode.json` 加 `instructions` 字段，让累积数据（USER.md + MEMORY.md）与信号协议一起注入主 AI 的 system prompt：
    ```json
    {
      "$schema": "https://opencode.ai/config.json",
-     "instructions": ["~/.opencode/USER.md", "~/.opencode/MEMORY.md"]
+     "instructions": [
+       "~/.opencode/USER.md",
+       "~/.opencode/MEMORY.md",
+       "~/.opencode/memx-protocol.md"
+     ]
    }
    ```
-   如果已有其他配置，合并 `instructions` 字段即可。
+   如果已有其他配置，合并 `instructions` 字段即可（`install.sh` 会幂等补齐缺失的条目，不动其它键）。
 
-5. 重启 OpenCode，`/status` 应显示 `memx`。
+6. 确认你的回复渲染层会剥离 HTML 注释——否则用户会直接看到 `<!-- STYLE_SIGNAL: ... -->` 原文。
+
+7. 重启 OpenCode，`/status` 应显示 `memx`。
 
 ### 配置
 

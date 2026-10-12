@@ -31,7 +31,7 @@ Both tracks share the same trigger pipeline (`session.idle` / `reflect`) but hav
 | **Main AI emits HTML comment markers** | Main AI has full conversation context, far better at identifying preferences than regex. Users don't see comments; plugin parses them. |
 | **Sub-AI batch refinement** | Dedup, conflict detection, schema validation done by Stage 2 sub-session LLM; main AI only identifies signals |
 | **Auto-write + backup** | No human confirmation; auto-backup before every write, keeping latest 5 versions |
-| **`instructions` loading** | Host auto-injects `USER.md` + `MEMORY.md` into main AI's system prompt at session start via `~/.config/opencode/opencode.json` |
+| **`instructions` loading** | Host auto-injects `USER.md` + `MEMORY.md` + `memx-protocol.md` into main AI's system prompt at session start via `~/.config/opencode/opencode.json`. First two = accumulated data, third = the protocol that tells the AI how to emit signals |
 | **Project isolation** | Track 2's `.mem/` dir is isolated by working directory slug (`/root/project/foo` -> `root-project-foo`); cross-project memories don't pollute |
 
 ## Dual-Track Pipeline
@@ -67,7 +67,9 @@ cd memx
 bash install.sh
 ```
 
-This clones the repo to `~/.config/memx`, installs npm dependencies, creates the plugin entry, declares dependencies, and configures `instructions` in `opencode.json`. Then just restart OpenCode and `/status` to verify.
+This clones the repo to `~/.config/memx`, installs npm dependencies, creates the plugin entry, declares dependencies, writes the signal protocol file `~/.opencode/memx-protocol.md`, and configures `instructions` in `opencode.json`. Then just restart OpenCode and `/status` to verify.
+
+> **The signal protocol moved out of `USER.md` into a standalone file.** Its text now lives only in `src/core/protocol-template.ts`, is written by `scripts/sync-protocol.ts`, and is injected via `instructions`. Do **not** hand-write the protocol block into `~/.opencode/USER.md` — that file is memx's data file and gets rewritten on every refinement, which silently wipes the protocol (it did, once).
 
 ### Manual Install
 
@@ -91,16 +93,27 @@ If you prefer to do it step by step:
    { "dependencies": { "zod": "^4.4.3", "@opencode-ai/plugin": "^1.18.11" } }
    ```
 
-4. Add `instructions` field to `~/.config/opencode/opencode.json` to auto-inject USER.md + MEMORY.md into main AI's system prompt:
+4. Write the signal protocol file (single source of truth is `src/core/protocol-template.ts`; never hand-edit the output):
+   ```bash
+   node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # idempotent: no rewrite when identical
+   ```
+
+5. Add an `instructions` field to `~/.config/opencode/opencode.json` so both the accumulated data (USER.md + MEMORY.md) and the signal protocol are injected into the main AI's system prompt:
    ```json
    {
      "$schema": "https://opencode.ai/config.json",
-     "instructions": ["~/.opencode/USER.md", "~/.opencode/MEMORY.md"]
+     "instructions": [
+       "~/.opencode/USER.md",
+       "~/.opencode/MEMORY.md",
+       "~/.opencode/memx-protocol.md"
+     ]
    }
    ```
-   If you already have other config, just merge the `instructions` field.
+   If you already have other config, just merge the `instructions` field (`install.sh` adds any missing entries idempotently and leaves every other key alone).
 
-5. Restart OpenCode; `/status` should show `memx`.
+6. Make sure your reply rendering strips HTML comments — otherwise users see raw `<!-- STYLE_SIGNAL: ... -->` text.
+
+7. Restart OpenCode; `/status` should show `memx`.
 
 ### Configuration
 
