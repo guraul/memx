@@ -3,9 +3,9 @@ set -euo pipefail
 
 # memx installer
 # Usage: bash install.sh [repo-path]
-# Default repo-path: ~/.config/memx
+# Default repo-path: ~/workspace/memx (same as the development checkout, so there is ONE path)
 
-REPO_PATH="${1:-$HOME/.config/memx}"
+REPO_PATH="${1:-$HOME/workspace/memx}"
 OCP_CONFIG_DIR="$HOME/.config/opencode"
 OCP_DATA_DIR="$HOME/.opencode"
 
@@ -15,11 +15,14 @@ echo "Config dir: $OCP_CONFIG_DIR"
 echo ""
 
 # Step 1: Clone repo
+# 父目录必须先建出来：旧的默认值落在 ~/.config 下，那个目录机器上基本都存在，
+# 所以这个缺口从来没暴露过；新默认值 ~/workspace/memx 的母目录不一定存在。
 if [ -d "$REPO_PATH/.git" ]; then
   echo "[1/6] Repo exists, pulling latest..."
   git -C "$REPO_PATH" pull --ff-only
 else
   echo "[1/6] Cloning repo..."
+  mkdir -p "$(dirname "$REPO_PATH")"
   git clone https://github.com/guraul/memx.git "$REPO_PATH"
 fi
 echo ""
@@ -40,19 +43,100 @@ echo "  -> $OCP_CONFIG_DIR/plugins/memx.ts"
 echo ""
 
 # Step 4: Ensure package.json has dependencies
+# 依赖名 v1 → v2 已经改名：v1 的 "@opencode-ai/plugin" 本仓库代码不再 import，
+# 现在要 "@opencode/plugin" + "@opencode/client"。写错名字的后果是插件解析不到
+# @opencode/plugin、加载失败。所以新建时直接写 v2，已存在的则自愈：
+# 检测到已知 v1 键就改写成 v2 键，其余依赖一律原样保留（不改版本、不排序、不删）。
 echo "[4/6] Ensuring dependencies declared..."
 if [ ! -f "$OCP_CONFIG_DIR/package.json" ]; then
   cat > "$OCP_CONFIG_DIR/package.json" <<EOF
 {
   "dependencies": {
     "zod": "^4.4.3",
-    "@opencode-ai/plugin": "^1.18.11"
+    "@opencode/plugin": "^2.0.26",
+    "@opencode/client": "^2.0.26"
   }
 }
 EOF
   echo "  -> Created $OCP_CONFIG_DIR/package.json"
 else
-  echo "  -> $OCP_CONFIG_DIR/package.json already exists, skip (ensure zod + @opencode-ai/plugin are listed)"
+  echo "  -> $OCP_CONFIG_DIR/package.json exists, checking dependency names..."
+  if ! command -v node >/dev/null 2>&1; then
+    echo "  !! node not found on PATH; cannot verify dependencies by hand:"
+    echo "     ensure @opencode/plugin + @opencode/client (v2), not @opencode-ai/plugin (v1)"
+  else
+    node - "$OCP_CONFIG_DIR/package.json" <<'NODE'
+const fs = require("fs");
+const file = process.argv[2];
+
+const V1_TO_V2 = { "@opencode-ai/plugin": "@opencode/plugin" };
+const WANTED = {
+  "zod": "^4.4.3",
+  "@opencode/plugin": "^2.0.26",
+  "@opencode/client": "^2.0.26"
+};
+
+let pkg;
+try {
+  pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch (err) {
+  console.error("  !! " + file + " unreadable or not valid JSON - fix by hand, nothing written (" + err.message + ")");
+  process.exit(1);
+}
+if (pkg === null || typeof pkg !== "object" || Array.isArray(pkg)) {
+  console.error("  !! " + file + " is not a JSON object - fix by hand, nothing written");
+  process.exit(1);
+}
+if (pkg.dependencies === undefined || pkg.dependencies === null) {
+  pkg.dependencies = {};
+} else if (typeof pkg.dependencies !== "object" || Array.isArray(pkg.dependencies)) {
+  console.error('  !! "dependencies" exists but is not an object - fix by hand, nothing written');
+  process.exit(1);
+}
+
+const changes = [];
+const fixed = {};
+
+for (const [name, spec] of Object.entries(pkg.dependencies)) {
+  const target = V1_TO_V2[name];
+  if (target === undefined) {
+    if (Object.prototype.hasOwnProperty.call(fixed, name)) {
+      changes.push('dropped duplicate "' + name + '" (kept "' + fixed[name] + '")');
+      continue;
+    }
+    fixed[name] = spec;
+    continue;
+  }
+  if (Object.prototype.hasOwnProperty.call(fixed, target)) {
+    changes.push('dropped stale v1 name "' + name + '" ("' + target + '" already present as "' + fixed[target] + '")');
+    continue;
+  }
+  if (spec === WANTED[target]) {
+    fixed[target] = spec;
+    changes.push('renamed "' + name + '" -> "' + target + '" (kept "' + spec + '")');
+  } else {
+    fixed[target] = WANTED[target];
+    changes.push('upgraded "' + name + '@' + spec + '" -> "' + target + '@' + WANTED[target] + '"');
+  }
+}
+
+for (const [name, spec] of Object.entries(WANTED)) {
+  if (!Object.prototype.hasOwnProperty.call(fixed, name)) {
+    fixed[name] = spec;
+    changes.push('added "' + name + '": "' + spec + '"');
+  }
+}
+
+pkg.dependencies = fixed;
+
+if (changes.length === 0) {
+  console.log("  -> dependencies already v2, nothing to change");
+} else {
+  fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
+  for (const change of changes) console.log("  -> " + change);
+}
+NODE
+  fi
 fi
 echo ""
 
