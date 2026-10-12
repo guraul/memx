@@ -111,6 +111,12 @@ describe("protocol template — 产物路径与版本", () => {
     expect(PROTOCOL_TEMPLATE).toContain("do not edit by hand");
   });
 
+  it("规则 9「不得自己写记忆文件」存在（#82 实测的所有权缺口：模型曾自行改写全局 AGENTS.md）", () => {
+    expect(PROTOCOL_TEMPLATE).toContain("Never write memory into any file yourself");
+    expect(PROTOCOL_TEMPLATE).toContain("AGENTS.md");
+    expect(PROTOCOL_TEMPLATE).toContain("memory_write");
+  });
+
   it("声明自己是机器读的、不得作为可见文本复述", () => {
     expect(PROTOCOL_TEMPLATE).toContain("machine-read, never user-facing");
     expect(PROTOCOL_TEMPLATE).toMatch(/empty or fenced-only reply is a failure/);

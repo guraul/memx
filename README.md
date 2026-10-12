@@ -230,7 +230,21 @@ Rewriting auth middleware for compliance.
 ## Commands
 
 ### `reflect`
-Manually triggers style + project memory refinement (use when `session.idle` doesn't fire).
+Manually triggers style + project memory refinement (fallback when the event trigger is throttled or didn't fire).
+
+### `forget`
+`forget(keyword)` moves matching `.mem/*.md` files to `.trash/` and removes their index entries.
+
+### `memory_write`
+Explicitly record one project-scoped memory (this is what a companion agent calls when the user says
+"remember this"). Arguments: `text` (required, ≤500 chars), `type` (`user|feedback|project|reference`,
+default `project`), `name`, `description`, `why`, `how_to_apply`, `evidence`. Same type + name is treated
+as a revision (update), not a duplicate. It writes through the same single-pass + file-lock path as the
+refinement pipeline, so the two can never disagree about the file format.
+
+### `memx_status`
+Prints structured diagnostics (capture/refinement/written counters, cursor state, invalid-output streak,
+location warnings, health, alerts, explicit writes). The stored kv row is the real truth — see AGENTS.md.
 
 ## Troubleshooting
 

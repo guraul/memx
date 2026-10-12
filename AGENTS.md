@@ -16,7 +16,7 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 ## Key facts
 
 - **Entry point**: `src/hosts/opencode/index.ts` default-exports the V2 `Plugin`. The host-side entry `~/.config/opencode/plugins/memx.ts` re-exports ONLY `default` from it - never widen that re-export or add named exports at the entry, extra exported functions get invoked as plugins and crash OpenCode (`plugin config hook failed`)
-- **Hooks**: `event` (订阅 `session.execution.succeeded` + `session.deleted`) + `session.hook("context")` (子会话 system 替换) + `tool.transform` (`reflect` / `forget` / `memx_status`) + `dispose`
+- **Hooks**: `event` (订阅 `session.execution.succeeded` + `session.deleted`) + `session.hook("context")` (子会话 system 替换/注入) + `tool.transform` (`reflect` / `forget` / `memx_status` / `memory_write`) + `dispose`
 - **Install**: `~/.config/opencode/plugins/memx.ts` re-exports `default` from `src/hosts/opencode/index`
 - **Model override**: `~/.opencode/memx.config.json` 的 `refinementModel` (`provider/model` 格式), 运行时每次读取 - 改配置**无需重启**. Default: `opencode/mimo-v2.6-flash-free` (内置免费模型, 无需 key; deepseek 官方 key 无效, 不要用)
 - **LLM calls**: 子会话 `session.create({title, model: ModelRef})` -> `session.prompt({sessionID, text})` -> `session.wait` -> `session.context` 取 assistant 全文 -> `session.remove` (finally), 见 `src/hosts/opencode/session-llm.ts`. 提炼 system 提示词靠 `context` hook 的 `event.system` 替换注入
@@ -32,6 +32,7 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 - **提炼三态（P0-2）**: `refine()` / `refineMemory()` 返回 `RefineOutcome`（`refine/refine-outcome.ts`）：`proposals` 落盘；`adjudicated-empty` **清缓冲结案**（合法空数组 ≠ 坏输出，否则同批信号每轮重烧 LLM）；`invalid-output` 保留缓冲 + `diag.invalidStreak` 计数，连续 3 次才丢弃并记 alert
 - **写盘（P0-3 / P0-4）**: 整批提案走 `applyProposals` / `applyMemoryProposals` **单遍应用**（parse 一次 → 内存改完 → serialize 一次）；read-modify-write 包 `withFileLock(userMdLockPath()|memoryIndexLockPath(), …)`，**锁内重读文件**再应用（消掉快照读→写盘窗口里的丢更新）。update/deprecate 定位顺序：`target_text` 精确 → 归一（去空白/markdown 装饰）→ 唯一包含 → `target_line` 兜底；降级与未命中都写 `diag.lastWarnings`，绝不静默改错条目
 - **健康日志（P0-5）**: `runHealthMaintenance()` 返回 `{index, logs, report}`，logs 只进 `diag.health` / alerts；**不再把 `formatHealthLog()` 追加进 MEMORY.md**（那些 HTML 注释会被下一次序列化吃掉，是历史 bug）
+- **显式写入（出口①，issue #82 §B）**: `memory_write` 工具 → `core/memory-write.ts` 的 `writeProjectMemory(slug, input)` → 与后台提炼**同一条写路**（`applyMemoryProposals` 单遍 + `withFileLock` 锁内重读索引）。写盘逻辑放 core 的理由 = 多宿主（opencode 今天、DSH 未来）只有一份格式/锁实现，宿主壳只做参数映射与回执文案。同名同类型 = 修订（update）；纯中文名走确定性哈希文件名（否则每次写都新建文件，更新语义失效）
 - **Child-session guard**: `childSessions` map (sessionID → system) for the `context` hook, PLUS `childSessionIds` set that lives until the child's `session.deleted` event is consumed - see the self-excitation trap in Quirks. Both are populated in `onCreated`
 - **Diagnostics**: v2 has no `client.app.log` - structured diagnostics go to `ctx.storage` under `"diag:" + deriveSlug(ctx.location.directory)`. **The tool output is not the truth** (`memx_status` prints fixed fields only); read the kv row directly: `sqlite3 ~/.local/share/opencode/opencode.db "SELECT value FROM kv WHERE key LIKE 'plugin:%'"` (namespace = `plugin:` + "memx" as 4 hex digits per char)
 - **Loading mechanism**: **插件自己在 `context` hook 里追加**三块 SystemPart 到 `event.system`——`~/.opencode/memx-protocol.md`（协议）+ `USER.md`（画像）+ `MEMORY.md`（索引），每块硬上限 200 行 / 25KB，截断时追加可见提示行。**⚠️ `opencode.json` 的 `instructions` 在 v2.0.26 是死字段**（宿主只从 AGENTS.md 组装，全仓无消费方），不要指望它注入。注入范围由 `memx.config.json` 的 `inject.{enabled,includeAgents,excludeAgents}` 控制，**代码里不硬编码任何 agent 名**
@@ -62,6 +63,7 @@ src/
     store/memory-md.ts         - MEMORY.md index + .mem/*.md + backup（同一保留契约；applyMemoryProposals 单遍）
     store/markdown-lines.ts    - 两个序列化器共用的空行边界工具（保幂等）
     store/lock.ts              - P0-4 文件锁（锁文件 + mtime TTL 夺锁；只包 read-modify-write，绝不包 LLM）
+    memory-write.ts            - 出口① 显式写入（memory_write 工具）→ 与提炼共用单遍应用 + 锁
     health/memory-health.ts    - Index health check (dead links, orphan files) + auto-fix with guardrails
     llm/throttle.ts            - 内存节流（宿主重启即重置）
   hosts/opencode/
@@ -69,7 +71,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor（阶段 4）
-tests/                         - 18 文件 / 266 测试（基线，低于即回归）
+tests/                         - 19 文件 / 277 测试（基线，低于即回归）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -93,7 +95,7 @@ tests/                         - 18 文件 / 266 测试（基线，低于即回�
 - **`context` hook 是全插件最要害的一段**：每个 step 都跑在宿主组装管线上，写坏 `event.system` 的表现是"模型静默变笨"而不是报错。两条分支**顺序固定**：子会话（提炼）先判、**整体替换** system + temperature 0.2、注入绝不参与；其余会话**只 append 绝不替换**——hook 触发时 `event.system` 已含 `agent.system` + AGENTS.md 合并正文（`model-request.ts:110-116`），替换会抹掉宿主内容。hook 内不 await、任何异常退化为"不注入"，绝不半途写坏。
 - **注入不伤缓存**：宿主 `cache:"auto"` 的断点打在"最后一个 distinct system part"，我们追加在尾部 → 注入内容**落在缓存前缀之内**。失效只发生在 USER.md/MEMORY.md 被改写时（节流 10 分钟 + 仅有信号时写，一个会话通常 0-1 次）。免费档走的是 opencode 网关，不在 `RESPECTS_INLINE_HINTS` 白名单（`cache-policy.ts:40-52`），靠提供商隐式前缀缓存，逻辑同理。
 - **注入频率**：每个 step 一次；文件读走 `stat(mtimeMs+size)` 缓存，诊断写盘节流 5s。提炼（LLM 调用 + 写盘）每回合最多一次，10 分钟节流。
-- **⚠️ 所有权缺口（未修）**：协议只约束"不要重复上报已记录的事实"，**没约束"不要改 AGENTS.md"**。2026-10-12 e2e 实测：模型把测试对话里的偏好当成用户真实偏好，自行写进全局 `~/.config/opencode/AGENTS.md`（10→26 行，已人工回滚）。而 AGENTS.md 是每会话必注入的竞争通道——在补上该约束前，system 前缀存在被模型自行改掉的风险。参照：Aider 把 conventions 文件标只读，就是为了不让模型改自己的记忆。
+- **⚠️ 所有权缺口（2026-10-12 已补软约束，仍未硬防）**：2026-10-12 e2e 实测——模型把测试对话里的偏好当成用户真实偏好，自行写进全局 `~/.config/opencode/AGENTS.md`（10→26 行，已人工回滚）。协议 v1.1.0 起加了规则 9（"Never write memory into any file yourself"，点名 AGENTS.md / opencode.json / README / 记忆文件本身，说明后果），但**这是系统提示词层面的软约束，不是文件级权限**——模型仍可能违例。真正的硬防要等宿主侧只读/白名单能力（真护栏恢复那条 backlog）或把 conventions 文件标只读。参照：Aider 把 conventions 文件标只读，就是为了不让模型改自己的记忆。
 - **Src changes require an OpenCode restart** - plugins load once at startup; touching the entry file does NOT hot-reload. Config file changes apply immediately.
 - **`exactOptionalPropertyTypes`** in tsconfig: optional fields like `target_line?: number` cannot be explicitly set to `undefined`. Use `target_line != null` checks instead of loose equality. Use `.nullish()` in Zod for nullable optional fields.
 - **`noUncheckedIndexedAccess`**: array access returns `T | undefined`. Always use `[0] ?? fallback`.
@@ -107,7 +109,7 @@ tests/                         - 18 文件 / 266 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：18 文件 / 266 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：19 文件 / 277 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files

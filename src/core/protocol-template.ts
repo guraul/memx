@@ -17,7 +17,7 @@ import { CATEGORIES, CONFIDENCES, SOURCES } from "./types.ts";
 import { MEMORY_SOURCES, MEMORY_TYPES } from "./memory-types.ts";
 
 /** 协议版本。写进文件末尾，改动协议文本时递增——install.sh 用它判断是否需要刷新。 */
-export const PROTOCOL_VERSION = "1.0.0";
+export const PROTOCOL_VERSION = "1.1.0";
 
 /** 落盘文件名（相对 $OCP_DATA_DIR，即 ~/.opencode/）。 */
 export const PROTOCOL_FILE_NAME = "memx-protocol.md";
@@ -59,6 +59,11 @@ comment is captured, refined and written to long-term memory. You never manage i
 7. Never signal secrets, credentials, tokens or PII.
 8. Respect the length caps below. An over-long value fails validation and the signal is
    silently dropped.
+9. **Never write memory into any file yourself.** Not \`AGENTS.md\`, not \`opencode.json\`, not
+   \`README\`, not the memory files. Memory reaches disk only through the capture pipeline
+   (these comments) or the explicit \`memory_write\` tool. Editing \`AGENTS.md\` to "remember"
+   something is a real observed failure mode: it corrupts every later session's instructions
+   and is invisible to the user.
 
 ## Track 1 · STYLE_SIGNAL — durable user preferences (cross-project)
 

@@ -25,7 +25,8 @@ import { shouldRun, markRun } from "../../core/llm/throttle";
 import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/memory-capture";
 import { refineMemory } from "../../core/refine/memory-refinement";
 import { readMemoryIndex, writeMemoryIndex, applyMemoryProposals, forgetMemory } from "../../core/store/memory-md";
-import { deriveSlug } from "../../core/memory-types";
+import { deriveSlug, MEMORY_TYPES } from "../../core/memory-types";
+import { writeProjectMemory } from "../../core/memory-write";
 import { runHealthMaintenance, formatHealthLog } from "../../core/health/memory-health";
 import type { AutoFixLog } from "../../core/health/memory-health";
 import { INVALID_OUTPUT_STREAK_LIMIT } from "../../core/refine/refine-outcome";
@@ -88,6 +89,16 @@ export default Plugin.define({
       invalidStreak?: { style: number; memory: number };
       /** P0-3：最近一批提案的定位告警（anchor 降级/未命中） */
       lastWarnings?: string[];
+      /** 出口①：显式写入（memory_write 工具）的次数与最近一次事实 */
+      toolWrites?: number;
+      lastWrite?: {
+        name: string;
+        type: string;
+        filename: string;
+        action: "append" | "update";
+        sessionID: string;
+        at: string;
+      };
       /** P0-5：健康检查结果（日志不再写进 MEMORY.md，改落这里） */
       health?: { fixes: number; escalated: number; lastLog: string; updatedAt: string };
       /** 轻量报警账本（阶段 4 的 core/alerts 接管前的落点，最多 20 条） */
@@ -644,6 +655,72 @@ export default Plugin.define({
       });
 
       editor.add({
+        name: "memory_write",
+        description:
+          "记住一条项目记忆（用户说\"这个记一下 / 记住 / 别忘了\"时调用）。写进 canonical 记忆库 ~/.opencode/projects/<slug>/.mem/ 并更新 MEMORY.md 索引；同名同类型视为修订（更新）。",
+        input: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "要记住的事实本身（陈述句，≤500 字），不要写成\"用户说……\"" },
+            type: {
+              type: "string",
+              enum: [...MEMORY_TYPES],
+              description: "记忆类型：project（进行中的工作/约束）/ feedback（协作规则）/ reference（外部指针）/ user（项目内用户画像）；缺省 project",
+            },
+            name: { type: "string", description: "短标识（≤60 字），同名同类型会覆盖更新；缺省从 text 截取" },
+            description: { type: "string", description: "\"何时该读这条\"的钩子，含可匹配关键词（≤150 字）；缺省取 text" },
+            why: { type: "string", description: "为什么记（feedback/project 建议给，≤200 字）" },
+            how_to_apply: { type: "string", description: "以后怎么用（feedback/project 建议给，≤200 字）" },
+            evidence: { type: "string", description: "用户原话（≤200 字）" },
+          },
+          required: ["text"],
+        },
+        async execute(args, toolCtx) {
+          const input = args as {
+            text?: string;
+            type?: string;
+            name?: string;
+            description?: string;
+            why?: string;
+            how_to_apply?: string;
+            evidence?: string;
+          };
+          try {
+            const result = await writeProjectMemory(currentSlug, {
+              text: input.text ?? "",
+              ...(input.type !== undefined ? { type: input.type } : {}),
+              ...(input.name !== undefined ? { name: input.name } : {}),
+              ...(input.description !== undefined ? { description: input.description } : {}),
+              ...(input.why !== undefined ? { why: input.why } : {}),
+              ...(input.how_to_apply !== undefined ? { how_to_apply: input.how_to_apply } : {}),
+              ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
+            });
+            if (!result.ok) {
+              return { content: `[memx] memory_write 失败：${result.error}` };
+            }
+            diag.toolWrites = (diag.toolWrites ?? 0) + 1;
+            diag.written += 1;
+            diag.lastWrite = {
+              name: result.name,
+              type: result.type,
+              filename: result.filename,
+              action: result.action,
+              sessionID: toolCtx.sessionID,
+              at: new Date().toISOString(),
+            };
+            diag.updatedAt = new Date().toISOString();
+            void persistDiag();
+            const warnNote = result.warnings.length > 0 ? `\n   ⚠️ ${result.warnings.join("；")}` : "";
+            return {
+              content: `✅ 已记住（${result.type} · ${result.action === "append" ? "新增" : "更新"}）：${result.name}\n   → ${result.filePath}${warnNote}`,
+            };
+          } catch (err) {
+            return { content: `[memx] memory_write 失败：${String(err)}` };
+          }
+        },
+      });
+
+      editor.add({
         name: "forget",
         description:
           "Forget project memories matching a keyword. Moves matching .mem/*.md files to .trash and removes their index entries. Use when user says 'forget/忘记/记住删除 X'.",
@@ -719,6 +796,9 @@ export default Plugin.define({
                   : "无"
               }`,
               `alerts: ${d.alerts && d.alerts.length > 0 ? d.alerts.map((a) => `${a.level}/${a.code}`).join(" ") : "无"}`,
+              `toolWrites: ${d.toolWrites ?? 0}${
+                d.lastWrite ? ` last=${d.lastWrite.action} ${d.lastWrite.type}/${d.lastWrite.name} @${d.lastWrite.at}` : ""
+              }`,
             );
             return { content: lines.join("\n") };
           } catch (err) {
