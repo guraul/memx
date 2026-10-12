@@ -26,44 +26,9 @@ import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } 
 import { deriveSlug } from "../../core/memory-types";
 import { runHealthCheck, autoFix, formatHealthLog } from "../../core/health/memory-health";
 
-/** v2 会话消息形状（session.context 返回：user 扁平 {text}；assistant {content:[{type,text}]}） */
-export interface V2Message {
-  type: string;
-  text?: string;
-  content?: Array<{ type: string; text?: string }>;
-}
-
-export interface LastTurn {
-  user: string;
-  assistant: string;
-}
-
-/** v2 消息形状的最后一轮提取（user → 其后第一条 assistant） */
-export function extractLastTurn(msgs: V2Message[]): LastTurn | null {
-  let lastUserIdx = -1;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i]!.type === "user") {
-      lastUserIdx = i;
-      break;
-    }
-  }
-  if (lastUserIdx === -1) return null;
-
-  const userText = msgs[lastUserIdx]!.text ?? "";
-
-  let assistantText = "";
-  for (let i = msgs.length - 1; i > lastUserIdx; i--) {
-    if (msgs[i]!.type === "assistant") {
-      assistantText = (msgs[i]!.content ?? [])
-        .filter((c) => c.type === "text")
-        .map((c) => c.text ?? "")
-        .join("");
-      break;
-    }
-  }
-
-  return { user: userText, assistant: assistantText };
-}
+/** v2 消息形状 / 归一 / 最后一轮提取 → 共享模块（index.ts 与 session-llm.ts 都依赖，
+ *  不能互相 import，故放 context-shape.ts） */
+import { toMessages, extractLastTurn } from "./context-shape";
 
 export default Plugin.define({
   id: "memx",
@@ -72,9 +37,14 @@ export default Plugin.define({
     const memoryBuffer = new MemorySignalBuffer();
     // 活跃子会话集合：sessionID → system 提炼提示词（context hook 按 ∈ 集合过滤）
     const childSessions = new Map<string, string>();
+    // memx 自己的提炼子会话 ID（活到它的 session.deleted 事件被消费）——见事件循环注释
+    const childSessionIds = new Set<string>();
     let refinementInFlight = false;
     let currentSlug = deriveSlug(ctx.location.directory ?? "");
     const controller = new AbortController();
+    // 诊断键按目录隔离：#82 实测 ctx.storage 的键是全局的，多 serve / 多目录的 memx 实例
+    // 会互相覆盖同一行（lastCapture/lastError 被后写者抹掉）。slug 需在 persistDiag 定义前算好。
+    const diagKey = "diag:" + currentSlug;
 
 
     // #4 拍板：v2 无 app.log → ctx.storage 结构化诊断（memx_status / memx doctor 消费）
@@ -88,12 +58,18 @@ export default Plugin.define({
       evtCounts?: Record<string, number>;
       rawInbox?: string;
       rawTextEnded?: string;
+      /** 无最后一轮时采到的 session.context 原始返回（截断 400 字），用于非静默定位 */
+      rawContext?: string;
       lastCapture?: {
         userLen: number;
         assistantLen: number;
         styleHit: boolean;
         signalCount: number;
         sessionID: string;
+        /** 本次看到的消息条数 */
+        msgCount: number;
+        /** session.context 返回形状（array=v2 SDK 数组本身 / envelope=旧信封 / other） */
+        ctxShape: "array" | "envelope" | "other";
       };
       updatedAt: string;
     };
@@ -108,12 +84,27 @@ export default Plugin.define({
     };
     const persistDiag = async (): Promise<void> => {
       try {
-        await ctx.storage.set("diag", { ...diag });
+        await ctx.storage.set(diagKey, { ...diag });
       } catch {
         // diagnostics must never escape
       }
     };
     void persistDiag();
+
+    // 一次性迁移：旧版把诊断写在全局 "diag" 行上。作用域键首次出现时以旧值为种子，
+    // 免得升级后计数器看起来被清零（仅当作用域键尚不存在时读旧值，之后互不干扰）。
+    void (async () => {
+      try {
+        const scoped = await ctx.storage.get(diagKey);
+        if (scoped) return;
+        const legacy = (await ctx.storage.get("diag")) as Partial<Diag> | undefined;
+        if (!legacy) return;
+        Object.assign(diag, legacy);
+        await persistDiag();
+      } catch {
+        // migration must never escape
+      }
+    })();
 
     function sleep(ms: number): Promise<void> {
       return new Promise((resolve) => setTimeout(resolve, ms));
@@ -138,6 +129,7 @@ export default Plugin.define({
         const llm: LLMClient = createSessionLLMClient(ctx, config.refinementModel, {
           onCreated: (id, system) => {
             childSessions.set(id, system);
+            childSessionIds.add(id);
           },
           onRemoved: (id) => {
             childSessions.delete(id);
@@ -197,6 +189,7 @@ export default Plugin.define({
         const llm: LLMClient = createSessionLLMClient(ctx, config.refinementModel, {
           onCreated: (id, system) => {
             childSessions.set(id, system);
+            childSessionIds.add(id);
           },
           onRemoved: (id) => {
             childSessions.delete(id);
@@ -248,12 +241,28 @@ export default Plugin.define({
     }
 
     // #82 实测定案：取消息用 ctx.session.context（SessionDomain 确认方法，返回完整
-    // messages）——rpc message.list 宿主未注册、inbox.delivered 无负载（均实测）
+    // messages）——rpc message.list 宿主未注册、inbox.delivered 无负载（均实测）。
+    // 注意 v2 SDK 返回的是消息数组本身（不是 {messages:[...]} 信封），故一律过 toMessages。
     async function captureFromSession(sessionID: string): Promise<void> {
-      const res = (await ctx.session.context({ sessionID })) as { messages?: V2Message[] };
-      const msgs = res?.messages ?? [];
-      const last = extractLastTurn(msgs as V2Message[]);
-      if (!last) return;
+      const raw = await ctx.session.context({ sessionID });
+      const { shape, msgs } = toMessages(raw);
+      const last = extractLastTurn(msgs);
+      if (!last) {
+        // 非静默：无最后一轮也留痕（#82 阻塞点正是"信封误判 → 静默早退 → 永不 persist"）
+        diag.lastCapture = {
+          userLen: 0,
+          assistantLen: 0,
+          styleHit: false,
+          signalCount: 0,
+          sessionID,
+          msgCount: msgs.length,
+          ctxShape: shape,
+        };
+        diag.rawContext = JSON.stringify(raw ?? null).slice(0, 400);
+        diag.updatedAt = new Date().toISOString();
+        void persistDiag();
+        return;
+      }
       const signals = captureSignals(last.user, last.assistant);
       buffer.pushAll(signals);
       const memSignals = captureMemorySignals(last.assistant);
@@ -265,6 +274,8 @@ export default Plugin.define({
         styleHit: /STYLE_SIGNAL/.test(last.assistant),
         signalCount: signals.length,
         sessionID,
+        msgCount: msgs.length,
+        ctxShape: shape,
       };
       diag.updatedAt = new Date().toISOString();
       void persistDiag();
@@ -293,8 +304,16 @@ export default Plugin.define({
               continue;
             }
             if (type !== "session.execution.succeeded" && type !== "session.deleted") continue;
-            if (childSessions.has(sessionID)) {
-              if (type === "session.deleted") childSessions.delete(sessionID);
+            // 提炼子会话的 ID 单独记一份：childSessions 在 session-llm 的 finally 里
+            // （remove 之后）就被清掉了，而 session.deleted 事件到得更晚——只看
+            // childSessions 会把"自己删掉自己的子会话"当成用户删会话，且这一支 force=true
+            // 会自激成无限循环（#82 实测 10s 内生成 106 个子会话）。这里必须用能活到
+            // deleted 事件被消费掉的那个集合，命中后连同 childSessions 一起清理。
+            if (childSessionIds.has(sessionID)) {
+              if (type === "session.deleted") {
+                childSessionIds.delete(sessionID);
+                childSessions.delete(sessionID);
+              }
               continue;
             }
             if (type === "session.execution.succeeded") {
@@ -316,7 +335,13 @@ export default Plugin.define({
     })();
 
     // 子会话提炼的组装管线钩子：全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
-    // 命中时整体替换 system（不是 push——v1 body.system 是替换语义）、temperature 0.2、清空 tools。
+    // 命中时整体替换 system（不是 push——v1 body.system 是替换语义）、temperature 0.2。
+    // ⚠️ 不要再清空 tools（event.tools = {}）：#82 实测会让孩子会话的模型请求被 free tier
+    // 拒绝——finish:"error" + error.type:"provider.auth" status:403
+    // {"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}，
+    // content 为空数组，refine() 收到 "" → JSON 解析失败 → 永远不写盘。
+    // 证据：toolsBefore=13 → toolsAfter=0 即 403；保留 tools（13）则 finish:"stop" 且有正文。
+    // 改用 system 替换约束输出（提炼提示词已要求"只输出 JSON 数组"），不要靠清空 tools。
     ctx.session
       .hook("context", (event) => {
         try {
@@ -324,7 +349,6 @@ export default Plugin.define({
           if (system === undefined) return; // 非子会话：零开销放行
           event.system = [{ type: "text", text: system }] as typeof event.system;
           event.options.temperature = 0.2;
-          event.tools = {};
         } catch {
           // hook must never escape
         }
@@ -383,7 +407,7 @@ export default Plugin.define({
         input: { type: "object", properties: {}, required: [] },
         async execute() {
           try {
-            const stored = (await ctx.storage.get("diag")) as Partial<Diag> | undefined;
+            const stored = (await ctx.storage.get(diagKey)) as Partial<Diag> | undefined;
             const d = { ...diag, ...(stored ?? {}) };
             return {
               content: [

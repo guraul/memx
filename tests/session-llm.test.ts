@@ -1,11 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { createSessionLLMClient } from "../src/hosts/opencode/session-llm";
+import { createSessionLLMClient, toModelRef } from "../src/hosts/opencode/session-llm";
 
 /** v2 形状的 mock ctx：session.create/prompt/wait/remove/context（messages 经 context 取） */
 function createMockCtx(opts: {
   createdId?: string;
   messages?: Array<{ type: string; text?: string; content?: Array<{ type: string; text?: string }> }>;
   promptError?: Error;
+  contextShape?: "envelope" | "array";
 }) {
   const calls: string[] = [];
   const ctx: any = {
@@ -27,7 +28,8 @@ function createMockCtx(opts: {
       }),
       context: vi.fn(async () => {
         calls.push("context");
-        return { messages: opts.messages ?? [] };
+        // v2 SDK 返回消息数组本体；"envelope" 仅作旧形状兜底的对照
+        return opts.contextShape === "array" ? (opts.messages ?? []) : { messages: opts.messages ?? [] };
       }),
     },
   };
@@ -39,7 +41,7 @@ const REPLY = [
 ];
 
 describe("createSessionLLMClient（v2，回复经 session.context）", () => {
-  it("创建 → prompt → wait → context 取回复 → remove；model 透传", async () => {
+  it("创建 → prompt → wait → context 取回复 → remove；model 传 Model.Ref 对象", async () => {
     const { ctx, calls } = createMockCtx({ createdId: "child-1", messages: REPLY });
     const hooks = { onCreated: vi.fn(), onRemoved: vi.fn() };
     const llm = createSessionLLMClient(ctx, "opencode/mimo-v2.6-flash-free", hooks);
@@ -49,9 +51,11 @@ describe("createSessionLLMClient（v2，回复经 session.context）", () => {
     });
     expect(result).toBe("Hello World");
     expect(calls).toEqual(["create", "prompt", "wait", "context", "remove"]);
+    // v2 SessionCreateInput.model 是 Model.Ref 对象，传字符串会 SchemaError(Expected Model.Ref)
     expect(ctx.session.create).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "memx-refinement", model: "opencode/mimo-v2.6-flash-free" }),
+      expect.objectContaining({ title: "memx-refinement", model: { providerID: "opencode", id: "mimo-v2.6-flash-free" } }),
     );
+    // #82 实测：2.0.26 服务端只收字符串 text，对象形态 400（Expected string at ["text"]）
     expect(ctx.session.prompt).toHaveBeenCalledWith({ sessionID: "child-1", text: "Hi" });
     expect(hooks.onCreated).toHaveBeenCalledWith("child-1", "You are helpful");
     expect(hooks.onRemoved).toHaveBeenCalledWith("child-1");
@@ -92,5 +96,49 @@ describe("createSessionLLMClient（v2，回复经 session.context）", () => {
     });
     await llm.chat({ system: "", messages: [{ role: "user", content: "Hi" }] });
     expect(events).toEqual(["+child-pair", "-child-pair"]);
+  });
+
+  it("context 返回数组本体（v2 真实形状）也能取到回复——#82 Blocker B 回归", async () => {
+    const { ctx } = createMockCtx({ createdId: "child-array", messages: REPLY, contextShape: "array" });
+    const llm = createSessionLLMClient(ctx, "opencode/mimo-v2.6-flash-free", {
+      onCreated: vi.fn(),
+      onRemoved: vi.fn(),
+    });
+    // 旧实现 res?.messages 在数组上恒 undefined → 回复恒空字符串
+    const result = await llm.chat({ system: "", messages: [{ role: "user", content: "Hi" }] });
+    expect(result).toBe("Hello World");
+  });
+});
+
+describe("toModelRef（'provider/model' 字符串 → v2 Model.Ref）", () => {
+  it("标准形态拆成 providerID + id", () => {
+    expect(toModelRef("opencode/mimo-v2.6-flash-free")).toEqual({
+      providerID: "opencode",
+      id: "mimo-v2.6-flash-free",
+    });
+  });
+
+  it("只按第一个 / 切分，剩余斜杠留在 id 里", () => {
+    expect(toModelRef("vendor/org/model-x")).toEqual({ providerID: "vendor", id: "org/model-x" });
+  });
+
+  it("#variant 后缀被剥离且不设 variant", () => {
+    expect(toModelRef("opencode/mimo-v2.6-flash-free#high")).toEqual({
+      providerID: "opencode",
+      id: "mimo-v2.6-flash-free",
+    });
+  });
+
+  it("undefined / 空串 / 无斜杠 / 斜杠开头 → undefined（调用方省略 model，交宿主默认）", () => {
+    for (const raw of [undefined, "", "   ", "bare-model", "/leading", "opencode/", "#v"]) {
+      expect(toModelRef(raw)).toBeUndefined();
+    }
+  });
+
+  it("不可解析的 model 字符串不会让 create 带 model 字段", async () => {
+    const { ctx } = createMockCtx({ createdId: "child-badmodel", messages: REPLY });
+    const llm = createSessionLLMClient(ctx, "bare-model", { onCreated: vi.fn(), onRemoved: vi.fn() });
+    await llm.chat({ system: "", messages: [{ role: "user", content: "Hi" }] });
+    expect(ctx.session.create.mock.calls[0][0]).not.toHaveProperty("model");
   });
 });
