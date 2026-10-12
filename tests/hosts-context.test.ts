@@ -4,7 +4,7 @@
 // —— 返回的是消息数组本身，不是 {messages:[...]} 信封。
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdirSync, rmSync } from "fs";
-import { toMessages, extractLastTurn } from "../src/hosts/opencode/context-shape";
+import { toMessages, extractLastTurn, extractTurns, findMessageIndex, planCapture } from "../src/hosts/opencode/context-shape";
 
 // 测试隔离：把 homedir 指向临时目录，绝不触碰真实 ~/.opencode
 vi.mock("node:os", async (importOriginal) => {
@@ -117,5 +117,120 @@ describe("extractLastTurn（真实 v2 形状的最后一轮）", () => {
   it("user 缺 text 字段时按空串处理，不抛", () => {
     const msgs = [{ id: "m1", type: "user" }, ASSISTANT({ type: "text", text: "有回复" })];
     expect(extractLastTurn(msgs)).toEqual({ user: "", assistant: "有回复" });
+  });
+});
+
+describe("P0-1 增量捕获：findMessageIndex + extractTurns", () => {
+  const u = (id: string, text: string) => ({ id, type: "user" as const, text });
+  const a = (id: string, text: string) => ({
+    id,
+    type: "assistant" as const,
+    content: [{ type: "text", text }],
+  });
+
+  it("findMessageIndex 命中返回下标，缺席返回 -1", () => {
+    const msgs = [u("m1", "a"), a("m2", "b"), u("m3", "c"), a("m4", "d")];
+    expect(findMessageIndex(msgs, "m4")).toBe(3);
+    expect(findMessageIndex(msgs, "m1")).toBe(0);
+    expect(findMessageIndex(msgs, "gone")).toBe(-1);
+  });
+
+  it("fromIndex=0 时把全部轮次还原出来（旧实现只取最后一轮 → 中间轮次全丢）", () => {
+    const msgs = [u("m1", "问1"), a("m2", "答1"), u("m3", "问2"), a("m4", "答2"), u("m5", "问3"), a("m6", "答3")];
+    const turns = extractTurns(msgs, 0);
+    expect(turns.map((t) => t.user)).toEqual(["问1", "问2", "问3"]);
+    expect(turns.map((t) => t.assistant)).toEqual(["答1", "答2", "答3"]);
+    expect(turns[1]!.assistantMessageId).toBe("m4");
+  });
+
+  it("游标续扫：从上次扫过的消息之后开始，只产出新轮次", () => {
+    const msgs = [u("m1", "问1"), a("m2", "答1"), u("m3", "问2"), a("m4", "答2")];
+    const start = findMessageIndex(msgs, "m2") + 1;
+    const turns = extractTurns(msgs, start);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toEqual({ user: "问2", assistant: "答2", assistantMessageId: "m4" });
+  });
+
+  it("窗口从 assistant 开始时向前配对（左边界不切断配对）", () => {
+    const msgs = [u("m1", "问1"), a("m2", "答1")];
+    const turns = extractTurns(msgs, 1);
+    expect(turns).toEqual([{ user: "问1", assistant: "答1", assistantMessageId: "m2" }]);
+  });
+
+  it("没有配对 user 的 assistant 不成轮（会话开头就是回复）", () => {
+    const msgs = [a("m1", "孤儿回复"), u("m2", "问"), a("m3", "答")];
+    const turns = extractTurns(msgs, 0);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.assistant).toBe("答");
+  });
+
+  it("非 user/assistant 消息（idle/system）被跳过", () => {
+    const msgs = [u("m1", "问"), { id: "m2", type: "idle", outcome: "succeeded" }, a("m3", "答")];
+    const turns = extractTurns(msgs, 0);
+    expect(turns).toEqual([{ user: "问", assistant: "答", assistantMessageId: "m3" }]);
+  });
+
+  it("fromIndex 越界/为空数组时不抛", () => {
+    expect(extractTurns([], 0)).toEqual([]);
+    expect(extractTurns([u("m1", "问")], 99)).toEqual([]);
+  });
+});
+
+describe("P0-1 planCapture：游标决策（宿主侧只做 wiring，决策全在这里）", () => {
+  const u = (id: string, text: string) => ({ id, type: "user" as const, text });
+  const a = (id: string, text: string) => ({
+    id,
+    type: "assistant" as const,
+    content: [{ type: "text", text }],
+  });
+
+  it("无游标 = fresh：全量扫，并把最后一条消息 id 作为下一轮游标", () => {
+    const msgs = [u("m1", "问1"), a("m2", "答1")];
+    const plan = planCapture(msgs);
+    expect(plan.cursorState).toBe("fresh");
+    expect(plan.startIndex).toBe(0);
+    expect(plan.turns).toHaveLength(1);
+    expect(plan.nextCursorId).toBe("m2");
+  });
+
+  it("游标命中 = resumed：只扫新消息，游标前移", () => {
+    const msgs = [u("m1", "问1"), a("m2", "答1"), u("m3", "问2"), a("m4", "答2")];
+    const plan = planCapture(msgs, { lastMessageId: "m2" });
+    expect(plan.cursorState).toBe("resumed");
+    expect(plan.startIndex).toBe(2);
+    expect(plan.turns.map((t) => t.user)).toEqual(["问2"]);
+    expect(plan.nextCursorId).toBe("m4");
+  });
+
+  it("游标锚点丢失（压缩/分叉）= anchor-lost：退回全量扫", () => {
+    const msgs = [u("m9", "压过的问"), a("m10", "压过的答")];
+    const plan = planCapture(msgs, { lastMessageId: "m1-gone" });
+    expect(plan.cursorState).toBe("anchor-lost");
+    expect(plan.startIndex).toBe(0);
+    expect(plan.turns).toHaveLength(1);
+    expect(plan.nextCursorId).toBe("m10");
+  });
+
+  it("没有新消息时不产出轮次（游标仍前移到最新一条）", () => {
+    const msgs = [u("m1", "问"), a("m2", "答")];
+    const plan = planCapture(msgs, { lastMessageId: "m2" });
+    expect(plan.turns).toEqual([]);
+    expect(plan.nextCursorId).toBe("m2");
+  });
+
+  it("消息没有 id 时不给游标（宁可下轮重扫，不写空锚点）", () => {
+    const msgs = [{ type: "user" as const, text: "问" }, { type: "assistant" as const, content: [{ type: "text", text: "答" }] }];
+    const plan = planCapture(msgs);
+    expect(plan.nextCursorId).toBeUndefined();
+    expect(plan.turns).toHaveLength(1);
+  });
+
+  it("多轮增量：连续两次 planCapture 覆盖全部轮次且不重复", () => {
+    const msgs = [u("m1", "问1"), a("m2", "答1"), u("m3", "问2"), a("m4", "答2")];
+    const first = planCapture(msgs.slice(0, 2));
+    expect(first.nextCursorId).toBe("m2");
+    const second = planCapture(msgs, { lastMessageId: first.nextCursorId! });
+    const all = [...first.turns, ...second.turns];
+    expect(all.map((t) => t.user)).toEqual(["问1", "问2"]);
   });
 });

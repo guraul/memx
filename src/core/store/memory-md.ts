@@ -190,16 +190,18 @@ export function readMemoryFile(slug: string, filename: string): string {
   return readFileSync(filePath, "utf-8");
 }
 
-export function applyMemoryProposal(proposal: MemoryProposal, existingIndex: string, slug: string): string {
-  writeMemoryFile(slug, proposal);
+export interface MemoryApplyResult {
+  content: string;
+  warnings: string[];
+}
 
-  const doc = parseMemoryIndex(existingIndex);
-  const sections = doc.sections;
-  let section = sections.find((s) => s.slug === slug);
-  if (!section) {
-    section = { slug, entries: [] };
-    sections.push(section);
-  }
+function applyOneMemoryProposal(
+  proposal: MemoryProposal,
+  section: MemoryIndexSection,
+  slug: string,
+  warnings: string[],
+): void {
+  writeMemoryFile(slug, proposal);
 
   const filePath = `~/.opencode/projects/${slug}/.mem/${proposal.target_file}`;
   const entry: MemoryIndexEntry = {
@@ -211,7 +213,9 @@ export function applyMemoryProposal(proposal: MemoryProposal, existingIndex: str
 
   switch (proposal.action) {
     case "append":
-      if (!section.entries.some((e) => e.filePath === filePath)) {
+      if (section.entries.some((e) => e.filePath === filePath)) {
+        warnings.push(`append 已存在，未重复登记: ${proposal.target_file}`);
+      } else {
         section.entries.push(entry);
       }
       break;
@@ -221,6 +225,7 @@ export function applyMemoryProposal(proposal: MemoryProposal, existingIndex: str
         section.entries[idx] = entry;
       } else {
         section.entries.push(entry);
+        warnings.push(`update 索引无此条目 → 登记为新条目: ${proposal.target_file}`);
       }
       break;
     }
@@ -231,13 +236,45 @@ export function applyMemoryProposal(proposal: MemoryProposal, existingIndex: str
         if (!existsSync(trashDir)) mkdirSync(trashDir, { recursive: true });
         const trashPath = join(trashDir, `${proposal.target_file}.${Date.now()}`);
         renameSync(targetPath, trashPath);
+      } else {
+        warnings.push(`deprecate 目标文件不存在: ${proposal.target_file}`);
       }
+      const before = section.entries.length;
       section.entries = section.entries.filter((e) => e.filePath !== filePath);
+      if (section.entries.length === before) {
+        warnings.push(`deprecate 索引无此条目: ${proposal.target_file}`);
+      }
       break;
     }
   }
+}
 
-  return serializeMemoryIndex(doc);
+/**
+ * 单遍应用整批记忆提案：parse 一次索引 → 逐个落文件/改索引 → serialize 一次。
+ * （与 USER.md 的 applyProposals 同源；记忆条目按 filePath 寻址，本不会批内漂移，
+ *   但一次写盘可以少 5 次备份轮转与全文件序列化。）
+ */
+export function applyMemoryProposals(
+  proposals: MemoryProposal[],
+  existingIndex: string,
+  slug: string,
+): MemoryApplyResult {
+  const doc = parseMemoryIndex(existingIndex);
+  const warnings: string[] = [];
+  let section = doc.sections.find((s) => s.slug === slug);
+  if (!section) {
+    section = { slug, entries: [] };
+    doc.sections.push(section);
+  }
+  for (const proposal of proposals) {
+    applyOneMemoryProposal(proposal, section, slug, warnings);
+  }
+  return { content: serializeMemoryIndex(doc), warnings };
+}
+
+/** 单条应用的兼容壳（内部仍走单遍实现） */
+export function applyMemoryProposal(proposal: MemoryProposal, existingIndex: string, slug: string): string {
+  return applyMemoryProposals([proposal], existingIndex, slug).content;
 }
 
 export function forgetMemory(keyword: string, indexContent: string, slug: string): { newIndex: string; removed: string[] } {

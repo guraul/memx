@@ -28,6 +28,10 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 - **Conflict handling**: when a new memory contradicts an existing one, LLM returns `deprecate` (old) + `append` (new, with `supersedes` field). Code writes `**Supersedes:**` audit line in new file, moves old file to `.mem/.trash/` (not physically deleted)
 - **Health check**: `runHealthCheck` runs after each memory refinement in `reflect` / `session.execution.succeeded`. Detects dead links (index points to non-existent files) and orphan files (`.mem/*.md` not in index). Auto-fixes with guardrail: max 3 per run, logs as HTML comments in MEMORY.md, escalates bloat/conflicts to manual
 - **Concurrency guard**: `runRefinement` + `runMemoryRefinement` share mutex (`refinementInFlight`), `markRun()` fires BEFORE the LLM call - both prevent child-session storms / duplicate writes when events overlap. Throttle is **in-memory only** (`lastRunAt`), so restarting the host resets it
+- **捕获游标（P0-1）**: per-session 增量游标锚在**消息 id** 上，存 `ctx.storage` 的 `cursor:<sessionID>`；决策全在 `planCapture()`（`context-shape.ts`，纯函数可单测：fresh / resumed / anchor-lost），host 侧只做 storage 读写与信号解析。`session.deleted` 时删游标。**别再拿 `extractLastTurn` 做捕获**（它留给 session-llm 取子会话回复），否则又退回"只扫最后一轮"
+- **提炼三态（P0-2）**: `refine()` / `refineMemory()` 返回 `RefineOutcome`（`refine/refine-outcome.ts`）：`proposals` 落盘；`adjudicated-empty` **清缓冲结案**（合法空数组 ≠ 坏输出，否则同批信号每轮重烧 LLM）；`invalid-output` 保留缓冲 + `diag.invalidStreak` 计数，连续 3 次才丢弃并记 alert
+- **写盘（P0-3 / P0-4）**: 整批提案走 `applyProposals` / `applyMemoryProposals` **单遍应用**（parse 一次 → 内存改完 → serialize 一次）；read-modify-write 包 `withFileLock(userMdLockPath()|memoryIndexLockPath(), …)`，**锁内重读文件**再应用（消掉快照读→写盘窗口里的丢更新）。update/deprecate 定位顺序：`target_text` 精确 → 归一（去空白/markdown 装饰）→ 唯一包含 → `target_line` 兜底；降级与未命中都写 `diag.lastWarnings`，绝不静默改错条目
+- **健康日志（P0-5）**: `runHealthMaintenance()` 返回 `{index, logs, report}`，logs 只进 `diag.health` / alerts；**不再把 `formatHealthLog()` 追加进 MEMORY.md**（那些 HTML 注释会被下一次序列化吃掉，是历史 bug）
 - **Child-session guard**: `childSessions` map (sessionID → system) for the `context` hook, PLUS `childSessionIds` set that lives until the child's `session.deleted` event is consumed - see the self-excitation trap in Quirks. Both are populated in `onCreated`
 - **Diagnostics**: v2 has no `client.app.log` - structured diagnostics go to `ctx.storage` under `"diag:" + deriveSlug(ctx.location.directory)`. **The tool output is not the truth** (`memx_status` prints fixed fields only); read the kv row directly: `sqlite3 ~/.local/share/opencode/opencode.db "SELECT value FROM kv WHERE key LIKE 'plugin:%'"` (namespace = `plugin:` + "memx" as 4 hex digits per char)
 - **Loading mechanism**: **插件自己在 `context` hook 里追加**三块 SystemPart 到 `event.system`——`~/.opencode/memx-protocol.md`（协议）+ `USER.md`（画像）+ `MEMORY.md`（索引），每块硬上限 200 行 / 25KB，截断时追加可见提示行。**⚠️ `opencode.json` 的 `instructions` 在 v2.0.26 是死字段**（宿主只从 AGENTS.md 组装，全仓无消费方），不要指望它注入。注入范围由 `memx.config.json` 的 `inject.{enabled,includeAgents,excludeAgents}` 控制，**代码里不硬编码任何 agent 名**
@@ -38,6 +42,8 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 > ✅ **2026-10-11 阶段 1 分层落地**：`src/` 已重排为 `core/`（signals/refine/store/health/llm/config/types，**零宿主依赖**——禁 import `@opencode*`）+ `hosts/opencode/`（插件壳 index.ts + session-llm 适配 + context-shape.ts）+ `cli/`（doctor，阶段 4）。行为等价迁移。
 >
 > ✅ **2026-10-12 阶段 2 V2 移植闭环**（`d79d248` / `50f36fa`）：v2-only 插件，端到端实测通过（STYLE_SIGNAL → 捕获 → 子会话提炼 → 写盘）。依赖已升到 `@opencode/plugin ^2.0.26`。**v2 契约陷阱见下方 Quirks——那几条都是实机打出来的，不要凭生成的 `.d.ts` 想当然**（其中 `session.prompt` 的 `text` 字段，生成的类型与在跑的二进制载荷校验就不一致）。
+>
+> ✅ **2026-10-12 阶段 3 P0 五项**（handoff-20261011 §4 阶段 3）：P0-1 捕获改 per-session 消息 id 增量游标（`planCapture`，游标存 `ctx.storage` 的 `cursor:<sessionID>`，锚点丢失退全量扫）；P0-2 提炼三态返回 + 连续坏输出上限（`refine-outcome.ts`）；P0-3 单遍应用 + 内容锚点寻址（`applyProposals`，target_text → 归一 → 唯一包含 → 行号兜底）；P0-4 USER.md/MEMORY.md 文件锁 + mtime TTL（`store/lock.ts`）；P0-5 健康日志不再写进 MEMORY.md（`runHealthMaintenance` 只回传 logs，落 `diag.health`）。
 
 ```
 src/
@@ -49,11 +55,13 @@ src/
     signals/memory-capture.ts  - MEMORY_SIGNAL parser + MemorySignalBuffer
     refine/prompts.ts          - Track 1 system prompt constants
     refine/refinement.ts       - Track 1 LLM batch refinement + Zod + extractJson (LLMClient interface 定义在此)
+    refine/refine-outcome.ts   - RefineOutcome 三态（proposals / adjudicated-empty / invalid-output）+ 失败上限
     refine/memory-prompts.ts   - Track 2 system prompt constants
     refine/memory-refinement.ts- Track 2 LLM batch refinement + Zod validation
-    store/user-md.ts           - read/write/parse/backup USER.md（parse→UserMdDoc，保留非受管内容）
-    store/memory-md.ts         - MEMORY.md index + .mem/*.md + backup（同一保留契约）
+    store/user-md.ts           - read/write/parse/backup USER.md（parse→UserMdDoc，保留非受管内容；applyProposals 单遍 + 内容锚点）
+    store/memory-md.ts         - MEMORY.md index + .mem/*.md + backup（同一保留契约；applyMemoryProposals 单遍）
     store/markdown-lines.ts    - 两个序列化器共用的空行边界工具（保幂等）
+    store/lock.ts              - P0-4 文件锁（锁文件 + mtime TTL 夺锁；只包 read-modify-write，绝不包 LLM）
     health/memory-health.ts    - Index health check (dead links, orphan files) + auto-fix with guardrails
     llm/throttle.ts            - 内存节流（宿主重启即重置）
   hosts/opencode/
@@ -61,7 +69,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor（阶段 4）
-tests/                         - 16 文件 / 230 测试（基线，低于即回归）
+tests/                         - 18 文件 / 266 测试（基线，低于即回归）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -79,6 +87,9 @@ tests/                         - 16 文件 / 230 测试（基线，低于即回�
 - **`ctx.storage` 的键是全局的**：所有 memx 实例（任何进程、任何目录）写同一行，后写者覆盖先写者，`lastError`/`failures` 会被抹掉。键已按目录隔离成 `"diag:" + deriveSlug(directory)`（首次出现时用旧全局值做一次性种子迁移）。注意**同目录多实例仍会打架**（`opencode run --server` 客户端也会实例化插件）——排查时优先看 serve 日志而不是 kv 行。
 - **子会话自激循环**（2026-10-12 实测，10 秒生成 106 个子会话）：`session-llm` 的 `finally` 先 `remove` 再 `onRemoved`，`childSessions` 在 `session.deleted` 事件到达**之前**就被清空了；事件处理器只看 `childSessions` 就会把"自己删自己的子会话"误判成用户删会话，而那一支是 `force=true` → 再生子会话 → 无限循环，且绕过节流。`childSessionIds` 集合就是为此存在：它活到 deleted 事件被消费掉。
 - **写盘必须保留非受管内容**：USER.md / MEMORY.md 的 parse 只投影受管集合（分类小节 + `- [日期]` 条目），其余（协议块、用户自写标题、散文、未知 `##` 小节）现在由 `preamble` / `section.extras` 原样带回。曾经因为直接丢弃，首次成功提炼就把 USER.md 的协议块冲掉了——协议块没了，AI 就不会再发 STYLE_SIGNAL，memx 从第二轮起静默失效。
+- **文件锁的边界（P0-4）**：`withFileLock` 只包 read-modify-write，**绝不能把 LLM 调用包进去**（持锁几十秒会把别的实例全卡住）。持锁者崩溃靠 mtime TTL 兜（默认 30s 可夺锁）；等锁超 `timeoutMs`（默认 5s）抛 `FileLockTimeoutError` → 落 `diag.lastError`、缓冲保留、下轮重试。锁文件是 `~/.opencode/.USER.md.lock` / `.MEMORY.md.lock`，正常路径下不该长期存在。
+- **`ctx.storage` 的 cursor 键**：`cursor:<sessionID>` 与 `diag:<slug>` 同处全局命名空间；sessionID 全局唯一所以不冲突，但**不清就是垃圾行**——`session.deleted` 分支已负责删除。另：`ctx.storage.set` 的参数类型是 `Schema.Json`，用 `type` 别名（不是 `interface`）声明结构体才有隐式索引签名，否则 TS 报 not assignable
+- **capture 全量重扫不是错误**：`planCapture` 找不到游标锚点（上下文被压缩/分叉裁掉）时会退回全量扫，靠缓冲的 evidence 去重；这是**预期降级**，会在 `diag.alerts` 留一条 `CAPTURE_CURSOR_LOST` warn，看到它别当崩溃处理
 - **`context` hook 是全插件最要害的一段**：每个 step 都跑在宿主组装管线上，写坏 `event.system` 的表现是"模型静默变笨"而不是报错。两条分支**顺序固定**：子会话（提炼）先判、**整体替换** system + temperature 0.2、注入绝不参与；其余会话**只 append 绝不替换**——hook 触发时 `event.system` 已含 `agent.system` + AGENTS.md 合并正文（`model-request.ts:110-116`），替换会抹掉宿主内容。hook 内不 await、任何异常退化为"不注入"，绝不半途写坏。
 - **注入不伤缓存**：宿主 `cache:"auto"` 的断点打在"最后一个 distinct system part"，我们追加在尾部 → 注入内容**落在缓存前缀之内**。失效只发生在 USER.md/MEMORY.md 被改写时（节流 10 分钟 + 仅有信号时写，一个会话通常 0-1 次）。免费档走的是 opencode 网关，不在 `RESPECTS_INLINE_HINTS` 白名单（`cache-policy.ts:40-52`），靠提供商隐式前缀缓存，逻辑同理。
 - **注入频率**：每个 step 一次；文件读走 `stat(mtimeMs+size)` 缓存，诊断写盘节流 5s。提炼（LLM 调用 + 写盘）每回合最多一次，10 分钟节流。
@@ -96,7 +107,7 @@ tests/                         - 16 文件 / 230 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：16 文件 / 230 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：18 文件 / 266 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files

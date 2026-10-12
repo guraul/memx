@@ -39,6 +39,8 @@ export interface StyleProposal {
   category: string;
   content: string;
   target_line?: number | null | undefined;
+  /** P0-3(c) 内容锚点：逐字抄写目标条目 `- [日期] ` 之后的正文。定位优先级高于行号。 */
+  target_text?: string | null | undefined;
   reason: string;
 }
 
@@ -78,6 +80,7 @@ export const StyleProposalSchema = z.object({
   category: z.enum(CATEGORIES),
   content: z.string().max(100),
   target_line: z.number().int().positive().nullish(),
+  target_text: z.string().max(200).nullish(),
   reason: z.string().max(200),
 });
 

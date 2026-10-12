@@ -200,6 +200,39 @@ export function formatHealthLog(logs: AutoFixLog[]): string {
   return lines.join("\n");
 }
 
+export interface HealthMaintenanceResult {
+  /** 维护后的索引内容；无结构性修复时原样返回（不触发无意义的重写/备份） */
+  index: string;
+  logs: AutoFixLog[];
+  report: HealthReport;
+}
+
+/**
+ * P0-5（handoff-20261011 §4 阶段 3-5）：健康日志**不再写进 MEMORY.md**。
+ *
+ * 旧实现在 autoFix 后把 `formatHealthLog(logs)` 以 HTML 注释追加到索引尾部——那些行会被
+ * 下一次 parseMemoryIndex→serializeMemoryIndex 吃掉（曾经整个日志消失）。现在的契约是：
+ * 本函数只返回 `{index, logs, report}`，调用方把 logs 送 storage/报警出口（阶段 4 的
+ * core/alerts），MEMORY.md 保持纯索引。
+ *
+ * 只有结构性修复（死链、孤儿文件）才改索引；仅有 escalated（索引膨胀等）时不动文件，
+ * 避免"每次都重写+滚备份"。
+ */
+export function runHealthMaintenance(indexContent: string, slug: string): HealthMaintenanceResult {
+  const report = runHealthCheck(indexContent, slug);
+  const structural = report.deadLinks.length > 0 || report.orphanFiles.length > 0;
+  if (!structural) {
+    const logs: AutoFixLog[] = report.escalated.map((msg) => ({
+      action: "escalated-manual" as const,
+      target: "(N/A)",
+      reason: msg,
+    }));
+    return { index: indexContent, logs, report };
+  }
+  const { newIndex, logs } = autoFix(report, indexContent, slug);
+  return { index: newIndex, logs, report };
+}
+
 function readEntryType(filePath: string): string {
   try {
     const actualPath = resolveIndexPath(filePath);

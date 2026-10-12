@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readdirSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import type { UserMdDoc, UserMdSection, StyleProposal } from "../types";
+import type { UserMdDoc, UserMdSection, UserMdEntry, StyleProposal } from "../types";
 import { CATEGORY_HEADERS, HEADER_TO_CATEGORY, CATEGORIES, type Category } from "../types";
 import { trimBlankLines, trimTrailingBlankLines } from "./markdown-lines";
 
@@ -178,75 +178,150 @@ export function isOverLimit(content: string, limit = 200): boolean {
   return content.split("\n").length > limit;
 }
 
-export function applyProposal(proposal: StyleProposal, content: string): string {
-  const doc = parseUserMd(content);
-  const sections = doc.sections;
-  const today = new Date().toISOString().split("T")[0] ?? "";
+export interface ApplyResult {
+  content: string;
+  warnings: string[];
+}
+
+/** 内容锚点归一：去掉所有空白与常见 markdown 装饰再小写比较。
+ *  LLM 抄写时多一个空格/星号不该丢掉锚，故 fuzzy 面比精确面宽。 */
+function normalizeAnchor(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[`*_~]/g, "")
+    .replace(/\s+/g, "")
+    .replace(/[。，、；：！？.,;:!?]+$/g, "");
+}
+
+interface EntryHit {
+  section: UserMdSection;
+  index: number;
+  /** exact=逐字 / fuzzy=归一后相等 / containment=包含 / line=行号兜底 */
+  how: "exact" | "fuzzy" | "containment" | "line";
+}
+
+/**
+ * P0-3(c) 内容锚点定位：优先 target_text（逐字 → 归一 → 唯一包含），最后才用 target_line。
+ * 定位失败/降级都会写 warning（"为什么没改到我想改的那条"必须可见，不能静默）。
+ */
+function locateEntry(doc: UserMdDoc, proposal: StyleProposal, warnings: string[]): EntryHit | null {
+  const hits: Array<{ section: UserMdSection; index: number; text: string }> = [];
+  for (const section of doc.sections) {
+    section.lines.forEach((entry, index) => hits.push({ section, index, text: entry.text }));
+  }
+  if (hits.length === 0) return null;
+
+  const anchor = proposal.target_text?.trim();
+  if (anchor) {
+    const exact = hits.filter((h) => h.text.trim() === anchor);
+    if (exact.length > 0) {
+      if (exact.length > 1) warnings.push(`anchor 精确命中 ${exact.length} 条，取第一条`);
+      return { section: exact[0]!.section, index: exact[0]!.index, how: "exact" };
+    }
+    const norm = normalizeAnchor(anchor);
+    if (norm) {
+      const fuzzy = hits.filter((h) => normalizeAnchor(h.text) === norm);
+      if (fuzzy.length > 0) {
+        if (fuzzy.length > 1) warnings.push(`anchor 归一命中 ${fuzzy.length} 条，取第一条`);
+        warnings.push(`anchor 降级(fuzzy): "${anchor.slice(0, 40)}"`);
+        return { section: fuzzy[0]!.section, index: fuzzy[0]!.index, how: "fuzzy" };
+      }
+      const contain = hits.filter((h) => {
+        const t = normalizeAnchor(h.text);
+        return norm.length > 0 && (t.includes(norm) || norm.includes(t));
+      });
+      if (contain.length === 1) {
+        warnings.push(`anchor 降级(containment): "${anchor.slice(0, 40)}"`);
+        return { section: contain[0]!.section, index: contain[0]!.index, how: "containment" };
+      }
+      if (contain.length > 1) {
+        warnings.push(`anchor 包含命中 ${contain.length} 条，歧义 → 放弃内容锚点`);
+      }
+    }
+  }
+
+  if (proposal.target_line != null) {
+    const byLine = hits.filter(
+      (h) => h.section.lines[h.index]!.lineNumber === proposal.target_line,
+    );
+    if (byLine.length === 1) {
+      warnings.push(`anchor 降级(行号兜底): target_line=${proposal.target_line}`);
+      return { section: byLine[0]!.section, index: byLine[0]!.index, how: "line" };
+    }
+  }
+  return null;
+}
+
+function applyOneProposal(doc: UserMdDoc, proposal: StyleProposal, today: string, warnings: string[]): void {
   const cat = proposal.category as Category;
   const header = CATEGORY_HEADERS[cat];
 
-  let targetSection = sections.find((s) => s.category === cat);
+  let targetSection = doc.sections.find((s) => s.category === cat);
   if (!targetSection) {
     targetSection = { header, category: cat, lines: [] };
-    sections.push(targetSection);
+    doc.sections.push(targetSection);
   }
 
   const newRaw = `- [${today}] ${proposal.content}`;
+  const newEntry: UserMdEntry = {
+    raw: newRaw,
+    date: today,
+    text: proposal.content,
+    deprecated: false,
+    lineNumber: 0,
+  };
 
   switch (proposal.action) {
     case "append": {
-      targetSection.lines.push({
-        raw: newRaw,
-        date: today,
-        text: proposal.content,
-        deprecated: false,
-        lineNumber: 0,
-      });
-      break;
+      targetSection.lines.push(newEntry);
+      return;
     }
     case "update": {
-      let found = false;
-      for (const section of sections) {
-        const idx = section.lines.findIndex(
-          (e) => proposal.target_line != null && e.lineNumber === proposal.target_line,
-        );
-        if (idx !== -1) {
-          section.lines[idx] = {
-            raw: newRaw,
-            date: today,
-            text: proposal.content,
-            deprecated: false,
-            lineNumber: 0,
-          };
-          found = true;
-          break;
-        }
+      const located = locateEntry(doc, proposal, warnings);
+      if (!located) {
+        targetSection.lines.push(newEntry);
+        warnings.push(`update 未定位到目标 → 追加为新条目: "${proposal.content.slice(0, 40)}"`);
+        return;
       }
-      if (!found) {
-        targetSection.lines.push({
-          raw: newRaw,
-          date: today,
-          text: proposal.content,
-          deprecated: false,
-          lineNumber: 0,
-        });
-      }
-      break;
+      located.section.lines[located.index] = newEntry;
+      return;
     }
     case "deprecate": {
-      for (const section of sections) {
-        const target = section.lines.find(
-          (e) => proposal.target_line != null && e.lineNumber === proposal.target_line,
-        );
-        if (target && !target.deprecated) {
-          target.raw = `- ~~[${target.date}] ${target.text}~~ (Deprecated: ${proposal.content})`;
-          target.deprecated = true;
-          break;
-        }
+      const located = locateEntry(doc, proposal, warnings);
+      if (!located) {
+        warnings.push(`deprecate 未定位到目标 → 未改动: "${proposal.content.slice(0, 40)}"`);
+        return;
       }
-      break;
+      const target = located.section.lines[located.index]!;
+      if (target.deprecated) return;
+      located.section.lines[located.index] = {
+        ...target,
+        raw: `- ~~[${target.date}] ${target.text}~~ (Deprecated: ${proposal.content})`,
+        deprecated: true,
+      };
+      return;
     }
   }
+}
 
-  return serializeUserMd(doc);
+/**
+ * P0-3(e) 单遍应用：parse 一次 → 内存中把整批 proposal 应用完 → serialize 一次。
+ *
+ * 旧实现每个 proposal 都独立 parse→修改→serialize 全文件，同批前面的 proposal 一旦改变了
+ * 行结构（例如把空小节序列化掉导致行号前移），后面 proposal 手里那份快照行号就失效，
+ * 结果是"改错行/丢改动"。单遍应用从根上消除批内漂移。
+ */
+export function applyProposals(proposals: StyleProposal[], content: string): ApplyResult {
+  const doc = parseUserMd(content);
+  const warnings: string[] = [];
+  const today = new Date().toISOString().split("T")[0] ?? "";
+  for (const proposal of proposals) {
+    applyOneProposal(doc, proposal, today, warnings);
+  }
+  return { content: serializeUserMd(doc), warnings };
+}
+
+/** 单条应用的兼容壳（内部仍走单遍实现） */
+export function applyProposal(proposal: StyleProposal, content: string): string {
+  return applyProposals([proposal], content).content;
 }

@@ -12,29 +12,32 @@ import { createSessionLLMClient } from "./session-llm";
 import {
   readUserMd,
   writeUserMd,
-  applyProposal,
+  applyProposals,
   isOverLimit,
   parseUserMd,
   serializeUserMd,
   backupUserMd,
 } from "../../core/store/user-md";
+import { userMdLockPath, memoryIndexLockPath, withFileLock } from "../../core/store/lock";
 import { loadMemxConfig } from "../../core/config";
 import type { MemxConfig } from "../../core/config";
 import { shouldRun, markRun } from "../../core/llm/throttle";
 import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/memory-capture";
 import { refineMemory } from "../../core/refine/memory-refinement";
-import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } from "../../core/store/memory-md";
+import { readMemoryIndex, writeMemoryIndex, applyMemoryProposals, forgetMemory } from "../../core/store/memory-md";
 import { deriveSlug } from "../../core/memory-types";
-import { runHealthCheck, autoFix, formatHealthLog } from "../../core/health/memory-health";
+import { runHealthMaintenance, formatHealthLog } from "../../core/health/memory-health";
+import type { AutoFixLog } from "../../core/health/memory-health";
+import { INVALID_OUTPUT_STREAK_LIMIT } from "../../core/refine/refine-outcome";
 import { describeGate, DEFAULT_AGENT_GATE } from "../../core/injection";
 import type { AgentGate } from "../../core/injection";
 import { InjectionSourceCache, readInjectionSources } from "../../core/injection-source";
 import { applyContextHook } from "./context-hook";
 import type { ContextHookEvent } from "./context-hook";
 
-/** v2 消息形状 / 归一 / 最后一轮提取 → 共享模块（index.ts 与 session-llm.ts 都依赖，
+/** v2 消息形状 / 归一 / 轮次提取 → 共享模块（index.ts 与 session-llm.ts 都依赖，
  *  不能互相 import，故放 context-shape.ts） */
-import { toMessages, extractLastTurn } from "./context-shape";
+import { toMessages, planCapture } from "./context-shape";
 
 export default Plugin.define({
   id: "memx",
@@ -76,7 +79,19 @@ export default Plugin.define({
         msgCount: number;
         /** session.context 返回形状（array=v2 SDK 数组本身 / envelope=旧信封 / other） */
         ctxShape: "array" | "envelope" | "other";
+        /** P0-1 增量游标：fresh=首次扫 / resumed=按游标续扫 / anchor-lost=游标锚点丢了（压缩/分叉）改全扫 */
+        cursor?: "fresh" | "resumed" | "anchor-lost";
+        /** 本次新扫到的轮次数 */
+        newTurns?: number;
       };
+      /** P0-2：连续 invalid-output 次数（按轨道），≥limit 丢弃缓冲并记报警 */
+      invalidStreak?: { style: number; memory: number };
+      /** P0-3：最近一批提案的定位告警（anchor 降级/未命中） */
+      lastWarnings?: string[];
+      /** P0-5：健康检查结果（日志不再写进 MEMORY.md，改落这里） */
+      health?: { fixes: number; escalated: number; lastLog: string; updatedAt: string };
+      /** 轻量报警账本（阶段 4 的 core/alerts 接管前的落点，最多 20 条） */
+      alerts?: Array<{ level: "info" | "warn" | "critical"; code: string; message: string; ts: string }>;
       /** 注入诊断（context hook 的每 step 行为 + 装配结果） */
       injection?: {
         /** hook 触发总次数（含子会话分支） */
@@ -103,12 +118,13 @@ export default Plugin.define({
       updatedAt: string;
     };
     const diag: Diag = {
-      version: "v2-e2e-3+inject",
+      version: "v2-p0-1",
       captured: 0,
       refinements: 0,
       written: 0,
       failures: 0,
       lastError: "",
+      invalidStreak: { style: 0, memory: 0 },
       injection: {
         hookFires: 0,
         injections: 0,
@@ -150,6 +166,41 @@ export default Plugin.define({
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
+    // ---- P0-1：per-session 增量游标（存 ctx.storage，键按 sessionID 隔离）----
+    // 为什么不用"扫最后一轮"：长会话中间轮次的 SIGNAL 会整段丢（事件漏拍 / 一次 execution
+    // 跨多轮 / 客户端批量提交）。为什么不用 message.list 游标：v2 宿主未注册该 rpc
+    // （#82 实测）。所以游标锚在**消息 id** 上——session.context 每条消息都带 id，
+    // 找不到锚点（压缩/分叉把消息裁掉了）就退回全量扫，靠缓冲的 evidence 去重兜底。
+    type SessionCursor = {
+      lastMessageId?: string;
+      scanned: number;
+      anchorLost: boolean;
+      updatedAt: string;
+    };
+    const cursorKey = (sessionID: string): string => "cursor:" + sessionID;
+
+    async function readCursor(sessionID: string): Promise<SessionCursor | undefined> {
+      try {
+        return (await ctx.storage.get(cursorKey(sessionID))) as SessionCursor | undefined;
+      } catch {
+        return undefined; // 游标读失败 → 当成首次扫（宁可重扫，不可漏扫；缓冲有去重）
+      }
+    }
+
+    async function writeCursor(sessionID: string, cursor: SessionCursor): Promise<void> {
+      try {
+        await ctx.storage.set(cursorKey(sessionID), cursor);
+      } catch {
+        // 游标写失败不能影响捕获：下一轮重扫，缓冲 evidence 去重
+      }
+    }
+
+    function recordAlert(level: "info" | "warn" | "critical", code: string, message: string): void {
+      diag.alerts = diag.alerts ?? [];
+      diag.alerts.push({ level, code, message, ts: new Date().toISOString() });
+      if (diag.alerts.length > 20) diag.alerts = diag.alerts.slice(-20);
+    }
+
     async function runRefinement(_sessionID: string, force = false): Promise<string> {
       if (buffer.length === 0) return "[memx] 无信号，跳过";
 
@@ -175,29 +226,63 @@ export default Plugin.define({
             childSessions.delete(id);
           },
         });
-        const proposals = await refine(signals, llm, existingContent, config.refinementModel);
+        const outcome = await refine(signals, llm, existingContent, config.refinementModel);
 
-        if (proposals.length === 0) {
-          return "[memx] 无可提炼偏好";
+        // P0-2：坏输出 → 保留缓冲重试；连续 N 次仍坏 → 丢弃缓冲 + 记报警（防坏模型无限循环）
+        if (outcome.kind === "invalid-output") {
+          const streak = (diag.invalidStreak ??= { style: 0, memory: 0 });
+          streak.style++;
+          diag.lastError = `[style invalid-output #${streak.style}] ${outcome.error}\nraw: ${outcome.rawSnippet}`;
+          diag.updatedAt = new Date().toISOString();
+          if (streak.style >= INVALID_OUTPUT_STREAK_LIMIT) {
+            recordAlert(
+              "critical",
+              "REFINEMENT_FAILURE_STREAK",
+              `style 提炼连续 ${streak.style} 次输出无效，丢弃 ${buffer.length} 条缓冲：${outcome.error.slice(0, 120)}`,
+            );
+            streak.style = 0;
+            buffer.clear();
+            void persistDiag();
+            return `[memx] 提炼输出连续 ${INVALID_OUTPUT_STREAK_LIMIT} 次无效，已丢弃缓冲`;
+          }
+          void persistDiag();
+          return `[memx] 提炼输出无效（第 ${streak.style}/${INVALID_OUTPUT_STREAK_LIMIT} 次），保留缓冲重试`;
+        }
+        if (diag.invalidStreak) diag.invalidStreak.style = 0;
+
+        // P0-2：合法空数组/全被过滤 = LLM 已裁决"不值得存" → 清缓冲结案
+        if (outcome.kind === "adjudicated-empty") {
+          buffer.clear();
+          diag.updatedAt = new Date().toISOString();
+          void persistDiag();
+          return `[memx] 无可提炼偏好（${outcome.reason}，已结案）`;
         }
 
-        let content = existingContent;
-        for (const proposal of proposals) {
-          content = applyProposal(proposal, content);
-        }
+        const proposals = outcome.proposals;
 
-        if (isOverLimit(content)) {
-          backupUserMd();
-          content = serializeUserMd(parseUserMd(content));
-        }
+        // P0-4 + P0-3：锁内**重读**当前文件 → 单遍应用整批 proposal → 单次写盘。
+        // 锁只包住 read-modify-write（LLM 调用在锁外，绝不能持锁等模型）；
+        // 重读是为了消掉"快照读 → 写盘"窗口里别的 memx 实例写进来的条目。
+        const applied = await withFileLock(userMdLockPath(), () => {
+          let content = readUserMd();
+          const result = applyProposals(proposals, content);
+          content = result.content;
+          if (isOverLimit(content)) {
+            backupUserMd();
+            content = serializeUserMd(parseUserMd(content));
+          }
+          writeUserMd(content);
+          return result;
+        });
 
-        writeUserMd(content);
         buffer.clear();
         diag.written += proposals.length;
+        if (applied.warnings.length > 0) diag.lastWarnings = applied.warnings.slice(-10);
         diag.updatedAt = new Date().toISOString();
         void persistDiag();
 
-        return `[memx] 已写入 ${proposals.length} 条`;
+        const warnNote = applied.warnings.length > 0 ? `（${applied.warnings.length} 条定位告警）` : "";
+        return `[memx] 已写入 ${proposals.length} 条${warnNote}`;
       } catch (err) {
         diag.failures++;
         diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
@@ -234,40 +319,77 @@ export default Plugin.define({
             childSessions.delete(id);
           },
         });
-        const proposals = await refineMemory(signals, llm, existingIndex, config.refinementModel);
+        const outcome = await refineMemory(signals, llm, existingIndex, config.refinementModel);
 
-        if (proposals.length === 0) {
-          return "[memx] 无可提炼记忆";
-        }
-
-        let indexContent = existingIndex;
-        for (const proposal of proposals) {
-          indexContent = applyMemoryProposal(proposal, indexContent, currentSlug);
-        }
-
-        writeMemoryIndex(indexContent);
-        memoryBuffer.clear();
-
-        // Run health check + auto-fix (dead links, orphan files)
-        let healthMsg = "";
-        try {
-          const report = runHealthCheck(indexContent, currentSlug);
-          if (report.deadLinks.length > 0 || report.orphanFiles.length > 0 || report.escalated.length > 0) {
-            const { newIndex, logs } = autoFix(report, indexContent, currentSlug);
-            if (logs.length > 0) {
-              writeMemoryIndex(newIndex + "\n" + formatHealthLog(logs));
-              healthMsg = `, health: ${logs.length} fixes`;
-            }
+        if (outcome.kind === "invalid-output") {
+          const streak = (diag.invalidStreak ??= { style: 0, memory: 0 });
+          streak.memory++;
+          diag.lastError = `[memory invalid-output #${streak.memory}] ${outcome.error}\nraw: ${outcome.rawSnippet}`;
+          diag.updatedAt = new Date().toISOString();
+          if (streak.memory >= INVALID_OUTPUT_STREAK_LIMIT) {
+            recordAlert(
+              "critical",
+              "REFINEMENT_FAILURE_STREAK",
+              `memory 提炼连续 ${streak.memory} 次输出无效，丢弃 ${memoryBuffer.length} 条缓冲：${outcome.error.slice(0, 120)}`,
+            );
+            streak.memory = 0;
+            memoryBuffer.clear();
+            void persistDiag();
+            return `[memx] 记忆提炼输出连续 ${INVALID_OUTPUT_STREAK_LIMIT} 次无效，已丢弃缓冲`;
           }
-        } catch {
-          // health check must never block refinement
+          void persistDiag();
+          return `[memx] 记忆提炼输出无效（第 ${streak.memory}/${INVALID_OUTPUT_STREAK_LIMIT} 次），保留缓冲重试`;
+        }
+        if (diag.invalidStreak) diag.invalidStreak.memory = 0;
+
+        if (outcome.kind === "adjudicated-empty") {
+          memoryBuffer.clear();
+          diag.updatedAt = new Date().toISOString();
+          void persistDiag();
+          return `[memx] 无可提炼记忆（${outcome.reason}，已结案）`;
         }
 
+        const proposals = outcome.proposals;
+
+        // P0-4 + P0-3 + P0-5：一把锁内完成"重读索引 → 单遍应用提案 → 健康维护 → 单次写盘"。
+        // 健康日志只回传给诊断（P0-5），**不再追加 HTML 注释到 MEMORY.md**——那正是被下一次
+        // 序列化吃掉的那份日志。
+        const applied = await withFileLock(memoryIndexLockPath(), () => {
+          const result = applyMemoryProposals(proposals, readMemoryIndex(), currentSlug);
+          let indexContent = result.content;
+          let healthLogs: AutoFixLog[] = [];
+          let escalated = 0;
+          try {
+            const maintenance = runHealthMaintenance(indexContent, currentSlug);
+            indexContent = maintenance.index;
+            healthLogs = maintenance.logs;
+            escalated = maintenance.report.escalated.length;
+          } catch {
+            // health check must never block refinement
+          }
+          writeMemoryIndex(indexContent);
+          return { warnings: result.warnings, healthLogs, escalated };
+        });
+
+        memoryBuffer.clear();
         diag.written += proposals.length;
+        if (applied.warnings.length > 0) diag.lastWarnings = applied.warnings.slice(-10);
+        if (applied.healthLogs.length > 0 || applied.escalated > 0) {
+          diag.health = {
+            fixes: applied.healthLogs.filter((l) => l.action !== "escalated-manual").length,
+            escalated: applied.escalated,
+            lastLog: formatHealthLog(applied.healthLogs).split("\n").slice(-5).join("\n"),
+            updatedAt: new Date().toISOString(),
+          };
+          if (applied.escalated > 0) {
+            recordAlert("warn", "HEALTH_ESCALATED", `MEMORY.md 有 ${applied.escalated} 项需要人工处理`);
+          }
+        }
         diag.updatedAt = new Date().toISOString();
         void persistDiag();
 
-        return `[memx] 已写入 ${proposals.length} 条记忆${healthMsg}`;
+        const healthNote = applied.healthLogs.length > 0 ? `，health: ${applied.healthLogs.length} 项` : "";
+        return `[memx] 已写入 ${proposals.length} 条记忆${healthNote}`;
       } catch (err) {
         diag.failures++;
         diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
@@ -282,19 +404,24 @@ export default Plugin.define({
     // #82 实测定案：取消息用 ctx.session.context（SessionDomain 确认方法，返回完整
     // messages）——rpc message.list 宿主未注册、inbox.delivered 无负载（均实测）。
     // 注意 v2 SDK 返回的是消息数组本身（不是 {messages:[...]} 信封），故一律过 toMessages。
+    //
+    // P0-1：不再是"只扫最后一轮"。每次 execution.succeeded 用 per-session 消息 id 游标
+    // 增量扫出所有**新轮次**——长会话中间轮次的 SIGNAL 不再丢（事件漏拍 / 一次 execution
+    // 跨多轮 / 客户端批量提交都会命中旧实现的盲区）。游标锚在消息 id 上：id 不在数组里
+    // （压缩/分叉裁掉了）就退回全量扫，靠缓冲的 evidence 去重兜底，并留一条 warn 报警。
     async function captureFromSession(sessionID: string): Promise<void> {
       const raw = await ctx.session.context({ sessionID });
       const { shape, msgs } = toMessages(raw);
-      const last = extractLastTurn(msgs);
-      if (!last) {
-        // 非静默：无最后一轮也留痕（#82 阻塞点正是"信封误判 → 静默早退 → 永不 persist"）
+
+      if (msgs.length === 0) {
+        // 非静默：无消息也留痕（#82 阻塞点正是"信封误判 → 静默早退 → 永不 persist"）
         diag.lastCapture = {
           userLen: 0,
           assistantLen: 0,
           styleHit: false,
           signalCount: 0,
           sessionID,
-          msgCount: msgs.length,
+          msgCount: 0,
           ctxShape: shape,
         };
         diag.rawContext = JSON.stringify(raw ?? null).slice(0, 400);
@@ -302,22 +429,54 @@ export default Plugin.define({
         void persistDiag();
         return;
       }
-      const signals = captureSignals(last.user, last.assistant);
-      buffer.pushAll(signals);
-      const memSignals = captureMemorySignals(last.assistant);
-      memoryBuffer.pushAll(memSignals);
-      diag.captured += signals.length + memSignals.length;
+
+      const cursor = await readCursor(sessionID);
+      // 决策（锚点命中/丢失、从哪开始、新轮次）全部在 planCapture 里，host 侧只做 storage + 解析
+      const plan = planCapture(msgs, cursor);
+      const anchorLost = plan.cursorState === "anchor-lost";
+
+      let styleCount = 0;
+      let memoryCount = 0;
+      for (const turn of plan.turns) {
+        const styleSignals = captureSignals(turn.user, turn.assistant);
+        buffer.pushAll(styleSignals);
+        styleCount += styleSignals.length;
+        const memorySignals = captureMemorySignals(turn.assistant);
+        memoryBuffer.pushAll(memorySignals);
+        memoryCount += memorySignals.length;
+      }
+
+      const lastTurn = plan.turns[plan.turns.length - 1];
+      diag.captured += styleCount + memoryCount;
       diag.lastCapture = {
-        userLen: last.user.length,
-        assistantLen: last.assistant.length,
-        styleHit: /STYLE_SIGNAL/.test(last.assistant),
-        signalCount: signals.length,
+        userLen: lastTurn?.user.length ?? 0,
+        assistantLen: lastTurn?.assistant.length ?? 0,
+        styleHit: /STYLE_SIGNAL/.test(lastTurn?.assistant ?? ""),
+        signalCount: styleCount + memoryCount,
         sessionID,
         msgCount: msgs.length,
         ctxShape: shape,
+        cursor: plan.cursorState,
+        newTurns: plan.turns.length,
       };
+      if (anchorLost) {
+        recordAlert(
+          "warn",
+          "CAPTURE_CURSOR_LOST",
+          `会话 ${sessionID} 的游标锚点不在 context 里（压缩/分叉），本轮全量重扫（缓冲按 evidence 去重）`,
+        );
+      }
       diag.updatedAt = new Date().toISOString();
       void persistDiag();
+
+      if (plan.nextCursorId !== undefined) {
+        await writeCursor(sessionID, {
+          lastMessageId: plan.nextCursorId,
+          scanned: msgs.length,
+          anchorLost,
+          updatedAt: new Date().toISOString(),
+        });
+      }
     }
 
     async function flushAll(sessionID: string, force: boolean): Promise<void> {
@@ -359,6 +518,14 @@ export default Plugin.define({
               await captureFromSession(sessionID);
             }
             await flushAll(sessionID, type === "session.deleted");
+            if (type === "session.deleted") {
+              // P0-1：会话没了，游标也清掉（ctx.storage 的键是全局的，不清会留垃圾行）
+              try {
+                await ctx.storage.remove(cursorKey(sessionID));
+              } catch {
+                // cursor cleanup must never escape
+              }
+            }
           } catch (err) {
             diag.failures++;
             diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
@@ -462,7 +629,7 @@ export default Plugin.define({
     await ctx.tool.transform((editor) => {
       editor.add({
         name: "reflect",
-        description: "手动触发 User Style + Project Memory 提炼（当 session.idle 未触发时使用）",
+        description: "手动触发 User Style + Project Memory 提炼（事件触发被节流或未触发时的兜底）",
         input: { type: "object", properties: {}, required: [] },
         async execute(_input, toolCtx) {
           try {
@@ -513,11 +680,13 @@ export default Plugin.define({
             const d = { ...diag, ...(stored ?? {}) };
             const lines = [
               `[memx] 诊断`,
+              `version: ${d.version ?? "unknown"}`,
               `captured: ${d.captured}`,
               `refinements: ${d.refinements}`,
               `written: ${d.written}`,
               `failures: ${d.failures}`,
               `lastError: ${d.lastError || "无"}`,
+              `invalidStreak: style=${d.invalidStreak?.style ?? 0} memory=${d.invalidStreak?.memory ?? 0}`,
             ];
             // 注入事实：hook 触发数远大于注入数（子会话 + 闸门挡下 + 全缺都算触发不注入），
             // 只印 injections 会让人以为"注入没生效"，所以四个计数一起印。
@@ -540,6 +709,17 @@ export default Plugin.define({
               }`,
             );
             lines.push(`updatedAt: ${d.updatedAt}`);
+            // P0-1/P0-2/P0-3/P0-5 的新事实：游标增量 / 坏输出连击 / 定位告警 / 健康（不再进 MEMORY.md）
+            lines.push(
+              `capture.cursor: ${d.lastCapture?.cursor ?? "-"} newTurns=${d.lastCapture?.newTurns ?? 0} msgCount=${d.lastCapture?.msgCount ?? 0}`,
+              `warnings: ${d.lastWarnings && d.lastWarnings.length > 0 ? d.lastWarnings.join(" | ") : "无"}`,
+              `health: ${
+                d.health
+                  ? `fixes=${d.health.fixes} escalated=${d.health.escalated} at=${d.health.updatedAt}`
+                  : "无"
+              }`,
+              `alerts: ${d.alerts && d.alerts.length > 0 ? d.alerts.map((a) => `${a.level}/${a.code}`).join(" ") : "无"}`,
+            );
             return { content: lines.join("\n") };
           } catch (err) {
             return { content: `[memx] status failed: ${String(err)}` };

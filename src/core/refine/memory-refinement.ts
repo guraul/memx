@@ -3,6 +3,8 @@ import { MemoryProposalArraySchema } from "../memory-types";
 import { MEMORY_REFINEMENT_SYSTEM_PROMPT } from "./memory-prompts";
 import { readMemoryIndex } from "../store/memory-md";
 import type { LLMClient } from "./refinement";
+import type { RefineOutcome } from "./refine-outcome";
+import { formatIssues, snippet } from "./refine-outcome";
 
 function buildUserMessage(signals: MemorySignal[], existingIndex: string): string {
   const signalLines = signals
@@ -25,13 +27,14 @@ function extractJson(raw: string): string {
   return trimmed;
 }
 
+/** P0-2：三态返回（合法空数组 / 坏 JSON / schema 失败），不再一律 `[]` */
 export async function refineMemory(
   signals: MemorySignal[],
   llm: LLMClient,
   existingIndex?: string,
   model?: string,
-): Promise<MemoryProposal[]> {
-  if (signals.length === 0) return [];
+): Promise<RefineOutcome<MemoryProposal>> {
+  if (signals.length === 0) return { kind: "adjudicated-empty", reason: "no-signals" };
 
   const content = existingIndex ?? readMemoryIndex();
   const userMsg = buildUserMessage(signals, content);
@@ -55,12 +58,27 @@ export async function refineMemory(
   let parsed: unknown;
   try {
     parsed = JSON.parse(extractJson(raw));
-  } catch {
-    return [];
+  } catch (err) {
+    return {
+      kind: "invalid-output",
+      error: `json-parse: ${err instanceof Error ? err.message : String(err)}`,
+      rawSnippet: snippet(raw),
+    };
   }
 
   const result = MemoryProposalArraySchema.safeParse(parsed);
-  if (!result.success) return [];
+  if (!result.success) {
+    return {
+      kind: "invalid-output",
+      error: `schema: ${formatIssues(result.error.issues)}`,
+      rawSnippet: snippet(raw),
+    };
+  }
 
-  return result.data.filter((p) => p.content.length > 0);
+  if (result.data.length === 0) return { kind: "adjudicated-empty", reason: "llm-empty" };
+
+  const proposals = result.data.filter((p) => p.content.length > 0);
+  if (proposals.length === 0) return { kind: "adjudicated-empty", reason: "all-filtered" };
+
+  return { kind: "proposals", proposals };
 }

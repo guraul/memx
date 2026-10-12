@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdirSync, rmSync } from "fs";
-import { runHealthCheck, autoFix, formatHealthLog, rebuildIndex } from "../src/core/health/memory-health";
+import { runHealthCheck, autoFix, formatHealthLog, rebuildIndex, runHealthMaintenance } from "../src/core/health/memory-health";
 import { applyMemoryProposal } from "../src/core/store/memory-md";
 import type { MemoryProposal } from "../src/core/memory-types";
 
@@ -126,6 +126,51 @@ describe("autoFix", () => {
     const escalated = logs.filter((l) => l.action === "escalated-manual");
     expect(fixes.length).toBe(3);
     expect(escalated.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("P0-5 runHealthMaintenance：健康日志绝不写回 MEMORY.md", () => {
+  // 独立 slug + 独立 .mem 目录：健康检查是全目录扫描，共用 TEST_SLUG 会跟别的用例互相污染
+  const MAINT_SLUG = "root-project-maint";
+
+  beforeAll(() => {
+    mkdirSync(`/tmp/opencode-memx-test-home/.opencode/projects/${MAINT_SLUG}/.mem`, { recursive: true });
+  });
+
+  it("死链被修掉，但返回的 index 里没有 auto-fix HTML 注释", () => {
+    const index = `## ${MAINT_SLUG}\n- [ghost](~/.opencode/projects/${MAINT_SLUG}/.mem/project_ghost_maint.md) - ghost memory\n`;
+    const { index: fixed, logs } = runHealthMaintenance(index, MAINT_SLUG);
+    expect(logs.map((l) => l.action)).toContain("removed-dead-pointer");
+    expect(fixed).not.toContain("auto-fix");
+    expect(fixed).not.toContain("<!--");
+    expect(fixed).not.toContain("project_ghost_maint.md");
+  });
+
+  it("孤儿文件补指针，索引里同样不落日志", () => {
+    const orphan = makeProposal("project_orphan_maint.md", "orphan", "orphan context");
+    applyMemoryProposal(orphan, "", MAINT_SLUG);
+    const index = `## ${MAINT_SLUG}\n`;
+    const { index: fixed, logs } = runHealthMaintenance(index, MAINT_SLUG);
+    expect(logs.map((l) => l.action)).toContain("added-pointer");
+    expect(fixed).toContain("project_orphan_maint.md");
+    expect(fixed).not.toContain("<!--");
+  });
+
+  it("仅有 escalated（索引膨胀）时不动文件，只回传日志", () => {
+    // 独立 slug：上一个用例写下的孤儿文件不能让这里的 orphanFiles 非空
+    const MAINT2_SLUG = "root-project-maint2";
+    mkdirSync(`/tmp/opencode-memx-test-home/.opencode/projects/${MAINT2_SLUG}/.mem`, { recursive: true });
+    const keep = makeProposal("project_keep_maint.md", "keep", "keep context");
+    applyMemoryProposal(keep, "", MAINT2_SLUG);
+    // 200 条指向同一个真实文件：无死链、无孤儿，只有"行数超阈值"这一条 escalated
+    const raw = `- [keep](~/.opencode/projects/${MAINT2_SLUG}/.mem/project_keep_maint.md) - keep context`;
+    const index = `## ${MAINT2_SLUG}\n${Array.from({ length: 200 }, () => raw).join("\n")}\n`;
+    const { index: fixed, logs, report } = runHealthMaintenance(index, MAINT2_SLUG);
+    expect(report.deadLinks).toHaveLength(0);
+    expect(report.orphanFiles).toHaveLength(0);
+    expect(report.escalated.length).toBeGreaterThan(0);
+    expect(logs.map((l) => l.action)).toContain("escalated-manual");
+    expect(fixed).toBe(index); // 原样返回，不触发重写/备份
   });
 });
 

@@ -36,9 +36,20 @@ For each candidate, ask: "If the user switches to a completely different project
 ## Conflict and dedup
 
 Compare against the existing USER.md content provided:
-- If a new signal semantically duplicates an existing entry, set action to "update" with the existing entry's target_line, not "append"
-- If a new signal contradicts and supersedes an existing entry (e.g., user moved from Vue to Svelte), set action to "deprecate" on the old entry's target_line, and "append" the new one
+- If a new signal semantically duplicates an existing entry, set action to "update" with the existing entry's **target_text**, not "append"
+- If a new signal contradicts and supersedes an existing entry (e.g., user moved from Vue to Svelte), set action to "deprecate" on the old entry, and "append" the new one
 - If a new signal merely restates an existing entry with no added information, drop it (return nothing for that signal)
+
+## How to point at an existing entry (target_text, target_line)
+
+The existing USER.md is given with a line-number prefix (like "  12| - [2026-07-28] ..."). For
+"update" and "deprecate" you MUST copy the target entry's text **verbatim** into target_text:
+the text after the "- [YYYY-MM-DD] " prefix, without the prefix itself and without markdown
+decorations. Example: for the line "- [2026-07-28] 先给结论再展开", target_text is
+"先给结论再展开".
+
+target_line is an optional fallback used only when the code cannot find target_text.
+Prefer target_text; a stale line number silently edits the wrong entry.
 
 ## Stale-entry awareness
 
@@ -54,13 +65,15 @@ Schema for each element (strict - extra fields will cause validation failure):
   "action": "append" | "update" | "deprecate",
   "category": "communication" | "toolchain" | "architecture" | "pitfall",
   "content": "the preference, ≤100 chars",
-  "target_line": <number, only for update/deprecate - the existing entry's line number>,
+  "target_text": "for update/deprecate: the existing entry's text copied verbatim (≤200 chars)",
+  "target_line": <optional fallback: the existing entry's line number>,
   "reason": "≤50 chars, why this action"
 }
 
 Rules:
 - "action": append (new entry) / update (replace existing entry in-place) / deprecate (mark existing entry as deprecated)
-- "target_line": required when action is "update" or "deprecate"; omit (or null) for "append"
+- "target_text": REQUIRED when action is "update" or "deprecate" - copy the existing entry's text verbatim (without the "- [date] " prefix); omit for "append"
+- "target_line": optional fallback only; never use it instead of target_text
 - "reason": REQUIRED for every proposal - short rationale for the action
 - Do NOT include "evidence", "confidence", or "source" fields - those are input-only, not output
 - "content" should state what the user wants (not what they don't want, unless it's a pitfall)`;

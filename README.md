@@ -38,7 +38,7 @@ Both tracks share the same trigger pipeline (`session.idle` / `reflect`) but hav
 
 ```
 [Signal Capture]                  ->    [Batch Refinement + Persistence]
- session.idle / reflect                   session.idle / reflect
+ session.execution.succeeded / reflect    session.execution.succeeded / reflect
       │                                       │
  Track 1: STYLE_SIGNAL HTML comments      Track 1: LLM dialectical refinement
  Track 2: MEMORY_SIGNAL HTML comments    + USER.md diff + incremental patch
@@ -47,15 +47,23 @@ Both tracks share the same trigger pipeline (`session.idle` / `reflect`) but hav
   evidence)                               + MEMORY.md diff
       │                                       + .mem/*.md write
       ↓                                       ↓
- app.log diagnostics + clear buffer      USER.md + MEMORY.md auto-backup
+ ctx.storage diagnostics + clear buffer   USER.md + MEMORY.md auto-backup
 ```
 
 ## Trigger Mechanism
 
-- `session.idle`: Fires when session is truly idle (after a turn fully ends). Auto-captures signals and refines (throttled by `throttleMinutes`).
-- `session.deleted` / exit (`dispose`): Force-flushes buffer without fetching session history.
-- `reflect` tool: Manually triggers full refinement (fetches last turn + skips throttle). Runs both Track 1 and Track 2. Fallback when `session.idle` doesn't fire.
+- `session.execution.succeeded`: Fires after every turn (v2 does **not** emit `session.idle`). Captures signals incrementally and refines (throttled by `throttleMinutes`).
+- `session.deleted` / exit (`dispose`): Force-flushes the buffer and drops that session's capture cursor.
+- `reflect` tool: Manually triggers full refinement (skips throttle). Runs both Track 1 and Track 2. Fallback when the event trigger is throttled or doesn't fire.
 - Plugin auto-skips its own refinement sub-sessions; refinement is mutex-serialized (`refinementInFlight`) to prevent concurrent storms and duplicate writes.
+
+## Correctness guarantees (stage 3 P0 fixes)
+
+- **Incremental capture**: every turn is scanned, not just the last one. A per-session cursor anchored on the **message id** lives in `ctx.storage` (`cursor:<sessionID>`); if the anchor is gone (context compaction/fork) it falls back to a full rescan, deduped by signal `evidence`, and records a warn alert.
+- **Three-state refinement**: `proposals` / `adjudicated-empty` / `invalid-output`. "Nothing worth saving" clears the buffer; malformed LLM output keeps it for a retry, and 3 consecutive bad outputs drop it with an alert instead of looping forever.
+- **Single-pass write + content anchors**: a batch is parsed once, applied in memory, serialized once (no intra-batch line drift). `update`/`deprecate` locate their target by copying the entry text (`target_text`: exact → normalized → unique containment → line number as last resort); every downgrade or miss is reported.
+- **Cross-process lock**: `USER.md` / `MEMORY.md` read-modify-write runs under a lock file with mtime TTL (`~/.opencode/.*.lock`), and the file is re-read inside the lock. The LLM call is never inside the lock.
+- **Health logs never enter `MEMORY.md`**: autofix results go to `ctx.storage` diagnostics / alerts; the index stays a pure index.
 
 ## Installation
 

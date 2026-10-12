@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { refineMemory } from "../src/core/refine/memory-refinement";
 import type { LLMClient } from "../src/core/refine/refinement";
 import type { MemorySignal } from "../src/core/memory-types";
+import { proposalsOf } from "../src/core/refine/refine-outcome";
 
 function createMockLLM(response: string): LLMClient {
   return { chat: async () => response };
@@ -22,10 +23,10 @@ const sampleSignals: MemorySignal[] = [
 ];
 
 describe("refineMemory", () => {
-  it("returns empty array when no signals", async () => {
+  it("adjudicates empty when no signals", async () => {
     const llm = createMockLLM("[]");
     const result = await refineMemory([], llm, "");
-    expect(result).toEqual([]);
+    expect(result).toEqual({ kind: "adjudicated-empty", reason: "no-signals" });
   });
 
   it("parses valid LLM response", async () => {
@@ -45,20 +46,29 @@ describe("refineMemory", () => {
       ]),
     );
     const result = await refineMemory(sampleSignals, llm, "");
-    expect(result).toHaveLength(1);
-    expect(result[0]!.target_file).toBe("project_auth_rewrite.md");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.target_file).toBe("project_auth_rewrite.md");
   });
 
-  it("returns empty when LLM returns invalid JSON", async () => {
+  it("reports invalid-output when LLM returns invalid JSON", async () => {
     const llm = createMockLLM("not json");
     const result = await refineMemory(sampleSignals, llm, "");
-    expect(result).toEqual([]);
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") expect(result.error).toMatch(/json-parse/);
   });
 
-  it("returns empty when schema validation fails", async () => {
+  it("reports invalid-output when schema validation fails", async () => {
     const llm = createMockLLM(JSON.stringify([{ action: "invalid" }]));
     const result = await refineMemory(sampleSignals, llm, "");
-    expect(result).toEqual([]);
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") expect(result.error).toMatch(/schema/);
+  });
+
+  it("adjudicates empty (llm-empty) for a valid empty array", async () => {
+    const llm = createMockLLM("[]");
+    const result = await refineMemory(sampleSignals, llm, "");
+    expect(result).toEqual({ kind: "adjudicated-empty", reason: "llm-empty" });
   });
 
   it("filters out empty content proposals", async () => {
@@ -69,8 +79,9 @@ describe("refineMemory", () => {
       ]),
     );
     const result = await refineMemory(sampleSignals, llm, "");
-    expect(result).toHaveLength(1);
-    expect(result[0]!.content).toBe("valid");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.content).toBe("valid");
   });
 
   it("passes model param to LLM client", async () => {

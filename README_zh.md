@@ -38,7 +38,7 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
 
 ```
 [信号捕获]                    ->    [批处理提炼 + 持久化]
- session.idle / reflect              session.idle / reflect
+ session.execution.succeeded / reflect session.execution.succeeded / reflect
       │                                  │
  Track 1: STYLE_SIGNAL HTML 注释      Track 1: LLM 辩证提炼
  Track 2: MEMORY_SIGNAL HTML 注释    + USER.md 比对 + 增量 Patch
@@ -47,15 +47,23 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
   去重)                                + MEMORY.md 比对
       │                                  + .mem/*.md 写入
       ↓                                  ↓
- app.log 诊断日志 + 清空缓冲区        USER.md + MEMORY.md 自动备份
+ ctx.storage 诊断 + 清空缓冲区        USER.md + MEMORY.md 自动备份
 ```
 
 ## 触发机制
 
-- `session.idle`：每次回复结束、会话真正空闲时触发，自动捕获信号并提炼（受 `throttleMinutes` 节流）。
-- `session.deleted` / 退出（`dispose`）：强制冲刷缓冲区，不拉取会话历史。
-- `reflect` 工具：手动触发完整提炼（拉取当前会话最后一轮 + 跳过节流），同时运行 Track 1 和 Track 2。用于 `session.idle` 未触发时的兜底。
+- `session.execution.succeeded`：每回合结束都发（**v2 不再发 `session.idle`**），自动增量捕获信号并提炼（受 `throttleMinutes` 节流）。
+- `session.deleted` / 退出（`dispose`）：强制冲刷缓冲区（并删掉该会话的捕获游标），不拉取会话历史。
+- `reflect` 工具：手动触发完整提炼（跳过节流），同时运行 Track 1 和 Track 2。用于事件触发被节流或没发时的兜底。
 - 插件自动跳过自己创建的提炼子会话，不会自我触发；提炼过程互斥串行（`refinementInFlight`），防止并发风暴与重复写入。
+
+## 正确性保证（阶段 3 P0 修复）
+
+- **增量捕获**：每轮都扫，不再只扫最后一轮。游标锚在**消息 id** 上、存 `ctx.storage`（`cursor:<sessionID>`）；锚点丢失（上下文压缩/分叉）时退全量重扫，按 evidence 去重，并记一条 warn 报警。
+- **提炼三态**：`proposals` / `adjudicated-empty` / `invalid-output`。LLM 裁决"不值得存"→ 清缓冲结案；输出坏 JSON/schema 不合法 → 保留缓冲重试，连续 3 次才丢弃并记报警（防坏模型无限循环）。
+- **单遍写盘 + 内容锚点**：一批提案 parse 一次、内存内改完、序列化一次（批内行号不再漂移）。`update`/`deprecate` 靠抄写目标条目原文定位（精确 → 归一 → 唯一包含 → 行号兜底），每次降级/未命中都有告警。
+- **跨进程文件锁**：USER.md / MEMORY.md 的 read-modify-write 走带 mtime TTL 的锁文件（`~/.opencode/.*.lock`），并在锁内**重读**文件；LLM 调用绝不进锁。
+- **健康日志不写进 MEMORY.md**：auto-fix 结果落 `ctx.storage` 诊断/报警，索引保持纯索引。
 
 ## 安装
 
