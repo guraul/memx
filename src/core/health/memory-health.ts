@@ -51,7 +51,7 @@ export function runHealthCheck(indexContent: string, slug: string): HealthReport
     escalated: [],
   };
 
-  const sections = parseMemoryIndex(indexContent);
+  const sections = parseMemoryIndex(indexContent).sections;
   const section = sections.find((s) => s.slug === slug);
 
   // Count index lines (non-empty, non-header)
@@ -111,7 +111,8 @@ export function runHealthCheck(indexContent: string, slug: string): HealthReport
 export function autoFix(report: HealthReport, indexContent: string, slug: string): { newIndex: string; logs: AutoFixLog[] } {
   const logs: AutoFixLog[] = [];
   let fixCount = 0;
-  const sections = parseMemoryIndex(indexContent);
+  const doc = parseMemoryIndex(indexContent);
+  const sections = doc.sections;
   let section = sections.find((s) => s.slug === slug);
   if (!section) {
     section = { slug, entries: [] };
@@ -185,7 +186,7 @@ export function autoFix(report: HealthReport, indexContent: string, slug: string
     });
   }
 
-  const newIndex = serializeMemoryIndex(sections);
+  const newIndex = serializeMemoryIndex(doc);
   return { newIndex, logs };
 }
 

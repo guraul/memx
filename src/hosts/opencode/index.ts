@@ -148,8 +148,7 @@ export default Plugin.define({
 
         if (isOverLimit(content)) {
           backupUserMd();
-          const sections = parseUserMd(content);
-          content = serializeUserMd(sections);
+          content = serializeUserMd(parseUserMd(content));
         }
 
         writeUserMd(content);

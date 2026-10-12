@@ -98,6 +98,22 @@ describe("autoFix", () => {
     expect(newIndex).toContain("project_orphan_fix.md");
   });
 
+  it("keeps non-entry content in the index (health logs, prose)", () => {
+    const index = `# MEMORY
+
+手写说明
+
+## ${TEST_SLUG}
+- [ghost](~/.opencode/projects/${TEST_SLUG}/.mem/project_ghost_log.md) - ghost
+
+<!-- 2026-10-12 auto-fix: previous run -->`;
+    const report = runHealthCheck(index, TEST_SLUG);
+    const { newIndex } = autoFix(report, index, TEST_SLUG);
+    expect(newIndex).toContain("# MEMORY");
+    expect(newIndex).toContain("手写说明");
+    expect(newIndex).toContain("auto-fix: previous run");
+  });
+
   it("respects max auto-fixes limit (3)", () => {
     const lines: string[] = [`## ${TEST_SLUG}`];
     for (let i = 0; i < 5; i++) {

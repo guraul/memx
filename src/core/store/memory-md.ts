@@ -2,9 +2,13 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readdir
 import { join, basename } from "path";
 import { homedir } from "os";
 import type { MemoryProposal } from "../memory-types";
+import { trimBlankLines, trimTrailingBlankLines } from "./markdown-lines";
+
 export interface MemoryIndexSection {
   slug: string;
   entries: MemoryIndexEntry[];
+  /** 非受管原文行（health 日志注释、用户手写说明等），原样保留 */
+  extras?: string[];
 }
 
 export interface MemoryIndexEntry {
@@ -15,6 +19,12 @@ export interface MemoryIndexEntry {
 }
 
 const INDEX_ENTRY_RE = /^- \[(.+?)\]\((.+?)\) - (.+)$/;
+
+export interface MemoryIndexDoc {
+  /** 首个 ## 小节之前的全部原文行（原样保留） */
+  preamble: string[];
+  sections: MemoryIndexSection[];
+}
 
 export function getMemoryIndexPath(): string {
   return join(homedir(), ".opencode", "MEMORY.md");
@@ -76,21 +86,32 @@ function cleanupOldBackups(maxKeep = 5): void {
   }
 }
 
-export function parseMemoryIndex(content: string): MemoryIndexSection[] {
-  if (!content.trim()) return [];
+/**
+ * 解析 MEMORY.md 索引。受管集合 = `## <slug>` 小节 + 其中的 `- [t](p) - hook` 指针；
+ * 其余一切（health 日志注释、用户手写说明、首个 ## 之前的散文）原样带走，写回不丢。
+ */
+export function parseMemoryIndex(content: string): MemoryIndexDoc {
+  if (!content.trim()) return { preamble: [], sections: [] };
   const lines = content.split("\n");
+  const preamble: string[] = [];
   const sections: MemoryIndexSection[] = [];
   let current: MemoryIndexSection | null = null;
+  // 最近一个受管小节：非受管行挂到它身上，位置与原文一致
+  let lastManaged: MemoryIndexSection | null = null;
 
   for (const line of lines) {
     const headerMatch = line.match(/^## (.+)$/);
     if (headerMatch) {
       const slug = headerMatch[1]!.trim();
-      current = { slug, entries: [] };
-      sections.push(current);
-      continue;
+      if (slug) {
+        current = { slug, entries: [] };
+        sections.push(current);
+        lastManaged = current;
+        continue;
+      }
     }
-    const entryMatch = line.match(INDEX_ENTRY_RE);
+
+    const entryMatch = current ? line.match(INDEX_ENTRY_RE) : null;
     if (entryMatch && current) {
       current.entries.push({
         title: entryMatch[1]!,
@@ -98,19 +119,33 @@ export function parseMemoryIndex(content: string): MemoryIndexSection[] {
         hook: entryMatch[3]!,
         raw: line,
       });
+      continue;
+    }
+
+    const owner = current ?? lastManaged;
+    if (owner) {
+      owner.extras = [...(owner.extras ?? []), line];
+    } else {
+      preamble.push(line);
     }
   }
-  return sections;
+
+  return { preamble: trimBlankLines(preamble), sections };
 }
 
-export function serializeMemoryIndex(sections: MemoryIndexSection[]): string {
+export function serializeMemoryIndex(doc: MemoryIndexDoc): string {
   const result: string[] = [];
-  for (const section of sections) {
-    if (section.entries.length === 0) continue;
+  if (doc.preamble.length > 0) {
+    result.push(...doc.preamble, "");
+  }
+  for (const section of doc.sections) {
+    const extras = trimTrailingBlankLines(section.extras ?? []);
+    if (section.entries.length === 0 && extras.length === 0) continue;
     result.push(`## ${section.slug}`);
     for (const entry of section.entries) {
       result.push(entry.raw.startsWith("- ") ? entry.raw : `- [${entry.title}](${entry.filePath}) - ${entry.hook}`);
     }
+    result.push(...extras);
     result.push("");
   }
   return result.join("\n");
@@ -158,7 +193,8 @@ export function readMemoryFile(slug: string, filename: string): string {
 export function applyMemoryProposal(proposal: MemoryProposal, existingIndex: string, slug: string): string {
   writeMemoryFile(slug, proposal);
 
-  const sections = parseMemoryIndex(existingIndex);
+  const doc = parseMemoryIndex(existingIndex);
+  const sections = doc.sections;
   let section = sections.find((s) => s.slug === slug);
   if (!section) {
     section = { slug, entries: [] };
@@ -201,12 +237,12 @@ export function applyMemoryProposal(proposal: MemoryProposal, existingIndex: str
     }
   }
 
-  return serializeMemoryIndex(sections);
+  return serializeMemoryIndex(doc);
 }
 
 export function forgetMemory(keyword: string, indexContent: string, slug: string): { newIndex: string; removed: string[] } {
-  const sections = parseMemoryIndex(indexContent);
-  const section = sections.find((s) => s.slug === slug);
+  const doc = parseMemoryIndex(indexContent);
+  const section = doc.sections.find((s) => s.slug === slug);
   const removed: string[] = [];
   if (!section) return { newIndex: indexContent, removed };
 
@@ -231,7 +267,7 @@ export function forgetMemory(keyword: string, indexContent: string, slug: string
   }
 
   section.entries = section.entries.filter((e) => !toRemove.includes(e));
-  return { newIndex: serializeMemoryIndex(sections), removed };
+  return { newIndex: serializeMemoryIndex(doc), removed };
 }
 
 function extractFilename(filePath: string): string {

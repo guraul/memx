@@ -46,6 +46,15 @@ export interface UserMdSection {
   header: string;
   category: Category;
   lines: UserMdEntry[];
+  /** 非受管原文行（受管小节内/其后用户自己写的散文、注释、未知小节），原样保留 */
+  extras?: string[];
+}
+
+/** USER.md 的完整文档视图：受管小节 + 非受管内容（写盘不得丢后者） */
+export interface UserMdDoc {
+  /** 首个受管小节之前的全部原文行（含用户自写的一级标题、散文、未知 ## 小节） */
+  preamble: string[];
+  sections: UserMdSection[];
 }
 
 export interface UserMdEntry {

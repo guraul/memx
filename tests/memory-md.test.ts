@@ -45,38 +45,69 @@ describe("path resolution", () => {
 });
 
 describe("parseMemoryIndex / serializeMemoryIndex", () => {
-  it("parses empty content into empty array", () => {
-    const sections = parseMemoryIndex("");
-    expect(sections).toHaveLength(0);
+  it("parses empty content into empty doc", () => {
+    const doc = parseMemoryIndex("");
+    expect(doc.sections).toHaveLength(0);
+    expect(doc.preamble).toHaveLength(0);
   });
 
   it("parses index with one project section", () => {
     const content = `## root-project-test\n- [auth rewrite](~/.opencode/projects/root-project-test/.mem/project_auth.md) - auth rewrite driven by compliance\n`;
-    const sections = parseMemoryIndex(content);
-    expect(sections).toHaveLength(1);
-    expect(sections[0]!.slug).toBe("root-project-test");
-    expect(sections[0]!.entries).toHaveLength(1);
-    expect(sections[0]!.entries[0]!.title).toBe("auth rewrite");
+    const doc = parseMemoryIndex(content);
+    expect(doc.sections).toHaveLength(1);
+    expect(doc.sections[0]!.slug).toBe("root-project-test");
+    expect(doc.sections[0]!.entries).toHaveLength(1);
+    expect(doc.sections[0]!.entries[0]!.title).toBe("auth rewrite");
   });
 
   it("parses multiple sections", () => {
     const content = `## root-project-a\n- [item a](~/.opencode/projects/root-project-a/.mem/a.md) - desc a\n\n## root-project-b\n- [item b](~/.opencode/projects/root-project-b/.mem/b.md) - desc b\n`;
-    const sections = parseMemoryIndex(content);
-    expect(sections).toHaveLength(2);
-    expect(sections[0]!.slug).toBe("root-project-a");
-    expect(sections[1]!.slug).toBe("root-project-b");
+    const doc = parseMemoryIndex(content);
+    expect(doc.sections).toHaveLength(2);
+    expect(doc.sections[0]!.slug).toBe("root-project-a");
+    expect(doc.sections[1]!.slug).toBe("root-project-b");
+  });
+
+  it("keeps health-log comments and prose across parse/serialize", () => {
+    // auto-fix 追加的 HTML 注释是追加在序列化结果之后的，非受管 → 必须能带回去
+    const content = `# MEMORY
+
+一些说明文字
+
+## root-project-test
+- [item a](~/.opencode/projects/root-project-test/.mem/a.md) - desc a
+
+<!-- 2026-10-12 auto-fix: removed-dead-pointer ~/.opencode/projects/root-project-test/.mem/gone.md - file not found in .mem/ -->
+`;
+    const serialized = serializeMemoryIndex(parseMemoryIndex(content));
+    expect(serialized).toContain("# MEMORY");
+    expect(serialized).toContain("一些说明文字");
+    expect(serialized).toContain("auto-fix: removed-dead-pointer");
+    expect(serialized).toContain("- [item a](~/.opencode/projects/root-project-test/.mem/a.md) - desc a");
+  });
+
+  it("serializeMemoryIndex(parseMemoryIndex(x)) is idempotent", () => {
+    const content = `# MEMORY\n\n## root-project-a\n- [item a](~/.opencode/projects/root-project-a/.mem/a.md) - desc a\n\n<!-- health log -->\n`;
+    const first = serializeMemoryIndex(parseMemoryIndex(content));
+    const second = serializeMemoryIndex(parseMemoryIndex(first));
+    expect(second).toBe(first);
+    expect(first.match(/## root-project-a/g)).toHaveLength(1);
+    expect(first.match(/health log/g)).toHaveLength(1);
   });
 
   it("serializes sections back to markdown", () => {
-    const sections = [
-      {
-        slug: "root-project-test",
-        entries: [
-          { title: "auth rewrite", filePath: "~/.opencode/projects/root-project-test/.mem/project_auth.md", hook: "auth rewrite driven by compliance", raw: "- [auth rewrite](~/.opencode/projects/root-project-test/.mem/project_auth.md) - auth rewrite driven by compliance" },
-        ],
-      },
-    ];
-    const result = serializeMemoryIndex(sections);
+    const doc = {
+      preamble: [],
+      sections: [
+        {
+          slug: "root-project-test",
+          entries: [
+            { title: "auth rewrite", filePath: "~/.opencode/projects/root-project-test/.mem/project_auth.md", hook: "auth rewrite driven by compliance", raw: "- [auth rewrite](~/.opencode/projects/root-project-test/.mem/project_auth.md) - auth rewrite driven by compliance" },
+          ],
+        },
+      ],
+    };
+    const result = serializeMemoryIndex(doc);
     expect(result).toContain("## root-project-test");
     expect(result).toContain("- [auth rewrite](~/.opencode/projects/root-project-test/.mem/project_auth.md) - auth rewrite driven by compliance");
   });
@@ -142,6 +173,68 @@ describe("applyMemoryProposal", () => {
     expect(newIndex).toContain("## root-project-test");
     expect(newIndex).toContain("project_merge_freeze.md");
     expect(existsSync(getMemoryFilePath(TEST_SLUG, "project_merge_freeze.md"))).toBe(true);
+  });
+});
+
+describe("applyMemoryProposal keeps unmanaged index content", () => {
+  const BASE_INDEX = `# MEMORY
+
+手写说明
+
+## root-project-test
+- [old thing](~/.opencode/projects/root-project-test/.mem/project_old.md) - old project context
+
+<!-- 2026-10-12 auto-fix: removed-dead-pointer ~/.opencode/projects/root-project-test/.mem/gone.md - file not found -->
+`;
+
+  it("append preserves health logs and prose", () => {
+    const proposal: MemoryProposal = {
+      action: "append",
+      type: "project",
+      name: "merge freeze",
+      description: "merge freeze begins 2026-03-05",
+      content: "Merge freeze after 2026-03-05.",
+      why: "Mobile team cutting release branch",
+      how_to_apply: "Flag non-critical PRs",
+      target_file: "project_merge_freeze.md",
+      reason: "new project context",
+    };
+    const newIndex = applyMemoryProposal(proposal, BASE_INDEX, TEST_SLUG);
+    expect(newIndex).toContain("# MEMORY");
+    expect(newIndex).toContain("手写说明");
+    expect(newIndex).toContain("auto-fix: removed-dead-pointer");
+    expect(newIndex).toContain("project_merge_freeze.md");
+    expect(newIndex).toContain("old thing");
+  });
+
+  it("deprecate preserves health logs and prose", () => {
+    const appendProposal: MemoryProposal = {
+      action: "append",
+      type: "project",
+      name: "old context",
+      description: "old project context",
+      content: "This is old.",
+      why: "old reason",
+      how_to_apply: "old scope",
+      target_file: "project_old.md",
+      reason: "initial",
+    };
+    let index = applyMemoryProposal(appendProposal, "", TEST_SLUG);
+    index += "\n<!-- 2026-10-12 auto-fix: added-pointer orphan.md - orphan file detected -->\n";
+    expect(index).toContain("added-pointer");
+
+    const deprecateProposal: MemoryProposal = {
+      action: "deprecate",
+      type: "project",
+      name: "old context",
+      description: "old project context",
+      content: "This is old.",
+      target_file: "project_old.md",
+      reason: "superseded",
+    };
+    index = applyMemoryProposal(deprecateProposal, index, TEST_SLUG);
+    expect(index).not.toContain("project_old.md");
+    expect(index).toContain("added-pointer");
   });
 });
 
