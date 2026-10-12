@@ -2,8 +2,11 @@
 //
 // 为什么是独立文件而不是塞进 USER.md：USER.md 是 memx 自己的数据文件，每次提炼都会被
 // 重写——早期把协议块放在那里已经造成过一次数据丢失（首次成功写盘就把协议抹掉，
-// 静默杀死之后所有信号捕获）。协议必须与数据分离，经 opencode.json 的 `instructions`
-// 注入到主 AI 的 system prompt。
+// 静默杀死之后所有信号捕获）。协议必须与数据分离。
+//
+// 协议由**插件自己**注入 system prompt（core/injection.ts + hosts/opencode/context-hook.ts）：
+// opencode.json 的 `instructions` 在 v2.0.26 是死字段（宿主只从 AGENTS.md 组装指令），
+// 那个注册项留着只为向前兼容，真正的注入通道是 `context` hook。
 //
 // 文本中的枚举值一律从 Zod schema 的 const 数组派生（见 CATEGORIES/SOURCES/... ），
 // 改 schema 即改文本，杜绝文档漂移；tests/protocol-template.test.ts 反向校验示例 JSON
@@ -19,10 +22,13 @@ export const PROTOCOL_VERSION = "1.0.0";
 /** 落盘文件名（相对 $OCP_DATA_DIR，即 ~/.opencode/）。 */
 export const PROTOCOL_FILE_NAME = "memx-protocol.md";
 
-/** 写进 opencode.json 的 instructions 条目（相对 $HOME 的路径展开形式）。 */
+/** 写进 opencode.json 的 instructions 条目（相对 $HOME 的路径展开形式）。
+ *  ⚠️ v2.0.26 上这是**死字段**（宿主不从这里读文件），只为向前兼容保留；真正的注入
+ *  由插件的 `context` hook 完成，路径由 core/injection-source.ts 解析。 */
 export const PROTOCOL_INSTRUCTION = "~/.opencode/" + PROTOCOL_FILE_NAME;
 
-/** 累积数据（与协议分开注入）：风格画像 / 项目记忆索引。 */
+/** 累积数据（与协议分开注入）：风格画像 / 项目记忆索引。同样只是 instructions 的
+ *  兼容条目；实际注入顺序见 core/injection.ts 的 INJECTION_SOURCE_ORDER。 */
 export const USER_MD_INSTRUCTION = "~/.opencode/USER.md";
 export const MEMORY_MD_INSTRUCTION = "~/.opencode/MEMORY.md";
 

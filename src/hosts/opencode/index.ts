@@ -19,12 +19,18 @@ import {
   backupUserMd,
 } from "../../core/store/user-md";
 import { loadMemxConfig } from "../../core/config";
+import type { MemxConfig } from "../../core/config";
 import { shouldRun, markRun } from "../../core/llm/throttle";
 import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/memory-capture";
 import { refineMemory } from "../../core/refine/memory-refinement";
 import { readMemoryIndex, writeMemoryIndex, applyMemoryProposal, forgetMemory } from "../../core/store/memory-md";
 import { deriveSlug } from "../../core/memory-types";
 import { runHealthCheck, autoFix, formatHealthLog } from "../../core/health/memory-health";
+import { describeGate, DEFAULT_AGENT_GATE } from "../../core/injection";
+import type { AgentGate } from "../../core/injection";
+import { InjectionSourceCache, readInjectionSources } from "../../core/injection-source";
+import { applyContextHook } from "./context-hook";
+import type { ContextHookEvent } from "./context-hook";
 
 /** v2 消息形状 / 归一 / 最后一轮提取 → 共享模块（index.ts 与 session-llm.ts 都依赖，
  *  不能互相 import，故放 context-shape.ts） */
@@ -71,15 +77,46 @@ export default Plugin.define({
         /** session.context 返回形状（array=v2 SDK 数组本身 / envelope=旧信封 / other） */
         ctxShape: "array" | "envelope" | "other";
       };
+      /** 注入诊断（context hook 的每 step 行为 + 装配结果） */
+      injection?: {
+        /** hook 触发总次数（含子会话分支） */
+        hookFires: number;
+        /** 真正往 event.system 追加了内容的次数 */
+        injections: number;
+        /** 命中子会话分支（整体替换 system）——这些绝不该被注入 */
+        childSessions: number;
+        /** 被 agent 闸门挡下的次数 */
+        gated: number;
+        /** 三块内容全缺 → 什么都没注入的次数 */
+        empty: number;
+        /** 累计截断次数（按来源计） */
+        truncations: number;
+        /** 最近一次注入的每来源事实 */
+        sources?: Record<string, { lines: number; bytes: number; truncated: boolean }>;
+        /** 最近一次注入的总字节数 */
+        lastBytes?: number;
+        /** 最近一次注入时命中的 agent */
+        lastAgent?: string;
+        /** 生效中的闸门（人话） */
+        gate?: string;
+      };
       updatedAt: string;
     };
     const diag: Diag = {
-      version: "v2-e2e-3",
+      version: "v2-e2e-3+inject",
       captured: 0,
       refinements: 0,
       written: 0,
       failures: 0,
       lastError: "",
+      injection: {
+        hookFires: 0,
+        injections: 0,
+        childSessions: 0,
+        gated: 0,
+        empty: 0,
+        truncations: 0,
+      },
       updatedAt: new Date().toISOString(),
     };
     const persistDiag = async (): Promise<void> => {
@@ -99,7 +136,10 @@ export default Plugin.define({
         if (scoped) return;
         const legacy = (await ctx.storage.get("diag")) as Partial<Diag> | undefined;
         if (!legacy) return;
-        Object.assign(diag, legacy);
+        const { injection, ...rest } = legacy;
+        Object.assign(diag, rest);
+        // 旧行没有 injection 字段（或字段不全）：按缺省补齐，绝不把已记的计数抹成 undefined
+        if (injection) Object.assign(diag.injection!, injection);
         await persistDiag();
       } catch {
         // migration must never escape
@@ -333,21 +373,83 @@ export default Plugin.define({
       }
     })();
 
-    // 子会话提炼的组装管线钩子：全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
-    // 命中时整体替换 system（不是 push——v1 body.system 是替换语义）、temperature 0.2。
-    // ⚠️ 不要再清空 tools（event.tools = {}）：#82 实测会让孩子会话的模型请求被 free tier
-    // 拒绝——finish:"error" + error.type:"provider.auth" status:403
-    // {"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}，
-    // content 为空数组，refine() 收到 "" → JSON 解析失败 → 永远不写盘。
-    // 证据：toolsBefore=13 → toolsAfter=0 即 403；保留 tools（13）则 finish:"stop" 且有正文。
-    // 改用 system 替换约束输出（提炼提示词已要求"只输出 JSON 数组"），不要靠清空 tools。
+    // 注入配置（闸门）：setup 时先读一次，之后按 TTL 重读——hook 回调本身是同步的，
+    // 而 loadMemxConfig 是异步的，所以不能每次触发都 await（那会把 IO 拖进每 step 路径）。
+    // 闸门变化极低频（改配置），30s TTL 足够，且改完 30 秒内必生效，不必重启宿主。
+    let injectGate: AgentGate = DEFAULT_AGENT_GATE;
+    const INJECT_GATE_TTL_MS = 30_000;
+    const INJECT_PERSIST_TTL_MS = 5_000;
+    let lastInjectPersistAt = 0;
+    const injectCache = new InjectionSourceCache();
+    const ensureInjectGate = (config?: MemxConfig): void => {
+      if (config) injectGate = config.inject;
+      if (diag.injection) diag.injection.gate = describeGate(injectGate);
+    };
+    // 启动时立刻把闸门读进内存（失败静默：默认全开就是既有行为）。之后按 TTL 后台重读——
+    // hook 回调是同步的，不能在里面 await；改配置 30 秒内生效，不必重启宿主。
+    const reloadGate = (): void => {
+      void loadMemxConfig().then(
+        (config) => ensureInjectGate(config),
+        () => {},
+      );
+    };
+    reloadGate();
+    const gateTimer = setInterval(reloadGate, INJECT_GATE_TTL_MS);
+    // 定时器不该拖住宿主退出（unref 在 Node 与 Bun 上都有；没有就退化成普通 setInterval）
+    (gateTimer as { unref?: () => void }).unref?.();
+
+    /** 子会话提炼的组装管线钩子：全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
+     * 命中时整体替换 system（不是 push——v2 body.system 是替换语义）、temperature 0.2。
+     * ⚠️ 不要再清空 tools（event.tools = {}）：#82 实测会让孩子会话的模型请求被 free tier
+     * 拒绝——finish:"error" + error.type:"provider.auth" status:403
+     * {"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}，
+     * content 为空数组，refine() 收到 "" → JSON 解析失败 → 永远不写盘。
+     * 证据：toolsBefore=13 → toolsAfter=0 即 403；保留 tools（13）则 finish:"stop" 且有正文。
+     * 改用 system 替换约束输出（提炼提示词已要求"只输出 JSON 数组"），不要靠清空 tools。
+     *
+     * 两条分支互斥且顺序固定：**先判子会话**。子会话是 memx 自己的提炼调用，注入一旦漏进去
+     * 就污染提炼输入（协议 + 画像 + 索引全在里面），既让提炼质量塌掉，也是 #82 那类 403 的高危区。
+     * 非子会话才走注入，且只 **append**：`event.system` 此时已经装着 agent.system 和 AGENTS.md
+     * 正文（model-request.ts:110-116），替换会连宿主内容一起抹掉。
+     */
     ctx.session
       .hook("context", (event) => {
         try {
-          const system = childSessions.get(event.sessionID);
-          if (system === undefined) return; // 非子会话：零开销放行
-          event.system = [{ type: "text", text: system }] as typeof event.system;
-          event.options.temperature = 0.2;
+          const inj = diag.injection;
+          if (inj) inj.hookFires++;
+
+          const outcome = applyContextHook(
+            event as unknown as ContextHookEvent,
+            { childSessions, gate: injectGate, readSources: () => readInjectionSources(injectCache) },
+          );
+
+          if (outcome.kind === "child" || outcome.kind === "gated" || outcome.kind === "empty") {
+            if (inj) {
+              if (outcome.kind === "child") inj.childSessions++;
+              else if (outcome.kind === "gated") inj.gated++;
+              else inj.empty++;
+            }
+            return;
+          }
+
+          if (inj) {
+            inj.injections++;
+            inj.truncations += outcome.facts.filter((f) => f.truncated).length;
+            inj.lastBytes = outcome.totalBytes;
+            if (outcome.agent !== undefined) inj.lastAgent = outcome.agent;
+            inj.sources = Object.fromEntries(
+              outcome.facts.map((f) => [f.id, { lines: f.lines, bytes: f.bytes, truncated: f.truncated }]),
+            ) as Record<string, { lines: number; bytes: number; truncated: boolean }>;
+            inj.gate = describeGate(injectGate);
+            diag.updatedAt = new Date().toISOString();
+            // hook 是每 step 触发的，逐次落盘会把 kv 写放大成"每步一次 sqlite 写"。
+            // 计数器在内存里始终是最新的（memx_status 与 dispose 都会落），磁盘只做节流快照。
+            const now = Date.now();
+            if (now - lastInjectPersistAt > INJECT_PERSIST_TTL_MS) {
+              lastInjectPersistAt = now;
+              void persistDiag();
+            }
+          }
         } catch {
           // hook must never escape
         }
@@ -402,23 +504,43 @@ export default Plugin.define({
 
       editor.add({
         name: "memx_status",
-        description: "Show memx structured diagnostics: capture/refinement/written counters, failures, last error.",
+        description:
+          "Show memx structured diagnostics: capture/refinement/written counters, failures, last error, and system-prompt injection facts.",
         input: { type: "object", properties: {}, required: [] },
         async execute() {
           try {
             const stored = (await ctx.storage.get(diagKey)) as Partial<Diag> | undefined;
             const d = { ...diag, ...(stored ?? {}) };
-            return {
-              content: [
-                `[memx] 诊断`,
-                `captured: ${d.captured}`,
-                `refinements: ${d.refinements}`,
-                `written: ${d.written}`,
-                `failures: ${d.failures}`,
-                `lastError: ${d.lastError || "无"}`,
-                `updatedAt: ${d.updatedAt}`,
-              ].join("\n"),
-            };
+            const lines = [
+              `[memx] 诊断`,
+              `captured: ${d.captured}`,
+              `refinements: ${d.refinements}`,
+              `written: ${d.written}`,
+              `failures: ${d.failures}`,
+              `lastError: ${d.lastError || "无"}`,
+            ];
+            // 注入事实：hook 触发数远大于注入数（子会话 + 闸门挡下 + 全缺都算触发不注入），
+            // 只印 injections 会让人以为"注入没生效"，所以四个计数一起印。
+            const inj = d.injection;
+            lines.push(
+              `inject.hookFires: ${inj?.hookFires ?? 0}`,
+              `inject.injections: ${inj?.injections ?? 0}`,
+              `inject.childSessions: ${inj?.childSessions ?? 0}`,
+              `inject.gated: ${inj?.gated ?? 0}`,
+              `inject.empty: ${inj?.empty ?? 0}`,
+              `inject.truncations: ${inj?.truncations ?? 0}`,
+              `inject.lastBytes: ${inj?.lastBytes ?? 0}`,
+              `inject.gate: ${inj?.gate ?? "unknown"}`,
+              `inject.sources: ${
+                inj?.sources && Object.keys(inj.sources).length > 0
+                  ? Object.entries(inj.sources)
+                      .map(([k, v]) => `${k}=${v.lines}L/${v.bytes}B${v.truncated ? "(truncated)" : ""}`)
+                      .join(" ")
+                  : "无"
+              }`,
+            );
+            lines.push(`updatedAt: ${d.updatedAt}`);
+            return { content: lines.join("\n") };
           } catch (err) {
             return { content: `[memx] status failed: ${String(err)}` };
           }
@@ -433,8 +555,16 @@ export default Plugin.define({
       } catch {
         // flush on exit, never throw
       }
+      // 注入计数被 5s 节流挡在内存里的部分，在这里落盘（dispose 是最后一个机会）
+      try {
+        await persistDiag();
+      } catch {
+        // persist on exit, never throw
+      }
       buffer.clear();
       memoryBuffer.clear();
+      injectCache.clear();
+      clearInterval(gateTimer);
       controller.abort();
     };
   },

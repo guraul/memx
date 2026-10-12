@@ -21,7 +21,7 @@ Both tracks share the same trigger pipeline (`session.idle` / `reflect`) but hav
 | **Honcho** | Dialectical reasoning prompt | Prompts LLM to ask "does this apply across projects?", distinguishing temporary instructions from long-term preferences |
 | **Mem0** | Dedup and incremental update | `StyleProposal.action` / `MemoryProposal.action` (append/update/deprecate) + dedup rules |
 | **OpenClaw** | Time decay and lifecycle management | 200-line compression + strikethrough deprecation (no physical deletion) |
-| **OpenCode V2 Plugin API** | Hook system + `instructions` loading | `event` / `tool.reflect` / `dispose` + auto-injection via `instructions` field |
+| **OpenCode V2 Plugin API** | Hook system + session assembly hook | `event` / `tool.reflect` / `dispose` + system-prompt injection via the plugin's own `context` hook |
 | **Zod** | Runtime Schema Validation | All LLM returns are runtime-validated to prevent JSON Mode drift |
 
 ### Key Design Decisions
@@ -31,7 +31,7 @@ Both tracks share the same trigger pipeline (`session.idle` / `reflect`) but hav
 | **Main AI emits HTML comment markers** | Main AI has full conversation context, far better at identifying preferences than regex. Users don't see comments; plugin parses them. |
 | **Sub-AI batch refinement** | Dedup, conflict detection, schema validation done by Stage 2 sub-session LLM; main AI only identifies signals |
 | **Auto-write + backup** | No human confirmation; auto-backup before every write, keeping latest 5 versions |
-| **`instructions` loading** | Host auto-injects `USER.md` + `MEMORY.md` + `memx-protocol.md` into main AI's system prompt at session start via `~/.config/opencode/opencode.json`. First two = accumulated data, third = the protocol that tells the AI how to emit signals |
+| **Plugin injects its own system prompt** | The plugin appends `memx-protocol.md` + `USER.md` + `MEMORY.md` to `event.system` in its `context` hook. Each is its own `SystemPart`, order: protocol → profile → index. Content is capped at 200 lines / 25KB per source, and truncation appends a visible `[memx: truncated — ...]` line so nothing is dropped silently. The `instructions` entries in `opencode.json` are **inert on v2.0.26** (the host only assembles instructions from `AGENTS.md`) and are kept only for forward compatibility |
 | **Project isolation** | Track 2's `.mem/` dir is isolated by working directory slug (`/root/project/foo` -> `root-project-foo`); cross-project memories don't pollute |
 
 ## Dual-Track Pipeline
@@ -67,9 +67,13 @@ cd memx
 bash install.sh
 ```
 
-This clones the repo to `~/.config/memx`, installs npm dependencies, creates the plugin entry, declares dependencies, writes the signal protocol file `~/.opencode/memx-protocol.md`, and configures `instructions` in `opencode.json`. Then just restart OpenCode and `/status` to verify.
+This clones the repo to `~/.config/memx`, installs npm dependencies, creates the plugin entry, declares dependencies, writes the signal protocol file `~/.opencode/memx-protocol.md`, and adds the `instructions` entries in `opencode.json` (forward-compatibility only — see below). Then restart OpenCode and check `/status`.
 
-> **The signal protocol moved out of `USER.md` into a standalone file.** Its text now lives only in `src/core/protocol-template.ts`, is written by `scripts/sync-protocol.ts`, and is injected via `instructions`. Do **not** hand-write the protocol block into `~/.opencode/USER.md` — that file is memx's data file and gets rewritten on every refinement, which silently wipes the protocol (it did, once).
+> **The signal protocol moved out of `USER.md` into a standalone file.** Its text now lives only in `src/core/protocol-template.ts`, is written by `scripts/sync-protocol.ts`, and is injected by the **plugin's own `context` hook**. Do **not** hand-write the protocol block into `~/.opencode/USER.md` — that file is memx's data file and gets rewritten on every refinement, which silently wipes the protocol (it did, once).
+
+> **How content actually reaches the model.** The plugin registers a `session.hook("context", …)` and **appends** three `SystemPart`s to the system prompt the host already assembled (`agent.system` + the merged `AGENTS.md` body). Order: `memx-protocol.md` (how to emit signals) → `USER.md` (Track 1 profile) → `MEMORY.md` (Track 2 index). Missing files are skipped silently; if all three are missing the hook does nothing. A refinement **child session is never injected into** — that branch still replaces the whole system prompt and pins temperature 0.2.
+>
+> The `instructions` array in `opencode.json` is **dead on opencode v2.0.26**: the host's only instruction-assembly plugin (`packages/core/src/config/plugin/instruction.ts`) loads `AGENTS.md` files and nothing consumes the normalized `config.instructions`. The entries `install.sh` writes are therefore a no-op today, kept only in case a future version honors them.
 
 ### Manual Install
 
@@ -98,7 +102,7 @@ If you prefer to do it step by step:
    node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # idempotent: no rewrite when identical
    ```
 
-5. Add an `instructions` field to `~/.config/opencode/opencode.json` so both the accumulated data (USER.md + MEMORY.md) and the signal protocol are injected into the main AI's system prompt:
+5. *(optional, forward-compat)* Add an `instructions` field to `~/.config/opencode/opencode.json`:
    ```json
    {
      "$schema": "https://opencode.ai/config.json",
@@ -109,11 +113,11 @@ If you prefer to do it step by step:
      ]
    }
    ```
-   If you already have other config, just merge the `instructions` field (`install.sh` adds any missing entries idempotently and leaves every other key alone).
+   On opencode v2.0.26 this array is **not read by the host** — injection already works without it (step 1–4 are sufficient, because the plugin appends the same three files itself). `install.sh` adds any missing entries idempotently and leaves every other key alone.
 
-6. Make sure your reply rendering strips HTML comments — otherwise users see raw `<!-- STYLE_SIGNAL: ... -->` text.
+6. Make sure your reply rendering strips HTML comments — otherwise users see raw `<!-- STYLE_SIGNAL: ... -->` text. (The host does *not* strip them from the system prompt; that is a UI-layer concern.)
 
-7. Restart OpenCode; `/status` should show `memx`.
+7. Restart OpenCode; `/status` should show `memx`. Then run the `memx_status` tool and confirm the `inject.*` lines: `hookFires` counts every hook call, `injections` counts the ones that actually appended content. If `hookFires > 0` but `injections == 0`, check `inject.gate` and `inject.empty`.
 
 ### Configuration
 
@@ -125,6 +129,21 @@ Customize via `~/.opencode/memx.config.json`:
 | `maxSignalsPerSession` | `number` | `20` | Signal buffer max size |
 | `autoBackupCount` | `number` | `5` | Backup retention count |
 | `throttleMinutes` | `number` | `10` | Refinement throttle interval (minutes) |
+| `inject.enabled` | `boolean` | `true` | Whether the `context` hook injects memx content into the system prompt at all |
+| `inject.includeAgents` | `string[] \| "all"` | `"all"` | `"all"` = every agent; an array = only those agents |
+| `inject.excludeAgents` | `string[]` | `[]` | Always wins over `includeAgents` |
+
+Injection gate: `enabled=false` injects nothing. Otherwise the effective set is `includeAgents` minus `excludeAgents`. memx hardcodes no agent name anywhere — which agents to exclude is the consumer's decision (for example, an agent that echoes its system prompt verbatim would leak the protocol to the user). The effective gate is shown as `inject.gate` in diagnostics. Config changes take effect within 30s without restarting the host.
+
+### Injection Caps
+
+Each of the three injected sources is capped independently at **200 lines or 25KB**, whichever comes first. When a source is truncated, a visible line is appended to the injected text —
+
+```
+[memx: truncated — showing first 200 of 512 lines (18400 of 30000 bytes); 200-line cap]
+```
+
+— so both the model and the `inject.truncations` diagnostic record that content was dropped. Silent truncation is the failure mode being avoided here. The constants are `INJECT_MAX_LINES` / `INJECT_MAX_BYTES` in `src/core/injection.ts`; they are deliberately **not** config keys (the profile is already kept under 200 lines by the writer-side `isOverLimit`, so the cap is a backstop rather than an everyday knob — make them configurable only if a real workload needs it).
 
 ## USER.md Format
 

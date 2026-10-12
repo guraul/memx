@@ -78,10 +78,17 @@ fi
 echo ""
 
 # Step 6: Register instructions in opencode.json
-# 三个条目各司其职：前两个注入累积数据（画像 / 记忆），第三个注入协议（怎么发信号）。
+# 三个条目各司其职：前两个是累积数据（画像 / 记忆），第三个是协议（怎么发信号）。
 # 幂等：已存在的条目不重复添加，别的条目不重排；opencode.json 不存在则新建；坏 JSON 直接报错
 # 退出，绝不覆盖用户配置。
-echo "[6/6] Configuring instructions in opencode.json..."
+#
+# ⚠️ 诚实说明：**在 opencode v2.0.26 上这三个条目是 no-op**。宿主唯一的指令组装插件
+# (packages/core/src/config/plugin/instruction.ts) 只从 AGENTS.md 发现指令，没有任何代码消费
+# 归一化后的 `config.instructions` —— 也就是说这里写的东西一行都不会进模型的 system prompt。
+# 真正把协议 + USER.md + MEMORY.md 送进 system prompt 的是**插件自己的 `context` hook**
+# (src/hosts/opencode/context-hook.ts)。这些条目留着只为向前兼容（哪天宿主支持了就能白捡），
+# 现在删掉它们对功能没有任何影响。
+echo "[6/6] Configuring instructions in opencode.json (forward-compat, inert on v2.0.26)..."
 OCP_JSON="$OCP_CONFIG_DIR/opencode.json"
 
 if ! command -v node >/dev/null 2>&1; then
@@ -125,16 +132,24 @@ fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
 console.log(added.length ? "  -> added: " + added.join(", ") : "  -> instructions already up to date");
 NODE
 echo "  -> $OCP_JSON"
+echo "  NOTE: injection is performed by the plugin's own \`context\` hook"
+echo "        (src/hosts/opencode/context-hook.ts), not by these entries."
+echo "        On opencode v2.0.26 the \`instructions\` array is a no-op — the host"
+echo "        only assembles instructions from AGENTS.md."
 echo ""
 
 # Done
 echo "=== Installation complete ==="
 echo ""
 echo "Next steps:"
-echo "  1. Restart OpenCode (instructions load at session start, not mid-session)"
+echo "  1. Restart OpenCode (plugins load once at startup)"
 echo "  2. Run /status to verify memx is loaded"
-echo "  3. Upgrading from an older install? Delete any hand-written signal-protocol block"
+echo "  3. Run the memx_status tool and look at the 'inject.*' lines:"
+echo "     hookFires > 0 means the hook is live; injections > 0 means content is"
+echo "     actually reaching the model. injections=0 with hookFires>0 usually"
+echo "     means gated (check inject.gate) or no source files exist yet."
+echo "  4. Upgrading from an older install? Delete any hand-written signal-protocol block"
 echo "     from ~/.opencode/USER.md - the protocol now lives in memx-protocol.md, and"
 echo "     USER.md is rewritten by every refinement."
-echo "  4. Your reply UI must hide HTML comments. Verify no <!-- STYLE_SIGNAL --> text"
+echo "  5. Your reply UI must hide HTML comments. Verify no <!-- STYLE_SIGNAL --> text"
 echo "     reaches users; see https://github.com/guraul/memx#installation"

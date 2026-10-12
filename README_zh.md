@@ -21,7 +21,7 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
 | **Honcho** | 辩证式推理 Prompt | System Prompt 要求 LLM 自问"跨项目是否仍适用"，区分临时指令与长期偏好 |
 | **Mem0** | 去重与增量更新机制 | `StyleProposal.action` / `MemoryProposal.action`（append/update/deprecate）+ 去重规则 |
 | **OpenClaw** | 时间衰减与生命周期管理 | 200 行压缩机制 + 废弃条目删除线标记（不物理删除） |
-| **OpenCode V2 Plugin API** | Hook 体系 + `instructions` 加载 | `event` / `tool.reflect` / `dispose` + `~/.config/opencode/opencode.json` 的 `instructions` 字段自动注入 |
+| **OpenCode V2 Plugin API** | Hook 体系 + 会话组装 hook | `event` / `tool.reflect` / `dispose` + 插件用自己的 `context` hook 注入 system prompt |
 | **Zod** | Runtime Schema Validation | 所有 LLM 返回值强制 runtime validate，防止 JSON Mode 输出漂移 |
 
 ### 关键设计决策
@@ -31,7 +31,7 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
 | **主 AI 发 HTML 注释标记** | 主 AI 拿完整对话上下文，识别偏好的能力远超正则。用户看不到注释，插件解析。 |
 | **子 AI 批量提炼** | 去重、冲突检测、schema 校验由 Stage 2 子会话 LLM 完成，主 AI 只负责"识别信号" |
 | **自动写入 + 备份** | 去掉了人工确认环节，每次写入前自动备份 + 保留最近 5 版 |
-| **`instructions` 加载** | `~/.config/opencode/opencode.json` 的 `instructions` 数组让宿主在会话启动时自动把 `USER.md` + `MEMORY.md` + `memx-protocol.md` 注入主 AI 的 system prompt：前两个是累积数据，第三个是"怎么发信号"的协议 |
+| **插件自己注入 system prompt** | 插件在 `context` hook 里把 `memx-protocol.md` + `USER.md` + `MEMORY.md` **追加**到 `event.system`（宿主已组装好的 agent.system + AGENTS.md 正文之后）。每块各占一个 `SystemPart`，顺序：协议 → 画像 → 索引。每块上限 200 行 / 25KB，截断时追加可见的 `[memx: truncated — ...]` 提示行，不做静默截断。`opencode.json` 里的 `instructions` 条目在 v2.0.26 上**是死的**（宿主只从 `AGENTS.md` 组装指令），保留只为向前兼容 |
 | **按项目隔离** | Track 2 的 `.mem/` 目录按工作目录 slug 隔离（`/root/project/foo` -> `root-project-foo`），跨项目记忆互不污染 |
 
 ## 双轨管道
@@ -67,9 +67,13 @@ cd memx
 bash install.sh
 ```
 
-脚本会自动克隆到 `~/.config/memx`，安装 npm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并配置 `opencode.json` 的 `instructions`。完成后重启 OpenCode，`/status` 验证即可。
+脚本会自动克隆到 `~/.config/memx`，安装 npm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并写入 `opencode.json` 的 `instructions` 条目（仅为向前兼容，见下）。完成后重启 OpenCode，`/status` 验证即可。
 
-> **信号协议从 `USER.md` 搬到了独立文件**。协议正文现在只存在于 `src/core/protocol-template.ts`，由 `scripts/sync-protocol.ts` 落盘并经 `instructions` 注入。**不要**再把协议块手写进 `~/.opencode/USER.md`——那是 memx 每次提炼都会重写的数据文件，协议放里面会被抹掉。
+> **信号协议从 `USER.md` 搬到了独立文件**。协议正文现在只存在于 `src/core/protocol-template.ts`，由 `scripts/sync-protocol.ts` 落盘，由**插件自己的 `context` hook** 注入。**不要**再把协议块手写进 `~/.opencode/USER.md`——那是 memx 每次提炼都会重写的数据文件，协议放里面会被抹掉。
+>
+> **内容到底怎么到模型眼前**：插件注册 `session.hook("context", …)`，把三块内容**追加**到宿主已组装好的 system prompt 后面（`agent.system` + 合并后的 `AGENTS.md` 正文）：`memx-protocol.md`（怎么发信号）→ `USER.md`（Track 1 画像）→ `MEMORY.md`（Track 2 索引）。缺文件静默跳过；三块都缺则整个 hook 什么都不做。提炼用的**子会话永远不被注入**——那一支仍整体替换 system 并锁 temperature 0.2。
+>
+> `opencode.json` 的 `instructions` 数组在 **opencode v2.0.26 上是死字段**：宿主唯一的指令组装插件（`packages/core/src/config/plugin/instruction.ts`）只加载 `AGENTS.md`，没有任何代码消费归一化后的 `config.instructions`。所以 `install.sh` 写的那几条今天完全是 no-op，留着只为将来宿主若支持了能白捡。
 
 ### 手动安装
 
@@ -98,7 +102,7 @@ bash install.sh
    node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # 幂等，内容一致不重写
    ```
 
-5. 在 `~/.config/opencode/opencode.json` 加 `instructions` 字段，让累积数据（USER.md + MEMORY.md）与信号协议一起注入主 AI 的 system prompt：
+5. （可选，仅为向前兼容）在 `~/.config/opencode/opencode.json` 加 `instructions` 字段：
    ```json
    {
      "$schema": "https://opencode.ai/config.json",
@@ -108,12 +112,11 @@ bash install.sh
        "~/.opencode/memx-protocol.md"
      ]
    }
-   ```
-   如果已有其他配置，合并 `instructions` 字段即可（`install.sh` 会幂等补齐缺失的条目，不动其它键）。
+   在 opencode v2.0.26 上宿主**并不读**这个数组——注入靠插件自己（第 1–4 步做完就够用了）。`install.sh` 会幂等补齐缺失的条目，不动其它键。
 
-6. 确认你的回复渲染层会剥离 HTML 注释——否则用户会直接看到 `<!-- STYLE_SIGNAL: ... -->` 原文。
+6. 确认你的回复渲染层会剥离 HTML 注释——否则用户会直接看到 `<!-- STYLE_SIGNAL: ... -->` 原文。（宿主**不会**从 system prompt 里剥注释，这是渲染层的事。）
 
-7. 重启 OpenCode，`/status` 应显示 `memx`。
+7. 重启 OpenCode，`/status` 应显示 `memx`；再跑 `memx_status` 工具看 `inject.*` 几行：`hookFires` 是 hook 触发总次数，`injections` 是真正追加了内容的次数。若 `hookFires > 0` 但 `injections == 0`，先看 `inject.gate` 与 `inject.empty`。
 
 ### 配置
 
@@ -125,6 +128,21 @@ bash install.sh
 | `maxSignalsPerSession` | `number` | `20` | 信号缓冲区上限 |
 | `autoBackupCount` | `number` | `5` | 备份保留数 |
 | `throttleMinutes` | `number` | `10` | 提炼节流间隔（分钟） |
+| `inject.enabled` | `boolean` | `true` | `context` hook 是否注入 memx 内容到 system prompt |
+| `inject.includeAgents` | `string[] \| "all"` | `"all"` | `"all"` = 全部 agent；数组 = 只有列出的 |
+| `inject.excludeAgents` | `string[]` | `[]` | 永远压过 `includeAgents` |
+
+闸门语义：`enabled=false` 时一个字节都不注入；否则生效集合 = `includeAgents` 减去 `excludeAgents`。**仓库里不硬编码任何 agent 名**（memx 必须宿主无关）——该排除哪些 agent 由消费方决定（例如会把 system prompt 原样回显的 agent 会把协议泄给用户）。生效中的闸门显示在诊断的 `inject.gate`。改配置 30 秒内生效，不必重启宿主。
+
+### 注入上限
+
+三块内容各自独立封顶：**200 行或 25KB，先到先算**。一旦截断，注入文本末尾会追加一行可见提示：
+
+```
+[memx: truncated — showing first 200 of 512 lines (18400 of 30000 bytes); 200-line cap]
+```
+
+这样模型和 `inject.truncations` 诊断都知道"有内容被丢掉了"——这里要避免的失败模式正是静默截断。常量是 `src/core/injection.ts` 里的 `INJECT_MAX_LINES` / `INJECT_MAX_BYTES`，**刻意不做成配置项**（写盘侧的 `isOverLimit` 本来就把画像压在 200 行内，这个上限是兜底而非日常旋钮；真出现需要调的负载再暴露成配置）。
 
 ## USER.md 格式
 
