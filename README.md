@@ -67,7 +67,7 @@ cd memx
 bash install.sh
 ```
 
-This clones the repo to `~/.config/memx`, installs npm dependencies, creates the plugin entry, declares dependencies, writes the signal protocol file `~/.opencode/memx-protocol.md`, and adds the `instructions` entries in `opencode.json` (forward-compatibility only — see below). Then restart OpenCode and check `/status`.
+This clones the repo to `~/workspace/memx` (override with `bash install.sh <path>`), installs npm dependencies, creates the plugin entry, declares dependencies, writes the signal protocol file `~/.opencode/memx-protocol.md`, and adds the `instructions` entries in `opencode.json` (forward-compatibility only — see below). Then restart OpenCode and check `/status`.
 
 > **The signal protocol moved out of `USER.md` into a standalone file.** Its text now lives only in `src/core/protocol-template.ts`, is written by `scripts/sync-protocol.ts`, and is injected by the **plugin's own `context` hook**. Do **not** hand-write the protocol block into `~/.opencode/USER.md` — that file is memx's data file and gets rewritten on every refinement, which silently wipes the protocol (it did, once).
 

@@ -61,7 +61,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor（阶段 4）
-tests/                         - 12 文件 / 137 测试（基线，低于即回归）
+tests/                         - 16 文件 / 230 测试（基线，低于即回归）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -96,7 +96,7 @@ tests/                         - 12 文件 / 137 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：12 文件 / 137 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：16 文件 / 230 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files

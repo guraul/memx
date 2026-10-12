@@ -67,7 +67,7 @@ cd memx
 bash install.sh
 ```
 
-脚本会自动克隆到 `~/.config/memx`，安装 npm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并写入 `opencode.json` 的 `instructions` 条目（仅为向前兼容，见下）。完成后重启 OpenCode，`/status` 验证即可。
+脚本会自动克隆到 `~/workspace/memx`（可用 `bash install.sh <路径>` 覆盖），安装 npm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并写入 `opencode.json` 的 `instructions` 条目（仅为向前兼容，见下）。完成后重启 OpenCode，`/status` 验证即可。
 
 > **信号协议从 `USER.md` 搬到了独立文件**。协议正文现在只存在于 `src/core/protocol-template.ts`，由 `scripts/sync-protocol.ts` 落盘，由**插件自己的 `context` hook** 注入。**不要**再把协议块手写进 `~/.opencode/USER.md`——那是 memx 每次提炼都会重写的数据文件，协议放里面会被抹掉。
 >
