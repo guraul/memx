@@ -675,6 +675,10 @@ export default Plugin.define({
           },
           required: ["text"],
         },
+        // P0 实测（2026-10-12 真机）：默认走 codemode 时，宿主把调用包成 `execute` 工具、
+        // 结果塞在 state.content——App 侧按工具名渲染的"记忆回执 chip"就认不出来（part.tool = "execute"）。
+        // 声明 codemode:false 让它是**直调工具**：part.tool = "memory_write"，回执一目了然。
+        options: { codemode: false },
         async execute(args, toolCtx) {
           const input = args as {
             text?: string;

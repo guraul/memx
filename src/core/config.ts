@@ -19,7 +19,7 @@ const MemxInjectSchema = z.object({
 });
 
 const MemxConfigSchema = z.object({
-  refinementModel: z.string().optional().default("opencode/mimo-v2.6-flash-free"),
+  refinementModel: z.string().optional().default("opencode-go/longcat-2.5-preview-free"),
   maxSignalsPerSession: z.number().int().positive().optional().default(20),
   autoBackupCount: z.number().int().positive().optional().default(5),
   throttleMinutes: z.number().int().positive().optional().default(10),
