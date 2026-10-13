@@ -7,8 +7,9 @@ OpenCode V2 dual-track memory plugin. Track 1: captures user style preferences (
 ## Commands
 
 ```bash
-npm test          # vitest run
-npm run typecheck # tsc --noEmit
+pnpm test          # vitest run
+pnpm run typecheck # tsc --noEmit
+pnpm doctor        # node --experimental-strip-types scripts/doctor.ts — 只读状态面板
 ```
 
 Always run `typecheck` before committing - TypeScript strict mode catches easy-to-miss errors.
@@ -27,6 +28,7 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 - **LLM returns Zod-validated**: `StyleProposalArraySchema` in `src/types.ts` (Track 1) + `MemoryProposalArraySchema` in `src/memory-types.ts` (Track 2); `extractJson` strips markdown fences before parse
 - **Conflict handling**: when a new memory contradicts an existing one, LLM returns `deprecate` (old) + `append` (new, with `supersedes` field). Code writes `**Supersedes:**` audit line in new file, moves old file to `.mem/.trash/` (not physically deleted)
 - **Health check**: `runHealthCheck` runs after each memory refinement in `reflect` / `session.execution.succeeded`. Detects dead links (index points to non-existent files) and orphan files (`.mem/*.md` not in index). Auto-fixes with guardrail: max 3 per run, logs as HTML comments in MEMORY.md, escalates bloat/conflicts to manual
+- **Alerts（阶段 4）**: 单一事实源 `~/.opencode/memx-alerts.json`（JSON 数组，封顶 200 条，超出丢最旧；`src/core/alerts.ts`，零宿主依赖，坏 JSON/IO 失败容错不抛）。`memx doctor`（`scripts/doctor.ts`）出只读面板（alerts / memory files / opencode diag 三段，退出码恒 0）。MEMORY.md 只有可能的一行 `<!-- memx:` 面包屑（有 warn/critical 时插在文件第一行，走 preamble，不含健康日志/报警列表）；`diag.alerts`（kv）保留为只写镜像，`memx_status` 的 alerts 段以 store 为准
 - **Concurrency guard**: `runRefinement` + `runMemoryRefinement` share mutex (`refinementInFlight`), `markRun()` fires BEFORE the LLM call - both prevent child-session storms / duplicate writes when events overlap. Throttle is **in-memory only** (`lastRunAt`), so restarting the host resets it
 - **捕获游标（P0-1）**: per-session 增量游标锚在**消息 id** 上，存 `ctx.storage` 的 `cursor:<sessionID>`；决策全在 `planCapture()`（`context-shape.ts`，纯函数可单测：fresh / resumed / anchor-lost），host 侧只做 storage 读写与信号解析。`session.deleted` 时删游标。**别再拿 `extractLastTurn` 做捕获**（它留给 session-llm 取子会话回复），否则又退回"只扫最后一轮"
 - **提炼三态（P0-2）**: `refine()` / `refineMemory()` 返回 `RefineOutcome`（`refine/refine-outcome.ts`）：`proposals` 落盘；`adjudicated-empty` **清缓冲结案**（合法空数组 ≠ 坏输出，否则同批信号每轮重烧 LLM）；`invalid-output` 保留缓冲 + `diag.invalidStreak` 计数，连续 3 次才丢弃并记 alert
@@ -72,7 +74,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor（阶段 4）
-tests/                         - 19 文件 / 277 测试（基线，低于即回归）
+tests/                         - 20 文件 / 285 测试（基线，低于即回归）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -110,7 +112,7 @@ tests/                         - 19 文件 / 277 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：19 文件 / 277 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：20 文件 / 285 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files

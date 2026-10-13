@@ -75,7 +75,7 @@ cd memx
 bash install.sh
 ```
 
-This clones the repo to `~/workspace/memx` (override with `bash install.sh <path>`), installs npm dependencies, creates the plugin entry, declares dependencies, writes the signal protocol file `~/.opencode/memx-protocol.md`, and adds the `instructions` entries in `opencode.json` (forward-compatibility only — see below). Then restart OpenCode and check `/status`.
+This clones the repo to `~/workspace/memx` (override with `bash install.sh <path>`), installs pnpm dependencies, creates the plugin entry, declares dependencies, writes the signal protocol file `~/.opencode/memx-protocol.md`, and adds the `instructions` entries in `opencode.json` (forward-compatibility only — see below). Then restart OpenCode and check `/status`.
 
 > **The signal protocol moved out of `USER.md` into a standalone file.** Its text now lives only in `src/core/protocol-template.ts`, is written by `scripts/sync-protocol.ts`, and is injected by the **plugin's own `context` hook**. Do **not** hand-write the protocol block into `~/.opencode/USER.md` — that file is memx's data file and gets rewritten on every refinement, which silently wipes the protocol (it did, once).
 
@@ -87,25 +87,32 @@ This clones the repo to `~/workspace/memx` (override with `bash install.sh <path
 
 If you prefer to do it step by step:
 
-1. Clone the repo:
+1. Clone the repo and install dependencies (this repo uses pnpm only — no npm/yarn/bun):
    ```bash
    git clone https://github.com/guraul/memx.git /path/to/memx
    cd /path/to/memx
-   npm install
+   pnpm install        # no pnpm? run `corepack enable pnpm` first
    ```
 
-2. Create global plugin entry (pointing to src/index.ts):
+2. Create the global plugin entry (pointing to `src/hosts/opencode/index.ts`):
    ```bash
    mkdir -p ~/.config/opencode/plugins
-   echo 'export { MemxPlugin } from "/path/to/memx/src/index";' > ~/.config/opencode/plugins/memx.ts
+   echo 'export { default } from "/path/to/memx/src/hosts/opencode/index";' > ~/.config/opencode/plugins/memx.ts
    ```
+   > ⚠️ **Default export only.** The host treats every named export of the entry file as a plugin and invokes it — one extra named export crashes OpenCode with `plugin config hook failed`.
 
-3. Declare dependencies (if `~/.config/opencode/package.json` doesn't exist):
+3. Declare dependencies (if `~/.config/opencode/package.json` doesn't exist) — note v1's `@opencode-ai/plugin` was renamed to v2's `@opencode/plugin`:
    ```json
-   { "dependencies": { "zod": "^4.4.3", "@opencode-ai/plugin": "^1.18.11" } }
+   {
+     "dependencies": {
+       "zod": "^4.4.3",
+       "@opencode/plugin": "^2.0.26",
+       "@opencode/client": "^2.0.26"
+     }
+   }
    ```
 
-4. Write the signal protocol file (single source of truth is `src/core/protocol-template.ts`; never hand-edit the output):
+4. Write the signal protocol file (single source of truth is `src/core/protocol-template.ts`; never hand-edit the output). The script imports with an explicit `.ts` extension, so it needs **Node ≥ 22.6** (native strip types):
    ```bash
    node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # idempotent: no rewrite when identical
    ```
@@ -246,6 +253,10 @@ refinement pipeline, so the two can never disagree about the file format.
 Prints structured diagnostics (capture/refinement/written counters, cursor state, invalid-output streak,
 location warnings, health, alerts, explicit writes). The stored kv row is the real truth — see AGENTS.md.
 
+### `memx doctor`
+Read-only status panel: alerts / memory files / opencode diag. Use when you want to see memx's
+health without triggering a refinement.
+
 ## Troubleshooting
 
 - **`session.idle` doesn't fire**: This event only fires when the session is truly idle (after a turn fully ends). Continuous tool calls / active turns delay it indefinitely. Use the `reflect` tool to trigger manually.
@@ -257,9 +268,9 @@ location warnings, health, alerts, explicit writes). The stored kv row is the re
 ## Development
 
 ```bash
-npm install       # Install dependencies
-npm test          # Run tests
-npm run typecheck # Type check
+pnpm install       # Install dependencies
+pnpm test          # Run tests (baseline: 19 files / 277 tests, all green — anything less is a regression)
+pnpm run typecheck # Type check
 ```
 
 ## License

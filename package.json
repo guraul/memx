@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "description": "Dual-track memory plugin for OpenCode — user style + project memory across sessions",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "src/hosts/opencode/index.ts",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "doctor": "node --experimental-strip-types scripts/doctor.ts"
   },
   "keywords": [
     "opencode",

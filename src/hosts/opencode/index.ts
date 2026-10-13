@@ -39,6 +39,7 @@ import type { ContextHookEvent } from "./context-hook";
 /** v2 消息形状 / 归一 / 轮次提取 → 共享模块（index.ts 与 session-llm.ts 都依赖，
  *  不能互相 import，故放 context-shape.ts） */
 import { toMessages, planCapture } from "./context-shape";
+import { createFileAlertStore, formatBreadcrumb } from "../../core/alerts";
 
 export default Plugin.define({
   id: "memx",
@@ -55,6 +56,9 @@ export default Plugin.define({
     // 诊断键按目录隔离：#82 实测 ctx.storage 的键是全局的，多 serve / 多目录的 memx 实例
     // 会互相覆盖同一行（lastCapture/lastError 被后写者抹掉）。slug 需在 persistDiag 定义前算好。
     const diagKey = "diag:" + currentSlug;
+    // 报警单一事实源（阶段 4）：文件存储 ~/.opencode/memx-alerts.json，
+    // recordAlert / memx_status / MEMORY.md 面包屑都走它。
+    const alertStore = createFileAlertStore();
 
 
     // #4 拍板：v2 无 app.log → ctx.storage 结构化诊断（memx_status / memx doctor 消费）
@@ -207,9 +211,28 @@ export default Plugin.define({
     }
 
     function recordAlert(level: "info" | "warn" | "critical", code: string, message: string): void {
+      const ts = new Date().toISOString();
+      // 阶段 4：报警写文件存储（单一事实源），diag.alerts 保留为只写镜像（老 kv 消费端不破）
+      alertStore.append({ level, code, message, ts });
       diag.alerts = diag.alerts ?? [];
-      diag.alerts.push({ level, code, message, ts: new Date().toISOString() });
+      diag.alerts.push({ level, code, message, ts });
       if (diag.alerts.length > 20) diag.alerts = diag.alerts.slice(-20);
+    }
+
+    /** 写 MEMORY.md 前加面包屑：移除旧 `<!-- memx:` 行，有 warn/critical 时在顶部插新面包屑。
+     *  只有那一行面包屑，不写健康日志/报警列表。空串则不写。 */
+    function applyAlertBreadcrumb(content: string): string {
+      const lines = content.split("\n");
+      let start = 0;
+      while (start < lines.length && lines[start]!.trim() === "") start++;
+      if (start < lines.length && lines[start]!.startsWith("<!-- memx:")) {
+        lines.splice(start, 1);
+      }
+      const breadcrumb = formatBreadcrumb(alertStore);
+      if (breadcrumb) {
+        lines.unshift(breadcrumb, "");
+      }
+      return lines.join("\n");
     }
 
     async function runRefinement(_sessionID: string, force = false): Promise<string> {
@@ -378,7 +401,7 @@ export default Plugin.define({
           } catch {
             // health check must never block refinement
           }
-          writeMemoryIndex(indexContent);
+          writeMemoryIndex(applyAlertBreadcrumb(indexContent));
           return { warnings: result.warnings, healthLogs, escalated };
         });
 
@@ -742,7 +765,7 @@ export default Plugin.define({
             if (removed.length === 0) {
               return { content: `[memx] forget: no memories matched "${keyword}"` };
             }
-            writeMemoryIndex(newIndex);
+            writeMemoryIndex(applyAlertBreadcrumb(newIndex));
             return { content: `[memx] forgot ${removed.length} memories: ${removed.join(", ")}` };
           } catch (err) {
             return { content: `[memx] forget failed: ${String(err)}` };
@@ -759,6 +782,8 @@ export default Plugin.define({
           try {
             const stored = (await ctx.storage.get(diagKey)) as Partial<Diag> | undefined;
             const d = { ...diag, ...(stored ?? {}) };
+            // 阶段 4：alerts 以文件存储为准（store 为准），diag.alerts 只是只写镜像
+            const alertList = alertStore.list();
             const lines = [
               `[memx] 诊断`,
               `version: ${d.version ?? "unknown"}`,
@@ -799,7 +824,7 @@ export default Plugin.define({
                   ? `fixes=${d.health.fixes} escalated=${d.health.escalated} at=${d.health.updatedAt}`
                   : "无"
               }`,
-              `alerts: ${d.alerts && d.alerts.length > 0 ? d.alerts.map((a) => `${a.level}/${a.code}`).join(" ") : "无"}`,
+              `alerts: ${alertList.length > 0 ? alertList.map((a) => `${a.level}/${a.code}`).join(" ") : "无"}`,
               `toolWrites: ${d.toolWrites ?? 0}${
                 d.lastWrite ? ` last=${d.lastWrite.action} ${d.lastWrite.type}/${d.lastWrite.name} @${d.lastWrite.at}` : ""
               }`,

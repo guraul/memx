@@ -75,7 +75,7 @@ cd memx
 bash install.sh
 ```
 
-脚本会自动克隆到 `~/workspace/memx`（可用 `bash install.sh <路径>` 覆盖），安装 npm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并写入 `opencode.json` 的 `instructions` 条目（仅为向前兼容，见下）。完成后重启 OpenCode，`/status` 验证即可。
+脚本会自动克隆到 `~/workspace/memx`（可用 `bash install.sh <路径>` 覆盖），安装 pnpm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并写入 `opencode.json` 的 `instructions` 条目（仅为向前兼容，见下）。完成后重启 OpenCode，`/status` 验证即可。
 
 > **信号协议从 `USER.md` 搬到了独立文件**。协议正文现在只存在于 `src/core/protocol-template.ts`，由 `scripts/sync-protocol.ts` 落盘，由**插件自己的 `context` hook** 注入。**不要**再把协议块手写进 `~/.opencode/USER.md`——那是 memx 每次提炼都会重写的数据文件，协议放里面会被抹掉。
 >
@@ -87,25 +87,32 @@ bash install.sh
 
 如果你想逐步操作：
 
-1. 克隆仓库：
+1. 克隆仓库并安装依赖（本仓库只用 pnpm，不用 npm/yarn/bun）：
    ```bash
    git clone https://github.com/guraul/memx.git /path/to/memx
    cd /path/to/memx
-   npm install
+   pnpm install        # 没有 pnpm 时先执行 corepack enable pnpm
    ```
 
-2. 创建全局插件入口（指向 src/index.ts）：
+2. 创建全局插件入口（指向 `src/hosts/opencode/index.ts`）：
    ```bash
    mkdir -p ~/.config/opencode/plugins
-   echo 'export { MemxPlugin } from "/path/to/memx/src/index";' > ~/.config/opencode/plugins/memx.ts
+   echo 'export { default } from "/path/to/memx/src/hosts/opencode/index";' > ~/.config/opencode/plugins/memx.ts
    ```
+   > ⚠️ **只写 default 导出**。宿主会把插件入口的每个命名导出也当成插件去调用，多一个命名导出就会 `plugin config hook failed` 崩掉 OpenCode。
 
-3. 声明依赖（若 `~/.config/opencode/package.json` 不存在）：
+3. 声明依赖（若 `~/.config/opencode/package.json` 不存在）——注意 v1 的 `@opencode-ai/plugin` 已改名为 v2 的 `@opencode/plugin`：
    ```json
-   { "dependencies": { "zod": "^4.4.3", "@opencode-ai/plugin": "^1.18.11" } }
+   {
+     "dependencies": {
+       "zod": "^4.4.3",
+       "@opencode/plugin": "^2.0.26",
+       "@opencode/client": "^2.0.26"
+     }
+   }
    ```
 
-4. 写出信号协议文件（协议正文的唯一真源是 `src/core/protocol-template.ts`，不要手改产物）：
+4. 写出信号协议文件（协议正文的唯一真源是 `src/core/protocol-template.ts`，不要手改产物；脚本用 `.ts` 扩展名 import，需要 **Node ≥ 22.6** 原生 strip types）：
    ```bash
    node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # 幂等，内容一致不重写
    ```
@@ -120,6 +127,7 @@ bash install.sh
        "~/.opencode/memx-protocol.md"
      ]
    }
+   ```
    在 opencode v2.0.26 上宿主**并不读**这个数组——注入靠插件自己（第 1–4 步做完就够用了）。`install.sh` 会幂等补齐缺失的条目，不动其它键。
 
 6. 确认你的回复渲染层会剥离 HTML 注释——否则用户会直接看到 `<!-- STYLE_SIGNAL: ... -->` 原文。（宿主**不会**从 system prompt 里剥注释，这是渲染层的事。）
@@ -231,6 +239,9 @@ Rewriting auth middleware for compliance.
 ### `reflect`
 手动触发风格 + 项目记忆提炼（`session.idle` 未自动触发时使用）。
 
+### `memx doctor`
+只读状态面板：alerts / memory files / opencode diag。想查看 memx 健康状态而不触发提炼时使用。
+
 ## 故障排查
 
 - **`session.idle` 迟迟不触发**：该事件只在会话真正空闲（一轮回复完全结束）后触发，连续工具调用 / 活跃回合会无限延迟。直接调用 `reflect` 工具手动触发。
@@ -242,9 +253,9 @@ Rewriting auth middleware for compliance.
 ## 开发
 
 ```bash
-npm install       # 安装依赖
-npm test          # 运行测试
-npm run typecheck # 类型检查
+pnpm install       # 安装依赖
+pnpm test          # 运行测试（基线：19 文件 / 277 用例全绿，低于即回归）
+pnpm run typecheck # 类型检查
 ```
 
 ## 协议
