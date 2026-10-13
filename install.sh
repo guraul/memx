@@ -28,9 +28,15 @@ fi
 echo ""
 
 # Step 2: Install dependencies
-echo "[2/6] Installing dependencies..."
+# 包管理器统一 pnpm（用户 2026-10-11 全局规则：禁 npm/yarn/bun）；仓库本身只维护 pnpm-lock.yaml。
+echo "[2/6] Installing dependencies (pnpm)..."
 cd "$REPO_PATH"
-npm install
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm install
+else
+  echo "  !! pnpm not found. Install it (corepack enable pnpm) and re-run; npm/yarn/bun are not used in this repo."
+  exit 1
+fi
 echo ""
 
 # Step 3: Create plugin entry
