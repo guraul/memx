@@ -13,6 +13,8 @@ pnpm run doctor    # node --experimental-strip-types scripts/doctor.ts — 只�
 pnpm sync:dry-run  # 只读预览云同步待推内容（加 `-- --fetch` 先对齐远端，见「多机云同步」）
 ```
 
+两个脚本由 `tests/scripts-smoke.test.ts` 真跑一遍（值导入缺 `.ts` 扩展名时 tsc/vitest 都发现不了，只有真跑才 ERR_MODULE_NOT_FOUND）。
+
 ⚠️ 必须用 `pnpm run doctor`，**别用 `pnpm doctor`**——pnpm 自己有同名内建命令，`pnpm doctor` 会静默跑成 pnpm 自检而不是 memx 面板（`sync:dry-run` 无此冲突）。
 
 Always run `typecheck` before committing - TypeScript strict mode catches easy-to-miss errors.
@@ -86,7 +88,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor（阶段 4）+ sync-dry-run（阶段 4 第二半）
-tests/                         - 21 文件 / 319 测试（基线，低于即回归）
+tests/                         - 22 文件 / 321 测试（基线，低于即回归；含 tests/scripts-smoke.test.ts）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -124,7 +126,7 @@ tests/                         - 21 文件 / 319 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：21 文件 / 319 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：22 文件 / 321 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files

@@ -283,7 +283,7 @@ manual on conflict), pull-vs-write locking (the `.bak` copy is the safety net th
 
 ```bash
 pnpm install       # Install dependencies
-pnpm test          # Run tests (baseline: 21 files / 319 tests, all green — anything less is a regression)
+pnpm test          # Run tests (baseline: 22 files / 321 tests, all green — anything less is a regression)
 pnpm run typecheck # Type check
 ```
 

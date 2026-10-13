@@ -18,7 +18,9 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { AlertStore } from "./alerts";
 import type { MemxSyncConfig } from "./config";
-import { withFileLock } from "./store/lock";
+// 显式 .ts：scripts/doctor.ts 走 `node --experimental-strip-types` 直接加载本模块，
+// 扩展名缺失会在运行时 ERR_MODULE_NOT_FOUND（tsc/vitest 都发现不了）。
+import { withFileLock } from "./store/lock.ts";
 
 // ---- GitRunner：编排逻辑与真实 git 解耦，测试注入脚本化假 runner ----
 
