@@ -4,9 +4,18 @@
 // 状态落 ~/.opencode/memx-sync-state.json（doctor / memx_status 读最近一次 push/pull/PII 扫描事实）。
 // 报警走 core/alerts 的 AlertStore（由宿主传入，core 不反向 import 宿主）。
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { AlertStore } from "./alerts";
 import type { MemxSyncConfig } from "./config";
 
@@ -171,6 +180,8 @@ export interface DryRunReport {
   config: MemxSyncConfig;
   workdir: string;
   workdirExists: boolean;
+  /** prepare 模式（--fetch）的说明：clone / 快进成功 / 为何没前进；未开 prepare 时为空串 */
+  note: string;
   files: DryRunFileEntry[];
   piiHits: Array<{ file: string; pattern: string; line: number }>;
   remoteLog: string[];
@@ -193,13 +204,40 @@ function diffLineCounts(local: string, remote: string): { added: number; removed
   return { added: a.length - lcs, removed: b.length - lcs };
 }
 
+/** prepare（dry-run --fetch）：把 workdir 对齐到远端最新（clone 或 fetch + merge --ff-only）。
+ *  只动 workdir 这个缓存目录——绝不 push、绝不碰 ~/.opencode 里的记忆文件。
+ *  workdir 里有未推提交时 ff-only 会失败，此时退回"就用本地 workdir 比对"并把原因写进 note，
+ *  免得预览因为本地缓存状态而悄悄失真。 */
+function prepareWorkdir(opts: { config: MemxSyncConfig; runner: GitRunner; workdir: string }): string {
+  const { config, runner, workdir } = opts;
+  if (!existsSync(join(workdir, ".git"))) {
+    mkdirSync(dirname(workdir), { recursive: true });
+    const clone = runner.exec(
+      ["git", "clone", `git@github.com:${config.repo}.git`, workdir],
+      dirname(workdir),
+    );
+    return clone.ok
+      ? `已 clone ${config.repo} → ${workdir}（比对基准 = 远端 HEAD）`
+      : `clone 失败：${clone.stderr.trim() || "未知"}`;
+  }
+  const fetch = runner.exec(["git", "fetch", "origin", config.branch], workdir);
+  if (!fetch.ok) return `fetch 失败：${fetch.stderr.trim() || "未知"}`;
+  const ff = runner.exec(["git", "merge", "--ff-only", `origin/${config.branch}`], workdir);
+  return ff.ok
+    ? `已 fetch + 快进到 origin/${config.branch}（比对基准 = 远端 HEAD）`
+    : `workdir 有未推提交，无法快进；预览基于本地 workdir（可能落后于远端）`;
+}
+
 export function buildDryRunReport(opts: {
   config: MemxSyncConfig;
   runner?: GitRunner;
   workdir?: string;
+  /** true = 先 clone/fetch 到 workdir 再比对（首合并预览用；仍然只读记忆文件、绝不 push） */
+  prepare?: boolean;
 }): DryRunReport {
   const runner = opts.runner ?? createNodeGitRunner();
   const workdir = opts.workdir ?? syncWorkdir();
+  const note = opts.prepare ? prepareWorkdir({ config: opts.config, runner, workdir }) : "";
   const workdirExists = existsSync(workdir);
 
   const files: DryRunFileEntry[] = listToSync().map((f) => {
@@ -243,7 +281,7 @@ export function buildDryRunReport(opts: {
     if (r.ok) remoteLog = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "");
   }
 
-  return { config: opts.config, workdir, workdirExists, files, piiHits, remoteLog };
+  return { config: opts.config, workdir, workdirExists, note, files, piiHits, remoteLog };
 }
 
 export function syncWorkdir(): string {
@@ -317,9 +355,33 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     writeSyncState(statePath, { lastPushAt, lastPullAt, lastError, consecutiveFailures, lastPiiScan });
   };
 
+  // 同一事实不重复刷屏：定时拉在离线机器上每 30 分钟失败一次，不去重会把 200 条账本塞满同一行
   const alert = (level: "warn" | "critical", code: string, message: string): void => {
+    const recent = opts.alerts.list();
+    const last = recent[recent.length - 1];
+    if (last && last.code === code && last.message === message) return;
     opts.alerts.append({ level, code, message, ts: new Date().toISOString() });
   };
+
+  /** 覆盖前备份：本地内容与将写入的内容不同 → 先存成 <file>.bak.<ts>（每文件保留最新 5 份）。
+   *  拉取是"远端优先"，没有这一步就会静默吞掉本地未推的改动（首合并、推送失败后尤其危险）。 */
+  function backupBeforeOverwrite(target: string): string {
+    const bak = `${target}.bak.${Date.now()}`;
+    copyFileSync(target, bak);
+    try {
+      const dir = dirname(target);
+      const prefix = `${basename(target)}.bak.`;
+      const olds = readdirSync(dir)
+        .filter((f) => f.startsWith(prefix))
+        .map((f) => join(dir, f))
+        .sort()
+        .reverse();
+      for (const old of olds.slice(5)) unlinkSync(old);
+    } catch {
+      // 备份清理失败不影响拉取
+    }
+    return bak;
+  }
 
   function ensureRepo(): { ok: boolean; error?: string } {
     if (existsSync(join(workdir, ".git"))) return { ok: true };
@@ -332,8 +394,19 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   function failFast(message: string): SyncResult {
     lastError = message;
     consecutiveFailures++;
+    alert("warn", "SYNC_ERROR", message);
     save();
     return { ok: false, kind: "error", message };
+  }
+
+  /** 新 clone 的 workdir 未必有 git 身份（prod 上就没配过）——没有就现造一个，
+   *  否则 commit 直接失败、同步永远推不出去。有真身份时不覆盖。 */
+  function commitCommand(message: string): string[] {
+    const probe = runner.exec(["git", "config", "user.email"], workdir);
+    const hasIdentity = probe.ok && probe.stdout.trim() !== "";
+    return hasIdentity
+      ? ["git", "commit", "-m", message]
+      : ["git", "-c", "user.name=memx-sync", "-c", "user.email=memx@localhost", "commit", "-m", message];
   }
 
   async function push(): Promise<SyncResult> {
@@ -377,7 +450,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       runner.exec(["git", "add", "-A"], workdir);
       const num = runner.exec(["git", "diff", "--cached", "--numstat"], workdir);
       const message = `memx@${config.machineName}: ${summarizeNumstat(num.stdout)}`;
-      const commit = runner.exec(["git", "commit", "-m", message], workdir);
+      const commit = runner.exec(commitCommand(message), workdir);
       if (!commit.ok) return failFast(`commit 失败：${commit.stderr.trim() || "未知"}`);
 
       let pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
@@ -434,9 +507,23 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       }
 
       let copied = 0;
+      let backedUp = 0;
       for (const f of listFromWorkdir(workdir)) {
+        const src = join(workdir, f.repoPath);
         mkdirSync(dirname(f.localPath), { recursive: true });
-        copyFileSync(join(workdir, f.repoPath), f.localPath);
+        if (existsSync(f.localPath)) {
+          let differs = true;
+          try {
+            differs = readFileSync(f.localPath, "utf8") !== readFileSync(src, "utf8");
+          } catch {
+            differs = true;
+          }
+          if (differs) {
+            backupBeforeOverwrite(f.localPath);
+            backedUp++;
+          }
+        }
+        copyFileSync(src, f.localPath);
         copied++;
       }
 
@@ -444,7 +531,8 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       lastError = "";
       consecutiveFailures = 0;
       save();
-      return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件` };
+      const backupNote = backedUp > 0 ? `（${backedUp} 个本地差异件已备份为 .bak.<时间戳>）` : "";
+      return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件${backupNote}` };
     } catch (err) {
       return failFast(err instanceof Error ? err.message : String(err));
     }

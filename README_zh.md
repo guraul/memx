@@ -240,15 +240,19 @@ Rewriting auth middleware for compliance.
 手动触发风格 + 项目记忆提炼（`session.idle` 未自动触发时使用）。
 
 ### `memx doctor`
-只读状态面板：alerts / memory files / opencode diag。想查看 memx 健康状态而不触发提炼时使用。
+只读状态面板：alerts / memory files / opencode diag / sync。命令是 **`pnpm run doctor`**——别用 `pnpm doctor`，
+pnpm 有同名内建命令。想查看 memx 健康状态而不触发提炼时使用。
 
 ## 多机同步
 
 通过 GitHub 仓（默认 `guraul/memx-sync`）在多台机器间同步 USER.md / MEMORY.md / `.mem/*.md`。
 **默认关**——在 `~/.opencode/memx.config.json` 里开：`{"sync": {"enabled": true, "machineName": "mbp"}}`
 （改完需重启 OpenCode）。每次记忆写盘后自动推；启动时拉一次 + 每 `intervalMinutes` 定时拉。
-`pnpm sync:dry-run` 只读预览待推内容（永不 push）。PII 闸门（8 类规则）拦截含 token/密钥的推送——
-命中只报 文件+行号+规则名，绝不回显内容。
+`pnpm sync:dry-run` 只读预览待同步内容（永不 push）；加 `-- --fetch` 会先 clone/fetch 到缓存 workdir
+再比对——**新机器第一次拉之前必须用这个模式**，否则 workdir 不存在，报告只能写「远端未取到」。
+拉取是**远端优先**：覆盖前若本地内容与远端不同，先把本地存成 `<file>.bak.<ts>`（每文件保留 5 份）。
+PII 闸门（8 类规则）拦截含 token/密钥的推送——命中只报 文件+行号+规则名，绝不回显内容。
+v1 有意不做：删除传播、逐行合并（同一文件两台机器都改靠 git rebase，冲突即 abort 留人工）、非 SSH 远端。
 
 ## 故障排查
 
@@ -262,7 +266,7 @@ Rewriting auth middleware for compliance.
 
 ```bash
 pnpm install       # 安装依赖
-pnpm test          # 运行测试（基线：21 文件 / 302 用例全绿，低于即回归）
+pnpm test          # 运行测试（基线：21 文件 / 314 用例全绿，低于即回归）
 pnpm run typecheck # 类型检查
 ```
 

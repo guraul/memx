@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import {
   createSync,
@@ -366,5 +366,193 @@ describe("dryRun", () => {
     expect(entry?.added).toBe(1);
     expect(entry?.removed).toBe(0);
     expect(report.remoteLog).toEqual(["abc1234 memx@prod: MEMORY.md +5 行"]);
+  });
+
+  it("默认不开 prepare → 零 git 命令（绝不 clone/fetch）", () => {
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    const report = buildDryRunReport({ config: SYNC_CONFIG, runner, workdir: join(HOME, "workdir-noprepare") });
+    expect(report.note).toBe("");
+    expect(runner.calls).toHaveLength(0);
+  });
+
+  it("prepare：无 workdir → clone（只动 workdir），note 说明基准是远端 HEAD", () => {
+    const workdir = join(HOME, "workdir-prepare-clone");
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    const report = buildDryRunReport({ config: SYNC_CONFIG, runner, workdir, prepare: true });
+    expect(runner.called("clone git@github.com:guraul/memx-sync.git")).toBe(true);
+    expect(runner.called("push")).toBe(false);
+    expect(report.note).toContain("已 clone");
+  });
+
+  it("prepare：有 workdir → fetch + merge --ff-only（不 push、不 rebase）", () => {
+    const workdir = join(HOME, "workdir-prepare-ff");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    const report = buildDryRunReport({ config: SYNC_CONFIG, runner, workdir, prepare: true });
+    expect(runner.called("fetch origin main")).toBe(true);
+    expect(runner.called("merge --ff-only origin/main")).toBe(true);
+    expect(runner.called("push")).toBe(false);
+    expect(runner.called("rebase")).toBe(false);
+    expect(report.note).toContain("快进");
+  });
+
+  it("prepare：有未推提交 → 快进失败，note 明说预览基于本地（不掩盖）", () => {
+    const workdir = join(HOME, "workdir-prepare-diverge");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner((cmd) => {
+      if (cmd.join(" ").includes("merge --ff-only")) return { ok: false, stdout: "", stderr: "not possible to fast-forward" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const report = buildDryRunReport({ config: SYNC_CONFIG, runner, workdir, prepare: true });
+    expect(report.note).toContain("未推提交");
+  });
+
+  it("prepare：clone 失败 → note 带原因，不抛", () => {
+    const workdir = join(HOME, "workdir-prepare-clonefail");
+    const runner = new FakeRunner((cmd) =>
+      cmd.join(" ").includes("clone")
+        ? { ok: false, stdout: "", stderr: "Permission denied (publickey)" }
+        : { ok: true, stdout: "", stderr: "" },
+    );
+    const report = buildDryRunReport({ config: SYNC_CONFIG, runner, workdir, prepare: true });
+    expect(report.note).toContain("clone 失败");
+    expect(report.note).toContain("publickey");
+  });
+});
+
+describe("pull 备份（远端优先，但不静默吞本地）", () => {
+  it("本地与远端不同 → 覆盖前存 .bak.<ts>，内容 = 覆盖前的本地版", async () => {
+    const workdir = join(HOME, "workdir-pull-bak");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    writeMemoryFile("USER.md", "clean local\n");
+    writeMemoryFile("projects/baz/.mem/y.md", "local v1\n");
+    mkdirSync(join(workdir, "projects", "baz", ".mem"), { recursive: true });
+    writeFileSync(join(workdir, "projects", "baz", ".mem", "y.md"), "remote v2\n", "utf-8");
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    const sync = makeSync(runner, "pullbak", workdir);
+    const result = await sync.pull();
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("备份");
+    const target = join(OPENCODE, "projects/baz/.mem/y.md");
+    expect(readFileSync(target, "utf-8")).toBe("remote v2\n");
+    const baks = readdirSync(join(OPENCODE, "projects/baz/.mem")).filter((f) => f.startsWith("y.md.bak."));
+    expect(baks).toHaveLength(1);
+    expect(readFileSync(join(OPENCODE, "projects/baz/.mem", baks[0]!), "utf-8")).toBe("local v1\n");
+  });
+
+  it("本地与远端相同 → 不产生 .bak，结果不提备份", async () => {
+    const workdir = join(HOME, "workdir-pull-nobak");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    writeMemoryFile("projects/qux/.mem/z.md", "same\n");
+    mkdirSync(join(workdir, "projects", "qux", ".mem"), { recursive: true });
+    writeFileSync(join(workdir, "projects", "qux", ".mem", "z.md"), "same\n", "utf-8");
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    const sync = makeSync(runner, "pullnobak", workdir);
+    const result = await sync.pull();
+    expect(result.ok).toBe(true);
+    expect(result.message).not.toContain("备份");
+    expect(readdirSync(join(OPENCODE, "projects/qux/.mem")).filter((f) => f.includes(".bak."))).toHaveLength(0);
+  });
+
+  it("备份每文件只留最新 5 份", async () => {
+    const dir = join(OPENCODE, "projects/keep/.mem");
+    const workdir = join(HOME, "workdir-pull-keep");
+    mkdirSync(join(workdir, "projects", "keep", ".mem"), { recursive: true });
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 7; i++) {
+      writeFileSync(join(dir, `k.md.bak.${1000 + i}`), `old ${i}`, "utf-8");
+    }
+    writeFileSync(join(dir, "k.md"), "local\n", "utf-8");
+    writeFileSync(join(workdir, "projects", "keep", ".mem", "k.md"), "remote\n", "utf-8");
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    await makeSync(runner, "pullkeep", workdir).pull();
+    const baks = readdirSync(dir).filter((f) => f.startsWith("k.md.bak."));
+    expect(baks).toHaveLength(5);
+    expect(baks).toContain("k.md.bak.1006");
+    expect(baks).not.toContain("k.md.bak.1000");
+  });
+});
+
+describe("push 身份兜底", () => {
+  const statusAndNumstat = (cmd: string[]) => {
+    const j = cmd.join(" ");
+    if (j.includes("status --porcelain")) return { ok: true, stdout: " M USER.md\n", stderr: "" };
+    if (j.includes("diff --cached --numstat")) return { ok: true, stdout: "1\t0\tUSER.md\n", stderr: "" };
+    return { ok: true, stdout: "", stderr: "" };
+  };
+
+  it("workdir 没有 git 身份（prod 情形）→ commit 现造 -c user.email", async () => {
+    writeMemoryFile("USER.md", "clean identity fallback\n");
+    const workdir = join(HOME, "workdir-identity-none");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner((cmd) => {
+      if (cmd.join(" ").includes("config user.email")) return { ok: true, stdout: "\n", stderr: "" };
+      return statusAndNumstat(cmd);
+    });
+    const result = await makeSync(runner, "identity-none", workdir).push();
+    expect(result.ok).toBe(true);
+    const commit = runner.calls.find((c) => c.join(" ").includes("commit -m"));
+    expect(commit?.join(" ")).toContain("-c user.name=memx-sync -c user.email=memx@localhost commit -m");
+  });
+
+  it("workdir 已有 git 身份 → 不覆盖，commit 用原身份", async () => {
+    writeMemoryFile("USER.md", "clean identity real\n");
+    const workdir = join(HOME, "workdir-identity-real");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner((cmd) => {
+      if (cmd.join(" ").includes("config user.email")) return { ok: true, stdout: "gubin@example.com\n", stderr: "" };
+      return statusAndNumstat(cmd);
+    });
+    const result = await makeSync(runner, "identity-real", workdir).push();
+    expect(result.ok).toBe(true);
+    const commit = runner.calls.find((c) => c.join(" ").includes("commit -m"));
+    expect(commit?.join(" ")).not.toContain("user.email=memx@localhost");
+  });
+});
+
+describe("报警可见性与去重", () => {
+  it("clone 失败 → SYNC_ERROR warn（不再只有 lastError 没人看见）", async () => {
+    writeMemoryFile("USER.md", "clean clone fail\n");
+    const runner = new FakeRunner((cmd) =>
+      cmd.join(" ").includes("clone") ? { ok: false, stdout: "", stderr: "Host key verification failed" } : { ok: true, stdout: "", stderr: "" },
+    );
+    const alerts = makeAlerts("clonefail");
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts,
+      runner,
+      workdir: join(HOME, "workdir-clonefail"),
+      statePath: join(HOME, "state-clonefail.json"),
+    });
+    const result = await sync.push();
+    expect(result.ok).toBe(false);
+    expect(alerts.list().some((a) => a.code === "SYNC_ERROR" && a.level === "warn")).toBe(true);
+    expect(sync.status().lastError).toContain("clone 失败");
+  });
+
+  it("同一事实重复失败 → 账本只留一条（定时拉不会刷满 200 条）", async () => {
+    writeMemoryFile("USER.md", "clean push dedup\n");
+    const workdir = join(HOME, "workdir-dedup");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("status --porcelain")) return { ok: true, stdout: " M USER.md\n", stderr: "" };
+      if (j.includes("diff --cached --numstat")) return { ok: true, stdout: "1\t0\tUSER.md\n", stderr: "" };
+      if (j.includes("push")) return { ok: false, stdout: "", stderr: "offline" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const alerts = makeAlerts("dedup");
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts,
+      runner,
+      workdir,
+      statePath: join(HOME, "state-dedup.json"),
+    });
+    await sync.push();
+    await sync.push();
+    const pushFailed = alerts.list().filter((a) => a.code === "SYNC_PUSH_FAILED");
+    expect(pushFailed).toHaveLength(1);
+    expect(sync.status().consecutiveFailures).toBe(2);
   });
 });

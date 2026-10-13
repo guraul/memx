@@ -1,5 +1,6 @@
-// memx doctor — 只读状态面板：alerts / memory files / opencode diag。
-// 用法：node --experimental-strip-types scripts/doctor.ts  （或 pnpm doctor）
+// memx doctor — 只读状态面板：alerts / memory files / opencode diag / sync。
+// 用法：node --experimental-strip-types scripts/doctor.ts   或   pnpm run doctor
+// ⚠️ 不要用 `pnpm doctor`（pnpm 有同名内建命令，会跑成 pnpm 自检）。
 // 不联网、不写盘、退出码恒 0。
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
