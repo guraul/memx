@@ -213,7 +213,7 @@ function prepareWorkdir(opts: { config: MemxSyncConfig; runner: GitRunner; workd
   if (!existsSync(join(workdir, ".git"))) {
     mkdirSync(dirname(workdir), { recursive: true });
     const clone = runner.exec(
-      ["git", "clone", `git@github.com:${config.repo}.git`, workdir],
+      ["git", "clone", remoteUrl(config.repo), workdir],
       dirname(workdir),
     );
     return clone.ok
@@ -286,6 +286,12 @@ export function buildDryRunReport(opts: {
 
 export function syncWorkdir(): string {
   return join(homedir(), ".opencode", "memx-sync-repo");
+}
+
+/** 远端地址：`owner/name` 走 GitHub SSH（默认），带协议前缀 / 绝对路径的写法原样使用。
+ *  后者让本机自测与自建远端（本地 bare 仓）能用真实的 git 走完整条路，不必打桩。 */
+export function remoteUrl(repo: string): string {
+  return /^(git@|ssh:\/\/|https?:\/\/|file:|\/|\.\/|\.\.\/)/.test(repo) ? repo : `git@github.com:${repo}.git`;
 }
 
 // ---- 模块 ----
@@ -386,7 +392,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   function ensureRepo(): { ok: boolean; error?: string } {
     if (existsSync(join(workdir, ".git"))) return { ok: true };
     mkdirSync(dirname(workdir), { recursive: true });
-    const r = runner.exec(["git", "clone", `git@github.com:${config.repo}.git`, workdir], dirname(workdir));
+    const r = runner.exec(["git", "clone", remoteUrl(config.repo), workdir], dirname(workdir));
     if (!r.ok) return { ok: false, error: r.stderr.trim() || "clone 失败" };
     return { ok: true };
   }

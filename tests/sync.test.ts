@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
+import { spawnSync } from "child_process";
 import {
   createSync,
+  createNodeGitRunner,
+  remoteUrl,
   scanSensitive,
   listToSync,
   buildDryRunReport,
@@ -554,5 +557,80 @@ describe("报警可见性与去重", () => {
     const pushFailed = alerts.list().filter((a) => a.code === "SYNC_PUSH_FAILED");
     expect(pushFailed).toHaveLength(1);
     expect(sync.status().consecutiveFailures).toBe(2);
+  });
+});
+
+describe("remoteUrl", () => {
+  it("owner/name → GitHub SSH（默认）", () => {
+    expect(remoteUrl("guraul/memx-sync")).toBe("git@github.com:guraul/memx-sync.git");
+  });
+
+  it("带协议 / 绝对路径 / file: → 原样使用（本机自测与自建远端用）", () => {
+    for (const raw of [
+      "git@github.com:guraul/memx-sync.git",
+      "ssh://git@host/x.git",
+      "https://github.com/guraul/memx-sync.git",
+      "/tmp/origin.git",
+      "file:///tmp/origin.git",
+    ]) {
+      expect(remoteUrl(raw)).toBe(raw);
+    }
+  });
+});
+
+describe("真实 git 端到端（本地 bare 仓当远端，不打桩）", () => {
+  const hasGit = spawnSync("git", ["--version"]).status === 0;
+
+  it.skipIf(!hasGit)("push → 远端可读 → 另一机提交 → pull 更新本地并留 .bak → 再 push 为 no-change", async () => {
+    const remote = join(HOME, "origin.git");
+    rmSync(remote, { recursive: true, force: true });
+    const git = (args: string[], cwd?: string): string => {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")} 失败：${r.stderr}`);
+      return r.stdout ?? "";
+    };
+    git(["init", "--bare", remote]);
+    // 老版本 git 没有 `init -b`：显式把 HEAD 指到 main
+    git([`--git-dir=${remote}`, "symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    writeMemoryFile("USER.md", "e2e machine A\n");
+    const workdir = join(HOME, "workdir-e2e");
+    rmSync(workdir, { recursive: true, force: true });
+    const sync = createSync({
+      config: { ...SYNC_CONFIG, repo: remote },
+      alerts: makeAlerts("e2e"),
+      runner: createNodeGitRunner(),
+      workdir,
+      statePath: join(HOME, "state-e2e.json"),
+    });
+
+    const first = await sync.push();
+    expect(first.ok).toBe(true);
+    expect(first.kind).toBe("pushed");
+    // 真的到了远端（读 bare 仓的 main）
+    expect(git([`--git-dir=${remote}`, "show", "main:USER.md"])).toBe("e2e machine A\n");
+
+    // 另一台机器：clone → 改 USER.md → 提交推回
+    const other = join(HOME, "other-machine");
+    rmSync(other, { recursive: true, force: true });
+    git(["clone", remote, other]);
+    writeFileSync(join(other, "USER.md"), "e2e machine B\n", "utf-8");
+    git(["add", "-A"], other);
+    git(["-c", "user.name=B", "-c", "user.email=b@localhost", "commit", "-m", "from B"], other);
+    git(["push", "origin", "main"], other);
+
+    const pulled = await sync.pull();
+    expect(pulled.ok).toBe(true);
+    expect(pulled.kind).toBe("pulled");
+    expect(pulled.message).toContain("备份");
+    expect(readFileSync(join(OPENCODE, "USER.md"), "utf-8")).toBe("e2e machine B\n");
+    const baks = readdirSync(OPENCODE).filter((f) => f.startsWith("USER.md.bak."));
+    expect(baks.some((b) => readFileSync(join(OPENCODE, b), "utf-8") === "e2e machine A\n")).toBe(true);
+
+    // 拉完本地 == 远端 → 再推就是 no-change（不会无谓造空提交）
+    const second = await sync.push();
+    expect(second.ok).toBe(true);
+    expect(second.kind).toBe("no-change");
+    expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("2");
   });
 });

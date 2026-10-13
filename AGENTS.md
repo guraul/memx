@@ -36,7 +36,8 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
   - **身份兜底**：新 clone 的 workdir 未必有 git 身份（prod 就没配过）→ commit 前探 `git config user.email`，没有就用 `-c user.name=memx-sync -c user.email=memx@localhost` 现造一个；有真身份时不覆盖
   - **拉取备份**：pull 是**远端优先**，覆盖前若本地内容与远端不同，先把本地存成 `<file>.bak.<ts>`（每文件保留最新 5 份，`.bak.` 不入镜像）。没有这一步会静默吞掉本地未推的改动（首合并、推送失败后尤其危险）
   - **报警去重**：`sync` 模块内的 `alert()` 会跳过与上一条完全同 code+message 的记录——离线机器的定时拉每 30 分钟失败一次，不去重会把 200 条账本刷满同一行
-  - **已知限制（v1 有意不做）**：删除不传播（本地删掉的文件会留在仓里，远端删掉的会在下次 pull 时被本地版本推回）；不做逐行合并（同一文件两台机器都改 → 靠 git rebase，冲突即 abort 留人工）；仓库地址硬编码 SSH（`git@github.com:<repo>.git`）；**pull 不持文件锁**（与提炼写盘并发时最后写者胜，靠覆盖前 `.bak.` 备份兜底）
+  - **已知限制（v1 有意不做）**：删除不传播（本地删掉的文件会留在仓里，远端删掉的会在下次 pull 时被本地版本推回）；不做逐行合并（同一文件两台机器都改 → 靠 git rebase，冲突即 abort 留人工）；**pull 不持文件锁**（与提炼写盘并发时最后写者胜，靠覆盖前 `.bak.` 备份兜底）
+  - **远端地址**：`remoteUrl()` —— `owner/name` 拼成 `git@github.com:<owner>/<name>.git`；写成完整 URL / 绝对路径（`git@…` / `ssh://` / `https://` / `file:` / `/path`）则原样使用。后者是给本机自测用的：`tests/sync.test.ts` 有一条**真实 git 端到端**（本地 bare 仓当远端：push → 另一机提交推回 → pull + `.bak` 备份 → 再 push = no-change），不打桩，覆盖 clone/commit/push/fetch/rebase/copy 全序列
 - **PII 脱敏闸门**: `push()` 先对**全部待推文件**跑 `scanSensitive()`（`src/core/sync.ts`，8 类规则：openai-key / aws-access-key / github-token / github-pat / slack-token / jwt / private-key / env-assignment），命中即**拒推** + `SYNC_PII_BLOCKED` critical alert，只报**行号+规则名**，绝不回显内容。`pnpm sync:dry-run`（`scripts/sync-dry-run.ts`）只读预览（config / 待同步清单+双向行数 / PII 命中 / 远端 git log，**永不 push**，退出码恒 0）；加 `-- --fetch` 会先 clone/fetch 到缓存 workdir（**只动 workdir，不碰 `~/.opencode` 记忆文件**）——首合并预演（新机器第一次拉之前想看清远端有什么）必须用这个模式，否则 workdir 不存在、报告只会写「远端未取到」
 - **Concurrency guard**: `runRefinement` + `runMemoryRefinement` share mutex (`refinementInFlight`), `markRun()` fires BEFORE the LLM call - both prevent child-session storms / duplicate writes when events overlap. Throttle is **in-memory only** (`lastRunAt`), so restarting the host resets it
 - **捕获游标（P0-1）**: per-session 增量游标锚在**消息 id** 上，存 `ctx.storage` 的 `cursor:<sessionID>`；决策全在 `planCapture()`（`context-shape.ts`，纯函数可单测：fresh / resumed / anchor-lost），host 侧只做 storage 读写与信号解析。`session.deleted` 时删游标。**别再拿 `extractLastTurn` 做捕获**（它留给 session-llm 取子会话回复），否则又退回"只扫最后一轮"
@@ -84,7 +85,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor（阶段 4）+ sync-dry-run（阶段 4 第二半）
-tests/                         - 21 文件 / 314 测试（基线，低于即回归）
+tests/                         - 21 文件 / 317 测试（基线，低于即回归）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -122,7 +123,7 @@ tests/                         - 21 文件 / 314 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：21 文件 / 314 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：21 文件 / 317 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files
