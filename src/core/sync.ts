@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { AlertStore } from "./alerts";
 import type { MemxSyncConfig } from "./config";
+import { withFileLock } from "./store/lock";
 
 // ---- GitRunner：编排逻辑与真实 git 解耦，测试注入脚本化假 runner ----
 
@@ -134,6 +135,11 @@ export interface SyncState {
 
 export function syncStatePath(): string {
   return join(homedir(), ".opencode", "memx-sync-state.json");
+}
+
+/** 同步串行闸门（跨进程）：workdir 只有一个，push/pull 不能同时碰它。 */
+export function syncLockPath(): string {
+  return join(homedir(), ".opencode", ".memx-sync.lock");
 }
 
 export function readSyncState(path?: string): SyncState | null {
@@ -397,6 +403,14 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     return { ok: true };
   }
 
+  /** 串行闸门：workdir 只有一份，push/pull 不能同时碰（git index.lock 会互相踩）。
+   *  插件是每进程一实例、每个进程各自按目录实例化——同一个实例里两次快速写盘也会并发
+   *  `void sync.push()`。进程内与跨进程都要挡，所以用文件锁而不是内存互斥。
+   *  ttl/timeout 都比默认宽：一次 push 含网络往返（git 命令自身 120s 超时封顶）。 */
+  function withSyncLock<T>(fn: () => T | Promise<T>): Promise<T> {
+    return withFileLock(syncLockPath(), fn, { ttlMs: 600_000, timeoutMs: 300_000 });
+  }
+
   function failFast(message: string): SyncResult {
     lastError = message;
     consecutiveFailures++;
@@ -437,111 +451,120 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
         save();
         return { ok: false, kind: "pii-blocked", message: lastError, piiHits };
       }
-
-      const ensured = ensureRepo();
-      if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "未知"}`);
-
-      for (const f of files) {
-        const dest = join(workdir, f.repoPath);
-        mkdirSync(dirname(dest), { recursive: true });
-        copyFileSync(f.localPath, dest);
-      }
-
-      const status = runner.exec(["git", "status", "--porcelain"], workdir);
-      if (status.ok && status.stdout.trim() === "") {
-        save();
-        return { ok: true, kind: "no-change", message: "无改动" };
-      }
-
-      runner.exec(["git", "add", "-A"], workdir);
-      const num = runner.exec(["git", "diff", "--cached", "--numstat"], workdir);
-      const message = `memx@${config.machineName}: ${summarizeNumstat(num.stdout)}`;
-      const commit = runner.exec(commitCommand(message), workdir);
-      if (!commit.ok) return failFast(`commit 失败：${commit.stderr.trim() || "未知"}`);
-
-      let pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
-      if (!pushRes.ok) {
-        // 非快进（或任何 push 失败）→ fetch + rebase + 重试一次；不进入重试风暴
-        runner.exec(["git", "fetch", "origin", config.branch], workdir);
-        const rebase = runner.exec(["git", "rebase", `origin/${config.branch}`], workdir);
-        if (!rebase.ok) {
-          runner.exec(["git", "rebase", "--abort"], workdir);
-          lastError = "push 被拒且 rebase 冲突，已回滚，需人工处理";
-          alert("critical", "SYNC_CONFLICT", lastError);
-          consecutiveFailures++;
-          save();
-          return { ok: false, kind: "conflict", message: lastError };
-        }
-        pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
-        if (!pushRes.ok) {
-          lastError = `push 重试仍失败：${pushRes.stderr.trim() || "未知"}`;
-          alert("warn", "SYNC_PUSH_FAILED", lastError);
-          consecutiveFailures++;
-          save();
-          return { ok: false, kind: "error", message: lastError };
-        }
-      }
-
-      lastPushAt = new Date().toISOString();
-      lastError = "";
-      consecutiveFailures = 0;
-      save();
-      return { ok: true, kind: "pushed", message };
+      return await withSyncLock(() => pushLocked(files));
     } catch (err) {
       return failFast(err instanceof Error ? err.message : String(err));
     }
   }
 
-  async function pull(): Promise<SyncResult> {
-    if (!active) return { ok: false, kind: "error", message: "sync 未启用（enabled=false 或 machineName 为空）" };
-    try {
-      const ensured = ensureRepo();
-      if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "未知"}`);
+  /** 锁内部分：镜像 → commit → push（含一次 rebase 重试）。 */
+  function pushLocked(files: SyncFileEntry[]): SyncResult {
+    const ensured = ensureRepo();
+    if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "未知"}`);
 
-      const fetched = runner.exec(["git", "fetch", "origin", config.branch], workdir);
-      if (!fetched.ok) return failFast(`fetch 失败：${fetched.stderr.trim() || "未知"}`);
+    for (const f of files) {
+      const dest = join(workdir, f.repoPath);
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(f.localPath, dest);
+    }
 
+    const status = runner.exec(["git", "status", "--porcelain"], workdir);
+    if (status.ok && status.stdout.trim() === "") {
+      save();
+      return { ok: true, kind: "no-change", message: "无改动" };
+    }
+
+    runner.exec(["git", "add", "-A"], workdir);
+    const num = runner.exec(["git", "diff", "--cached", "--numstat"], workdir);
+    const message = `memx@${config.machineName}: ${summarizeNumstat(num.stdout)}`;
+    const commit = runner.exec(commitCommand(message), workdir);
+    if (!commit.ok) return failFast(`commit 失败：${commit.stderr.trim() || "未知"}`);
+
+    let pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
+    if (!pushRes.ok) {
+      // 非快进（或任何 push 失败）→ fetch + rebase + 重试一次；不进入重试风暴
+      runner.exec(["git", "fetch", "origin", config.branch], workdir);
       const rebase = runner.exec(["git", "rebase", `origin/${config.branch}`], workdir);
       if (!rebase.ok) {
-        // 冲突不强行解：abort 回滚 + critical 报警，留人工
         runner.exec(["git", "rebase", "--abort"], workdir);
-        lastError = "pull 时 rebase 冲突，已回滚，需人工处理";
+        lastError = "push 被拒且 rebase 冲突，已回滚，需人工处理";
         alert("critical", "SYNC_CONFLICT", lastError);
         consecutiveFailures++;
         save();
         return { ok: false, kind: "conflict", message: lastError };
       }
-
-      let copied = 0;
-      let backedUp = 0;
-      for (const f of listFromWorkdir(workdir)) {
-        const src = join(workdir, f.repoPath);
-        mkdirSync(dirname(f.localPath), { recursive: true });
-        if (existsSync(f.localPath)) {
-          let differs = true;
-          try {
-            differs = readFileSync(f.localPath, "utf8") !== readFileSync(src, "utf8");
-          } catch {
-            differs = true;
-          }
-          if (differs) {
-            backupBeforeOverwrite(f.localPath);
-            backedUp++;
-          }
-        }
-        copyFileSync(src, f.localPath);
-        copied++;
+      pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
+      if (!pushRes.ok) {
+        lastError = `push 重试仍失败：${pushRes.stderr.trim() || "未知"}`;
+        alert("warn", "SYNC_PUSH_FAILED", lastError);
+        consecutiveFailures++;
+        save();
+        return { ok: false, kind: "error", message: lastError };
       }
+    }
 
-      lastPullAt = new Date().toISOString();
-      lastError = "";
-      consecutiveFailures = 0;
-      save();
-      const backupNote = backedUp > 0 ? `（${backedUp} 个本地差异件已备份为 .bak.<时间戳>）` : "";
-      return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件${backupNote}` };
+    lastPushAt = new Date().toISOString();
+    lastError = "";
+    consecutiveFailures = 0;
+    save();
+    return { ok: true, kind: "pushed", message };
+  }
+
+  async function pull(): Promise<SyncResult> {
+    if (!active) return { ok: false, kind: "error", message: "sync 未启用（enabled=false 或 machineName 为空）" };
+    try {
+      return await withSyncLock(() => pullLocked());
     } catch (err) {
       return failFast(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /** 锁内部分：fetch + rebase → 镜像回本地（覆盖前备份）。 */
+  function pullLocked(): SyncResult {
+    const ensured = ensureRepo();
+    if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "未知"}`);
+
+    const fetched = runner.exec(["git", "fetch", "origin", config.branch], workdir);
+    if (!fetched.ok) return failFast(`fetch 失败：${fetched.stderr.trim() || "未知"}`);
+
+    const rebase = runner.exec(["git", "rebase", `origin/${config.branch}`], workdir);
+    if (!rebase.ok) {
+      // 冲突不强行解：abort 回滚 + critical 报警，留人工
+      runner.exec(["git", "rebase", "--abort"], workdir);
+      lastError = "pull 时 rebase 冲突，已回滚，需人工处理";
+      alert("critical", "SYNC_CONFLICT", lastError);
+      consecutiveFailures++;
+      save();
+      return { ok: false, kind: "conflict", message: lastError };
+    }
+
+    let copied = 0;
+    let backedUp = 0;
+    for (const f of listFromWorkdir(workdir)) {
+      const src = join(workdir, f.repoPath);
+      mkdirSync(dirname(f.localPath), { recursive: true });
+      if (existsSync(f.localPath)) {
+        let differs = true;
+        try {
+          differs = readFileSync(f.localPath, "utf8") !== readFileSync(src, "utf8");
+        } catch {
+          differs = true;
+        }
+        if (differs) {
+          backupBeforeOverwrite(f.localPath);
+          backedUp++;
+        }
+      }
+      copyFileSync(src, f.localPath);
+      copied++;
+    }
+
+    lastPullAt = new Date().toISOString();
+    lastError = "";
+    consecutiveFailures = 0;
+    save();
+    const backupNote = backedUp > 0 ? `（${backedUp} 个本地差异件已备份为 .bak.<时间戳>）` : "";
+    return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件${backupNote}` };
   }
 
   function status(): SyncStatus {

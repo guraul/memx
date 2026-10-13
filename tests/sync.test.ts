@@ -9,8 +9,10 @@ import {
   scanSensitive,
   listToSync,
   buildDryRunReport,
+  syncLockPath,
   type GitRunner,
 } from "../src/core/sync";
+import { withFileLock } from "../src/core/store/lock";
 import { createFileAlertStore, type AlertStore } from "../src/core/alerts";
 import { MemxConfigSchema } from "../src/core/config";
 
@@ -633,4 +635,64 @@ describe("真实 git 端到端（本地 bare 仓当远端，不打桩）", () =>
     expect(second.kind).toBe("no-change");
     expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("2");
   });
+});
+
+describe("并发串行闸门（workdir 只有一份，push/pull 不能同时碰）", () => {
+  it("锁被他人持有 → push 在锁外干等，期间零 git 命令", async () => {
+    writeMemoryFile("USER.md", "clean lock test\n");
+    const workdir = join(HOME, "workdir-lock");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    const sync = makeSync(runner, "lock", workdir);
+
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    // withFileLock 在 await 之前就同步拿到锁，调用返回时锁已在手
+    const holder = withFileLock(syncLockPath(), () => held, { timeoutMs: 10_000 });
+
+    const p = sync.push();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(runner.calls).toHaveLength(0); // 还在等锁，一个 git 命令都没发
+
+    release();
+    await holder;
+    const result = await p;
+    expect(result.ok).toBe(true);
+    expect(runner.calls.length).toBeGreaterThan(0); // 拿到锁后照常跑完
+  });
+
+  it.skipIf(spawnSync("git", ["--version"]).status !== 0)(
+    "两个 push 并发 → 串行完成，远端只多一个提交（真实 git，否则会踩 index.lock）",
+    async () => {
+      const remote = join(HOME, "lock-origin.git");
+      rmSync(remote, { recursive: true, force: true });
+      const git = (args: string[], cwd?: string): string => {
+        const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+        if (r.status !== 0) throw new Error(`git ${args.join(" ")} 失败：${r.stderr}`);
+        return r.stdout ?? "";
+      };
+      git(["init", "--bare", remote]);
+      git([`--git-dir=${remote}`, "symbolic-ref", "HEAD", "refs/heads/main"]);
+
+      writeMemoryFile("USER.md", "clean concurrent\n");
+      const workdir = join(HOME, "workdir-lock-concurrent");
+      rmSync(workdir, { recursive: true, force: true });
+      const mk = () =>
+        createSync({
+          config: { ...SYNC_CONFIG, repo: remote },
+          alerts: makeAlerts("lock-concurrent"),
+          runner: createNodeGitRunner(),
+          workdir,
+          statePath: join(HOME, "state-lock-concurrent.json"),
+        });
+
+      const [a, b] = await Promise.all([mk().push(), mk().push()]);
+      expect(a.ok).toBe(true);
+      expect(b.ok).toBe(true);
+      expect([a.kind, b.kind].sort()).toEqual(["no-change", "pushed"]);
+      expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("1");
+    },
+  );
 });
