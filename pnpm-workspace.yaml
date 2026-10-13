@@ -1,2 +1,5 @@
+# pnpm 11 的 strictDepBuilds 默认开启：未在 allowBuilds 里表态的构建脚本会让
+# `pnpm install` **退出 1**（install.sh 的 set -e 会因此中断在第 2 步，后 4 步全不执行）。
+# msgpackr-extract 只是 msgpackr 的可选原生加速器，纯 JS 回退可用 → 明确表态 false。
 allowBuilds:
-  msgpackr-extract: set this to true or false
+  msgpackr-extract: false
