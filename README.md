@@ -257,6 +257,14 @@ location warnings, health, alerts, explicit writes). The stored kv row is the re
 Read-only status panel: alerts / memory files / opencode diag. Use when you want to see memx's
 health without triggering a refinement.
 
+## Multi-machine sync
+
+Syncs USER.md / MEMORY.md / `.mem/*.md` across machines via a GitHub repo (`guraul/memx-sync` by default).
+**Off by default** — enable in `~/.opencode/memx.config.json`: `{"sync": {"enabled": true, "machineName": "mbp"}}`
+(restart OpenCode after changing). Push fires after each memory write; pull runs at startup + every `intervalMinutes`.
+`pnpm sync:dry-run` previews what would push (read-only, never pushes). A PII gate (8 rule types) blocks any push
+containing tokens/keys — hits are reported as file+line+rule only, never echoed.
+
 ## Troubleshooting
 
 - **`session.idle` doesn't fire**: This event only fires when the session is truly idle (after a turn fully ends). Continuous tool calls / active turns delay it indefinitely. Use the `reflect` tool to trigger manually.
@@ -269,7 +277,7 @@ health without triggering a refinement.
 
 ```bash
 pnpm install       # Install dependencies
-pnpm test          # Run tests (baseline: 19 files / 277 tests, all green — anything less is a regression)
+pnpm test          # Run tests (baseline: 21 files / 302 tests, all green — anything less is a regression)
 pnpm run typecheck # Type check
 ```
 

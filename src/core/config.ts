@@ -18,15 +18,32 @@ const MemxInjectSchema = z.object({
   excludeAgents: z.array(z.string()).optional().default([]),
 });
 
-const MemxConfigSchema = z.object({
+/** 多机云同步（阶段 4 第二半）：默认关；machineName 为空同样视为不启动。 */
+export const MemxSyncConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  repo: z.string().default("guraul/memx-sync"),
+  branch: z.string().default("main"),
+  machineName: z.string().default(""),
+  intervalMinutes: z.number().int().positive().default(30),
+});
+
+export const MemxConfigSchema = z.object({
   refinementModel: z.string().optional().default("opencode/mimo-v2.6-flash-free"),
   maxSignalsPerSession: z.number().int().positive().optional().default(20),
   autoBackupCount: z.number().int().positive().optional().default(5),
   throttleMinutes: z.number().int().positive().optional().default(10),
   inject: MemxInjectSchema.optional().default({ enabled: true, includeAgents: "all", excludeAgents: [] }),
+  sync: MemxSyncConfigSchema.optional().default({
+    enabled: false,
+    repo: "guraul/memx-sync",
+    branch: "main",
+    machineName: "",
+    intervalMinutes: 30,
+  }),
 });
 
 export type MemxConfig = z.infer<typeof MemxConfigSchema>;
+export type MemxSyncConfig = z.infer<typeof MemxSyncConfigSchema>;
 
 export function getConfigPath(): string {
   return join(homedir(), ".opencode", "memx.config.json");

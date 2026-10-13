@@ -26,7 +26,9 @@ import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/mem
 import { refineMemory } from "../../core/refine/memory-refinement";
 import { readMemoryIndex, writeMemoryIndex, applyMemoryProposals, forgetMemory } from "../../core/store/memory-md";
 import { deriveSlug, MEMORY_TYPES } from "../../core/memory-types";
-import { writeProjectMemory } from "../../core/memory-write";
+import { writeProjectMemory, applyBreadcrumbLine } from "../../core/memory-write";
+import { createSync } from "../../core/sync";
+import type { SyncModule } from "../../core/sync";
 import { runHealthMaintenance, formatHealthLog } from "../../core/health/memory-health";
 import type { AutoFixLog } from "../../core/health/memory-health";
 import { INVALID_OUTPUT_STREAK_LIMIT } from "../../core/refine/refine-outcome";
@@ -59,6 +61,19 @@ export default Plugin.define({
     // 报警单一事实源（阶段 4）：文件存储 ~/.opencode/memx-alerts.json，
     // recordAlert / memx_status / MEMORY.md 面包屑都走它。
     const alertStore = createFileAlertStore();
+
+    // ---- 多机云同步（阶段 4 第二半）：默认关；enabled && machineName 才启动 ----
+    // 不满足就跳过（diag 记一行配置事实，不报警）。配置在 setup 读一次——开启 sync 需重启宿主。
+    const initialConfig = await loadMemxConfig();
+    let sync: SyncModule | null = null;
+    let syncTimer: ReturnType<typeof setInterval> | null = null;
+    if (initialConfig.sync.enabled && initialConfig.sync.machineName !== "") {
+      sync = createSync({ config: initialConfig.sync, alerts: alertStore });
+      void sync.pull();
+      syncTimer = setInterval(() => void sync?.pull(), initialConfig.sync.intervalMinutes * 60_000);
+      // 定时器不该拖住宿主退出（与注入闸门定时器同一处理）
+      (syncTimer as { unref?: () => void }).unref?.();
+    }
 
 
     // #4 拍板：v2 无 app.log → ctx.storage 结构化诊断（memx_status / memx doctor 消费）
@@ -107,6 +122,8 @@ export default Plugin.define({
       health?: { fixes: number; escalated: number; lastLog: string; updatedAt: string };
       /** 轻量报警账本（阶段 4 的 core/alerts 接管前的落点，最多 20 条） */
       alerts?: Array<{ level: "info" | "warn" | "critical"; code: string; message: string; ts: string }>;
+      /** 云同步（阶段 4 第二半）：只记一行配置事实（不报警；默认关，开需 machineName + 重启宿主） */
+      sync?: { enabled: boolean; machineName: string };
       /** 注入诊断（context hook 的每 step 行为 + 装配结果） */
       injection?: {
         /** hook 触发总次数（含子会话分支） */
@@ -150,6 +167,8 @@ export default Plugin.define({
       },
       updatedAt: new Date().toISOString(),
     };
+    // 云同步配置事实（一行，不报警）——sync 模块在 alertStore 之后、此处之前创建
+    diag.sync = { enabled: initialConfig.sync.enabled, machineName: initialConfig.sync.machineName };
     const persistDiag = async (): Promise<void> => {
       try {
         await ctx.storage.set(diagKey, { ...diag });
@@ -220,19 +239,10 @@ export default Plugin.define({
     }
 
     /** 写 MEMORY.md 前加面包屑：移除旧 `<!-- memx:` 行，有 warn/critical 时在顶部插新面包屑。
-     *  只有那一行面包屑，不写健康日志/报警列表。空串则不写。 */
+     *  只有那一行面包屑，不写健康日志/报警列表。空串则不写。
+     *  摘行/置顶逻辑在 core 的 applyBreadcrumbLine（与 memory_write 工具路径共用一份实现）。 */
     function applyAlertBreadcrumb(content: string): string {
-      const lines = content.split("\n");
-      let start = 0;
-      while (start < lines.length && lines[start]!.trim() === "") start++;
-      if (start < lines.length && lines[start]!.startsWith("<!-- memx:")) {
-        lines.splice(start, 1);
-      }
-      const breadcrumb = formatBreadcrumb(alertStore);
-      if (breadcrumb) {
-        lines.unshift(breadcrumb, "");
-      }
-      return lines.join("\n");
+      return applyBreadcrumbLine(content, formatBreadcrumb(alertStore));
     }
 
     async function runRefinement(_sessionID: string, force = false): Promise<string> {
@@ -421,6 +431,8 @@ export default Plugin.define({
         }
         diag.updatedAt = new Date().toISOString();
         void persistDiag();
+        // 写盘成功后异步推云同步（不 await，绝不阻塞写盘）
+        void sync?.push();
 
         const healthNote = applied.healthLogs.length > 0 ? `，health: ${applied.healthLogs.length} 项` : "";
         return `[memx] 已写入 ${proposals.length} 条记忆${healthNote}`;
@@ -713,15 +725,20 @@ export default Plugin.define({
             evidence?: string;
           };
           try {
-            const result = await writeProjectMemory(currentSlug, {
-              text: input.text ?? "",
-              ...(input.type !== undefined ? { type: input.type } : {}),
-              ...(input.name !== undefined ? { name: input.name } : {}),
-              ...(input.description !== undefined ? { description: input.description } : {}),
-              ...(input.why !== undefined ? { why: input.why } : {}),
-              ...(input.how_to_apply !== undefined ? { how_to_apply: input.how_to_apply } : {}),
-              ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
-            });
+            const result = await writeProjectMemory(
+              currentSlug,
+              {
+                text: input.text ?? "",
+                ...(input.type !== undefined ? { type: input.type } : {}),
+                ...(input.name !== undefined ? { name: input.name } : {}),
+                ...(input.description !== undefined ? { description: input.description } : {}),
+                ...(input.why !== undefined ? { why: input.why } : {}),
+                ...(input.how_to_apply !== undefined ? { how_to_apply: input.how_to_apply } : {}),
+                ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
+              },
+              // 工具写盘也刷新 MEMORY.md 面包屑（字符串由 host 算，core 不反向 import alerts）
+              formatBreadcrumb(alertStore),
+            );
             if (!result.ok) {
               return { content: `[memx] memory_write 失败：${result.error}` };
             }
@@ -737,6 +754,8 @@ export default Plugin.define({
             };
             diag.updatedAt = new Date().toISOString();
             void persistDiag();
+            // 写盘成功后异步推云同步（不 await，绝不阻塞写盘）
+            void sync?.push();
             const warnNote = result.warnings.length > 0 ? `\n   ⚠️ ${result.warnings.join("；")}` : "";
             return {
               content: `✅ 已记住（${result.type} · ${result.action === "append" ? "新增" : "更新"}）：${result.name}\n   → ${result.filePath}${warnNote}`,
@@ -854,6 +873,8 @@ export default Plugin.define({
       memoryBuffer.clear();
       injectCache.clear();
       clearInterval(gateTimer);
+      if (syncTimer !== null) clearInterval(syncTimer);
+      sync?.dispose();
       controller.abort();
     };
   },

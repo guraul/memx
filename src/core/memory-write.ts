@@ -70,9 +70,25 @@ function firstLine(text: string): string {
   return text.split("\n")[0]?.trim() ?? "";
 }
 
+/** MEMORY.md 顶部面包屑：摘掉旧 `<!-- memx:` 行，有新面包屑则置顶（空串 = 只清旧行）。
+ *  纯函数；字符串由宿主传入（core 不反向 import alerts）。 */
+export function applyBreadcrumbLine(content: string, breadcrumb: string): string {
+  const lines = content.split("\n");
+  let start = 0;
+  while (start < lines.length && lines[start]!.trim() === "") start++;
+  if (start < lines.length && lines[start]!.startsWith("<!-- memx:")) {
+    lines.splice(start, 1);
+  }
+  if (breadcrumb) {
+    lines.unshift(breadcrumb, "");
+  }
+  return lines.join("\n");
+}
+
 export async function writeProjectMemory(
   slug: string,
   input: MemoryWriteInput,
+  breadcrumb?: string,
 ): Promise<MemoryWriteOutcome> {
   const text = (input.text ?? "").trim();
   if (!text) return { ok: false, error: "text 不能为空" };
@@ -109,7 +125,9 @@ export async function writeProjectMemory(
   // 与后台提炼共用一把锁：read-modify-write 必须在锁内**重读**索引
   const applied = await withFileLock(memoryIndexLockPath(), () => {
     const result = applyMemoryProposals([proposal], readMemoryIndex(), slug);
-    writeMemoryIndex(result.content);
+    // 面包屑由宿主算好传入（formatBreadcrumb(alertStore)）：工具写盘也能刷新 MEMORY.md 顶部那一行
+    const indexContent = breadcrumb !== undefined ? applyBreadcrumbLine(result.content, breadcrumb) : result.content;
+    writeMemoryIndex(indexContent);
     return result;
   });
 

@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { createFileAlertStore, formatAlertsPanel } from "../src/core/alerts.ts";
+import { loadMemxConfig } from "../src/core/config.ts";
+import { listToSync, readSyncState } from "../src/core/sync.ts";
 
 // ---- alerts ----
 try {
@@ -64,3 +66,34 @@ try {
 } catch {
   console.log("opencode diag: 未取到");
 }
+
+// ---- sync（阶段 4 第二半）----
+// 只读：config 字段 / 状态文件（若启用）/ 待推文件数 / 最近 PII 扫描。不 clone、不 fetch。
+void (async () => {
+  try {
+    const config = await loadMemxConfig();
+    const s = config.sync;
+    console.log(
+      `sync: enabled=${s.enabled} repo=${s.repo} branch=${s.branch} machineName=${s.machineName || "(未设置)"} intervalMinutes=${s.intervalMinutes}`,
+    );
+    console.log(`sync.pendingFiles: ${listToSync().length}`);
+    if (s.enabled && s.machineName) {
+      const state = readSyncState();
+      if (state) {
+        console.log(
+          `sync.status: lastPushAt=${state.lastPushAt ?? "从未"} lastPullAt=${state.lastPullAt ?? "从未"} consecutiveFailures=${state.consecutiveFailures} lastError=${state.lastError || "无"}`,
+        );
+      } else {
+        console.log("sync.status: 未取到（尚未发生过 push/pull）");
+      }
+      const pii = state?.lastPiiScan;
+      console.log(
+        pii
+          ? `sync.pii: ${pii.hits} 处命中 / ${pii.files} 个文件 @ ${pii.at}`
+          : "sync.pii: 未取到（尚未扫描）",
+      );
+    }
+  } catch {
+    console.log("sync: 未取到");
+  }
+})();

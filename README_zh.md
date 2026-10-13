@@ -242,6 +242,14 @@ Rewriting auth middleware for compliance.
 ### `memx doctor`
 只读状态面板：alerts / memory files / opencode diag。想查看 memx 健康状态而不触发提炼时使用。
 
+## 多机同步
+
+通过 GitHub 仓（默认 `guraul/memx-sync`）在多台机器间同步 USER.md / MEMORY.md / `.mem/*.md`。
+**默认关**——在 `~/.opencode/memx.config.json` 里开：`{"sync": {"enabled": true, "machineName": "mbp"}}`
+（改完需重启 OpenCode）。每次记忆写盘后自动推；启动时拉一次 + 每 `intervalMinutes` 定时拉。
+`pnpm sync:dry-run` 只读预览待推内容（永不 push）。PII 闸门（8 类规则）拦截含 token/密钥的推送——
+命中只报 文件+行号+规则名，绝不回显内容。
+
 ## 故障排查
 
 - **`session.idle` 迟迟不触发**：该事件只在会话真正空闲（一轮回复完全结束）后触发，连续工具调用 / 活跃回合会无限延迟。直接调用 `reflect` 工具手动触发。
@@ -254,7 +262,7 @@ Rewriting auth middleware for compliance.
 
 ```bash
 pnpm install       # 安装依赖
-pnpm test          # 运行测试（基线：19 文件 / 277 用例全绿，低于即回归）
+pnpm test          # 运行测试（基线：21 文件 / 302 用例全绿，低于即回归）
 pnpm run typecheck # 类型检查
 ```
 
