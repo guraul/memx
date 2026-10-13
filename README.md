@@ -133,7 +133,7 @@ Customize via `~/.opencode/memx.config.json`:
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `refinementModel` | `string` | `opencode-go/longcat-2.5-preview-free` | Refinement model (`provider/model` format) |
+| `refinementModel` | `string` | `opencode/mimo-v2.6-flash-free` | Refinement model (`provider/model` format). **Production keeps this free model**; local dev overrides it to `opencode-go/longcat-2.5-preview-free` in `~/.opencode/memx.config.json` (the local free tier is gated 403/429) |
 | `maxSignalsPerSession` | `number` | `20` | Signal buffer max size |
 | `autoBackupCount` | `number` | `5` | Backup retention count |
 | `throttleMinutes` | `number` | `10` | Refinement throttle interval (minutes) |
@@ -250,7 +250,7 @@ location warnings, health, alerts, explicit writes). The stored kv row is the re
 
 - **`session.idle` doesn't fire**: This event only fires when the session is truly idle (after a turn fully ends). Continuous tool calls / active turns delay it indefinitely. Use the `reflect` tool to trigger manually.
 - **Code changes not taking effect**: Plugins load once at startup; you must restart OpenCode after modifying `src/`. Changes to `~/.opencode/memx.config.json` take effect immediately (read at each refinement).
-- **Refinement model**: Default `opencode-go/longcat-2.5-preview-free` (2026-10-12 用户指定；免费档 `opencode/*-free` 走网关指纹校验会 403/429，别再退回). No API key is needed for this model in the local setup. DeepSeek official keys are invalid in this environment; don't configure `deepseek/*` models.
+- **Refinement model**: Default `opencode/mimo-v2.6-flash-free` (the production target — production opencode has no `opencode-go` provider). Local dev overrides it to `opencode-go/longcat-2.5-preview-free` via `~/.opencode/memx.config.json`, because the local free tier is gated (403 fingerprint check / 429 rate limit). DeepSeek official keys are invalid in this environment; don't configure `deepseek/*` models.
 - **Logs**: Located at `~/.local/share/opencode/log/opencode.log`. Plugin `app.log` messages don't show the `service` field; search `level=ERROR` for errors, `Updated USER.md` or `Updated MEMORY.md` for successful writes.
 - **LLM output debugging**: Each refinement logs `llm raw(N): ...` (400-char truncation) to verify the LLM's raw return is valid JSON.
 
