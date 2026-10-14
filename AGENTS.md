@@ -10,7 +10,8 @@ OpenCode V2 dual-track memory plugin. Track 1: captures user style preferences (
 pnpm test          # vitest run
 pnpm run typecheck # tsc --noEmit
 pnpm run doctor    # node --experimental-strip-types scripts/doctor.ts — 只读状态面板
-pnpm sync:dry-run  # 只读预览云同步待推内容（加 `-- --fetch` 先对齐远端，见「多机云同步」）
+pnpm sync:dry-run  # 只读预览云同步待同步内容（加 `-- --fetch` 先对齐远端，见「多机云同步」）
+pnpm sync:op -- status|pull|push [--machine=<name>]   # 手工首推/首拉/合并后对齐（走插件同一条代码路径）
 ```
 
 两个脚本由 `tests/scripts-smoke.test.ts` 真跑一遍（值导入缺 `.ts` 扩展名时 tsc/vitest 都发现不了，只有真跑才 ERR_MODULE_NOT_FOUND）。
@@ -41,6 +42,7 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
   - **报警去重**：`sync` 模块内的 `alert()` 会跳过与上一条完全同 code+message 的记录——离线机器的定时拉每 30 分钟失败一次，不去重会把 200 条账本刷满同一行
   - **已知限制（v1 有意不做）**：删除不传播（本地删掉的文件会留在仓里，远端删掉的会在下次 pull 时被本地版本推回）；不做逐行合并（同一文件两台机器都改 → 靠 git rebase，冲突即 abort 留人工）；**pull 不持记忆文件锁**（与提炼写盘并发时最后写者胜，靠覆盖前 `.bak.` 备份兜底；同步操作彼此之间由 `.memx-sync.lock` 串行）
   - **远端地址**：`remoteUrl()` —— `owner/name` 拼成 `git@github.com:<owner>/<name>.git`；写成完整 URL / 绝对路径（`git@…` / `ssh://` / `https://` / `file:` / `/path`）则原样使用。后者是给本机自测用的：`tests/sync.test.ts` 有一条**真实 git 端到端**（本地 bare 仓当远端：push → 另一机提交推回 → pull + `.bak` 备份 → 再 push = no-change），不打桩，覆盖 clone/commit/push/fetch/rebase/copy 全序列
+- **手工操作（`pnpm sync:op`）**: `scripts/sync-op.ts` —— `status`（纯只读：config/待同步清单/PII/近况，连 fetch 都不做）、`pull`、`push`、`both`。**与插件同一条代码路径**（`core/sync` 的 `createSync`），不是第二套实现。`--machine=<name>` = 显式覆盖 `{enabled:true, machineName:<name>}`，用于"配置还没开、但要人工跑一次首推/首拉"（prod 首次合并就是这条路）；**它不改配置文件**，运行中的宿主不受影响；不传就完全按 `~/.opencode/memx.config.json`（未启用直接拒绝）。为什么要有它：`createSync` 对 `enabled=false` 是硬拒绝，而"先开配置再推"会让运行中的宿主开始自动同步——手工通道把这两件事解耦
 - **PII 脱敏闸门**: `push()` 先对**全部待推文件**跑 `scanSensitive()`（`src/core/sync.ts`，8 类规则：openai-key / aws-access-key / github-token / github-pat / slack-token / jwt / private-key / env-assignment），命中即**拒推** + `SYNC_PII_BLOCKED` critical alert，只报**行号+规则名**，绝不回显内容。`pnpm sync:dry-run`（`scripts/sync-dry-run.ts`）只读预览（config / 待同步清单+双向行数 / PII 命中 / 远端 git log，**永不 push**，退出码恒 0）；加 `-- --fetch` 会先 clone/fetch 到缓存 workdir（**只动 workdir，不碰 `~/.opencode` 记忆文件**）——首合并预演（新机器第一次拉之前想看清远端有什么）必须用这个模式，否则 workdir 不存在、报告只会写「远端未取到」
 - **Concurrency guard**: `runRefinement` + `runMemoryRefinement` share mutex (`refinementInFlight`), `markRun()` fires BEFORE the LLM call - both prevent child-session storms / duplicate writes when events overlap. Throttle is **in-memory only** (`lastRunAt`), so restarting the host resets it
 - **捕获游标（P0-1）**: per-session 增量游标锚在**消息 id** 上，存 `ctx.storage` 的 `cursor:<sessionID>`；决策全在 `planCapture()`（`context-shape.ts`，纯函数可单测：fresh / resumed / anchor-lost），host 侧只做 storage 读写与信号解析。`session.deleted` 时删游标。**别再拿 `extractLastTurn` 做捕获**（它留给 session-llm 取子会话回复），否则又退回"只扫最后一轮"
@@ -87,8 +89,8 @@ src/
     index.ts                   - Plugin 入口（只 default 导出）：event + context hook + tool.transform + dispose
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
-  cli/                         - doctor（阶段 4）+ sync-dry-run（阶段 4 第二半）
-tests/                         - 22 文件 / 321 测试（基线，低于即回归；含 tests/scripts-smoke.test.ts）
+  cli/                         - doctor + sync-dry-run + sync-op（阶段 4）
+tests/                         - 22 文件 / 322 测试（基线，低于即回归；含 tests/scripts-smoke.test.ts）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -126,7 +128,7 @@ tests/                         - 22 文件 / 321 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：22 文件 / 321 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：22 文件 / 322 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files

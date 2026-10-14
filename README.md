@@ -265,7 +265,9 @@ Syncs USER.md / MEMORY.md / `.mem/*.md` across machines via a GitHub repo (`gura
 (restart OpenCode after changing). Push fires after each memory write; pull runs at startup + every `intervalMinutes`.
 `pnpm sync:dry-run` previews what would sync (read-only, never pushes); add `-- --fetch` to align the cache
 workdir with the remote first — use that mode before the *first* pull on a new machine, otherwise the report
-can only say "remote not fetched". Pull is remote-wins: before overwriting a local file whose content differs,
+can only say "remote not fetched". `pnpm sync:op -- status|pull|push` runs a single manual sync through the
+same code path as the plugin; `--machine=<name>` forces `{enabled: true, machineName: <name>}` **without touching
+the config file** — that's how a machine does its first push/pull before sync is switched on. Pull is remote-wins: before overwriting a local file whose content differs,
 the local copy is saved as `<file>.bak.<ts>` (5 kept per file). A PII gate (8 rule types) blocks any push
 containing tokens/keys — hits are reported as file+line+rule only, never echoed. Deliberately not in v1:
 delete propagation, per-line merge (same file edited on both machines relies on git rebase, which aborts to
@@ -283,7 +285,7 @@ manual on conflict), pull-vs-write locking (the `.bak` copy is the safety net th
 
 ```bash
 pnpm install       # Install dependencies
-pnpm test          # Run tests (baseline: 22 files / 321 tests, all green — anything less is a regression)
+pnpm test          # Run tests (baseline: 22 files / 322 tests, all green — anything less is a regression)
 pnpm run typecheck # Type check
 ```
 
