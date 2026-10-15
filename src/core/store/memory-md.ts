@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readdirSync, unlinkSync } from "fs";
 import { join, basename } from "path";
 import { homedir } from "os";
-import type { MemoryProposal } from "../memory-types";
-import { trimBlankLines, trimTrailingBlankLines } from "./markdown-lines";
+import type { MemoryProposal } from "../memory-types.ts";
+import { trimBlankLines, trimTrailingBlankLines } from "./markdown-lines.ts";
 
 export interface MemoryIndexSection {
   slug: string;

@@ -10,7 +10,7 @@ import {
   InjectionSourceCache,
   getProtocolPath,
   readInjectionSources,
-} from "../src/core/injection-source";
+} from "../src/core/injection-source.ts";
 
 const HOME = "/tmp/opencode-memx-test-home-inject";
 
@@ -174,7 +174,7 @@ describe("readInjectionSources — 三块一起读", () => {
 
   it("readInjectionSources 的产物能直接喂给 buildInjectionParts（管道闭合）", async () => {
     writeFileSync(join(DIR, "memx-protocol.md"), "protocol body", "utf-8");
-    const { buildInjectionParts } = await import("../src/core/injection");
+    const { buildInjectionParts } = await import("../src/core/injection.ts");
     const built = buildInjectionParts(readInjectionSources(new InjectionSourceCache()));
     expect(built.parts).toEqual([{ type: "text", text: "protocol body" }]);
   });

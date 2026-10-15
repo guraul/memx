@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createSessionLLMClient, toModelRef } from "../src/hosts/opencode/session-llm";
+import { createSessionLLMClient, toModelRef } from "../src/hosts/opencode/session-llm.ts";
 
 /** v2 形状的 mock ctx：session.create/prompt/wait/remove/context（messages 经 context 取） */
 function createMockCtx(opts: {

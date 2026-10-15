@@ -13,7 +13,7 @@ import {
   DEFAULT_INJECT_LIMITS,
   INJECT_MAX_LINES,
   INJECT_MAX_BYTES,
-} from "../src/core/injection";
+} from "../src/core/injection.ts";
 
 const PROTOCOL = "# memx signal protocol\n\nemit signals";
 const USER = "# User Profile & Style\n\n- [2026-10-12] 先给结论";

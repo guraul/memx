@@ -4,7 +4,7 @@ import {
   formatBreadcrumb,
   formatAlertsPanel,
   type AlertStore,
-} from "../src/core/alerts";
+} from "../src/core/alerts.ts";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 
 vi.mock("node:os", async (importOriginal) => {
@@ -76,6 +76,55 @@ describe("createFileAlertStore", () => {
     store.clear();
     expect(store.list()).toHaveLength(0);
   });
+
+  it("resolve 只删指定 code，返回删掉条数，且持久化", () => {
+    const now = new Date().toISOString();
+    store.append({ level: "warn", code: "SYNC_ERROR", message: "a", ts: now });
+    store.append({ level: "warn", code: "SYNC_ERROR", message: "b", ts: now });
+    store.append({ level: "critical", code: "SYNC_PII_BLOCKED", message: "c", ts: now });
+    const removed = store.resolve("SYNC_ERROR");
+    expect(removed).toBe(2);
+    const list = store.list();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.code).toBe("SYNC_PII_BLOCKED");
+    // 持久化：新实例读到的也是删后状态
+    const reloaded = createFileAlertStore({ path: STORE_PATH });
+    expect(reloaded.list()).toHaveLength(1);
+  });
+
+  it("resolve 不存在的 code → 返回 0，账本不变", () => {
+    store.append({ level: "warn", code: "X", message: "a", ts: "2026-01-01T00:00:00Z" });
+    expect(store.resolve("NOPE")).toBe(0);
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it("maxAgeDays 剪掉老事件、保留新事件与不可解析 ts（有变化才持久化）", () => {
+    const now = Date.now();
+    const s = createFileAlertStore({ path: STORE_PATH, maxAgeDays: 7 });
+    s.append({ level: "warn", code: "OLD", message: "old", ts: new Date(now - 10 * 86400e3).toISOString() });
+    s.append({ level: "warn", code: "NEW", message: "new", ts: new Date(now - 1 * 86400e3).toISOString() });
+    s.append({ level: "warn", code: "BAD", message: "unparseable", ts: "not-a-date" });
+    // 剪龄发生在 load：新实例读盘即裁剪
+    const reloaded = createFileAlertStore({ path: STORE_PATH, maxAgeDays: 7 });
+    const codes = reloaded.list().map((e) => e.code);
+    expect(codes).not.toContain("OLD");
+    expect(codes).toContain("NEW");
+    expect(codes).toContain("BAD");
+  });
+
+  it("默认 maxAgeDays=7：8 天前的事件被剪，6 天前的保留", () => {
+    const now = Date.now();
+    const write = (code: string, daysAgo: number): void => {
+      const s = createFileAlertStore({ path: STORE_PATH });
+      s.append({ level: "info", code, message: code, ts: new Date(now - daysAgo * 86400e3).toISOString() });
+    };
+    write("D8", 8);
+    write("D6", 6);
+    const reloaded = createFileAlertStore({ path: STORE_PATH });
+    const codes = reloaded.list().map((e) => e.code);
+    expect(codes).not.toContain("D8");
+    expect(codes).toContain("D6");
+  });
 });
 
 describe("formatBreadcrumb", () => {
@@ -91,13 +140,13 @@ describe("formatBreadcrumb", () => {
     expect(formatBreadcrumb(store)).toBe("");
   });
 
-  it("有 warn/critical 时含计数与 memx doctor", () => {
+  it("有 warn/critical 时含计数与 pnpm run doctor", () => {
     store.append({ level: "warn", code: "W", message: "warn msg", ts: "2026-01-01T00:00:00Z" });
     store.append({ level: "critical", code: "C", message: "crit msg", ts: "2026-01-02T00:00:00Z" });
     const bc = formatBreadcrumb(store);
     expect(bc).toContain("1 warn");
     expect(bc).toContain("1 critical");
-    expect(bc).toContain("memx doctor");
+    expect(bc).toContain("pnpm run doctor");
     expect(bc.startsWith("<!-- memx:")).toBe(true);
   });
 });

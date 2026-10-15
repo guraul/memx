@@ -10,10 +10,10 @@
 // 事件形状照 v2 SDK 的 SessionContext（node_modules/@opencode/plugin/dist/promise/session.d.ts:29）：
 // system/options/tools 可变，agent 只读。注入只碰 system。
 import { describe, it, expect } from "vitest";
-import { applyContextHook } from "../src/hosts/opencode/context-hook";
-import type { ContextHookEvent, ContextHookDeps } from "../src/hosts/opencode/context-hook";
-import type { InjectionSources } from "../src/core/injection";
-import { DEFAULT_AGENT_GATE } from "../src/core/injection";
+import { applyContextHook } from "../src/hosts/opencode/context-hook.ts";
+import type { ContextHookEvent, ContextHookDeps } from "../src/hosts/opencode/context-hook.ts";
+import type { InjectionSources } from "../src/core/injection.ts";
+import { DEFAULT_AGENT_GATE } from "../src/core/injection.ts";
 
 const PROTOCOL = "# memx signal protocol\n\nemit <!-- STYLE_SIGNAL: ... -->";
 const USER = "# User Profile & Style\n\n- [2026-10-12] 先给结论";

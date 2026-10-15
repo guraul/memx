@@ -1,5 +1,5 @@
-import type { StyleSignal } from "../types";
-import { StyleSignalSchema } from "../types";
+import type { StyleSignal } from "../types.ts";
+import { StyleSignalSchema } from "../types.ts";
 
 const MAX_BUFFER_SIZE = 20;
 

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { parseMemoryIndex, serializeMemoryIndex, getMemoryDir } from "../store/memory-md";
+import { parseMemoryIndex, serializeMemoryIndex, getMemoryDir } from "../store/memory-md.ts";
 
 const MAX_AUTO_FIXES_PER_RUN = 3;
 const MEMORY_INDEX_MAX_LINES = 200;

@@ -3,8 +3,8 @@
 // 语义：session.create（model 创建时定）→ context hook 注册 system →
 //       session.prompt（提交回执）→ session.wait → session.context 取 assistant 全文 →
 //       finally session.remove + 移出活跃集合。
-import type { LLMClient } from "../../core/refine/refinement";
-import { toMessages } from "./context-shape";
+import type { LLMClient } from "../../core/refine/refinement.ts";
+import { toMessages } from "./context-shape.ts";
 
 export interface SessionLLMHooks {
   /** 子会话创建后回调（活跃集合登记：sessionID → system） */

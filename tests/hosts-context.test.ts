@@ -4,7 +4,7 @@
 // —— 返回的是消息数组本身，不是 {messages:[...]} 信封。
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdirSync, rmSync } from "fs";
-import { toMessages, extractLastTurn, extractTurns, findMessageIndex, planCapture } from "../src/hosts/opencode/context-shape";
+import { toMessages, extractLastTurn, extractTurns, findMessageIndex, planCapture } from "../src/hosts/opencode/context-shape.ts";
 
 // 测试隔离：把 homedir 指向临时目录，绝不触碰真实 ~/.opencode
 vi.mock("node:os", async (importOriginal) => {

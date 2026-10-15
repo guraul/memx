@@ -11,10 +11,10 @@ import {
   buildDryRunReport,
   syncLockPath,
   type GitRunner,
-} from "../src/core/sync";
-import { withFileLock } from "../src/core/store/lock";
-import { createFileAlertStore, type AlertStore } from "../src/core/alerts";
-import { MemxConfigSchema } from "../src/core/config";
+} from "../src/core/sync.ts";
+import { withFileLock } from "../src/core/store/lock.ts";
+import { createFileAlertStore, type AlertStore } from "../src/core/alerts.ts";
+import { MemxConfigSchema } from "../src/core/config.ts";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
@@ -47,8 +47,8 @@ const SYNC_CONFIG = { enabled: true, repo: "guraul/memx-sync", branch: "main", m
 /** 脚本化假 runner：记录全部命令，按 responder 返回响应 */
 class FakeRunner implements GitRunner {
   calls: string[][] = [];
-  constructor(private responder: (cmd: string[]) => { ok: boolean; stdout: string; stderr: string }) {}
-  exec(cmd: string[], _cwd: string): { ok: boolean; stdout: string; stderr: string } {
+  constructor(private responder: (cmd: string[]) => { ok: boolean; stdout: string; stderr: string; reason?: string }) {}
+  exec(cmd: string[], _cwd: string): { ok: boolean; stdout: string; stderr: string; reason?: string } {
     this.calls.push([...cmd]);
     return this.responder(cmd);
   }
@@ -559,6 +559,72 @@ describe("报警可见性与去重", () => {
     const pushFailed = alerts.list().filter((a) => a.code === "SYNC_PUSH_FAILED");
     expect(pushFailed).toHaveLength(1);
     expect(sync.status().consecutiveFailures).toBe(2);
+  });
+});
+
+describe("成功即销账与失败原因可见", () => {
+  it("push 成功后 SYNC_ERROR / SYNC_PUSH_FAILED 被销（先造出这两条旧账再成功推）", async () => {
+    writeMemoryFile("USER.md", "clean resolve\n");
+    const workdir = join(HOME, "workdir-resolve");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner(pushOkResponder);
+    const alerts = makeAlerts("resolve");
+    const now = new Date().toISOString();
+    alerts.append({ level: "warn", code: "SYNC_ERROR", message: "旧账", ts: now });
+    alerts.append({ level: "warn", code: "SYNC_PUSH_FAILED", message: "旧账2", ts: now });
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts,
+      runner,
+      workdir,
+      statePath: join(HOME, "state-resolve.json"),
+    });
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    const codes = alerts.list().map((a) => a.code);
+    expect(codes).not.toContain("SYNC_ERROR");
+    expect(codes).not.toContain("SYNC_PUSH_FAILED");
+  });
+
+  it("SYNC_PII_BLOCKED 不被自动销（需人工处置）", async () => {
+    writeMemoryFile("USER.md", "clean pii keep\n");
+    const workdir = join(HOME, "workdir-piikeep");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner(pushOkResponder);
+    const alerts = makeAlerts("piikeep");
+    alerts.append({ level: "critical", code: "SYNC_PII_BLOCKED", message: "待人工", ts: new Date().toISOString() });
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts,
+      runner,
+      workdir,
+      statePath: join(HOME, "state-piikeep.json"),
+    });
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(alerts.list().some((a) => a.code === "SYNC_PII_BLOCKED")).toBe(true);
+  });
+
+  it("假 runner 带 reason → 错误文案含该 reason、不含「未知」", async () => {
+    writeMemoryFile("USER.md", "clean reason\n");
+    const runner = new FakeRunner((cmd) =>
+      cmd.join(" ").includes("clone")
+        ? { ok: false, stdout: "", stderr: "", reason: "spawnSync git ETIMEDOUT" }
+        : { ok: true, stdout: "", stderr: "" },
+    );
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts: makeAlerts("reason"),
+      runner,
+      workdir: join(HOME, "workdir-reason"),
+      statePath: join(HOME, "state-reason.json"),
+    });
+    const result = await sync.push();
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("spawnSync git ETIMEDOUT");
+    expect(result.message).not.toContain("未知");
+    expect(sync.status().lastError).toContain("spawnSync git ETIMEDOUT");
+    expect(sync.status().lastError).not.toContain("未知");
   });
 });
 

@@ -1,8 +1,8 @@
 // Track 1 写盘去重（append 守卫 + 落盘自愈 dedupeUserMd）回归。
 // 全部走真实 applyProposals / dedupeUserMd —— 都是纯函数（不碰盘），故不 mock homedir。
 import { describe, it, expect } from "vitest";
-import { applyProposals, dedupeUserMd, parseUserMd } from "../src/core/store/user-md";
-import type { StyleProposal } from "../src/core/types";
+import { applyProposals, dedupeUserMd, parseUserMd } from "../src/core/store/user-md.ts";
+import type { StyleProposal } from "../src/core/types.ts";
 
 /** 造一份只含「工具与环境偏好」小节的 USER.md（条目行由调用方给出） */
 const doc = (...lines: string[]): string =>
@@ -24,14 +24,14 @@ describe("Track 1 写盘去重：append 守卫", () => {
     const p = append("日志用 pino");
     const { content, warnings } = applyProposals([p, p, p, p], doc());
     expect(activeLines(content).filter((l) => l.includes("日志用 pino"))).toHaveLength(1);
-    expect(warnings.join(" ")).toContain("重复");
+    expect(warnings.some((w) => w.includes("append 与既有条目重复"))).toBe(true);
   });
 
   it("2) 跨轮：文件已有该条，再 append 同文本 → 仍 1 条", () => {
     const first = applyProposals([append("日志用 pino")], doc()).content;
     const { content, warnings } = applyProposals([append("日志用 pino")], first);
     expect(activeLines(content).filter((l) => l.includes("日志用 pino"))).toHaveLength(1);
-    expect(warnings.join(" ")).toContain("重复");
+    expect(warnings.some((w) => w.includes("append 与既有条目重复"))).toBe(true);
   });
 
   it("3) 归一化重复：尾标点/空格差异 → 合并为 1 条", () => {

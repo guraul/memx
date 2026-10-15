@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { captureSignals, SignalBuffer } from "../src/core/signals/signal-capture";
-import type { StyleSignal } from "../src/core/types";
+import { captureSignals, SignalBuffer } from "../src/core/signals/signal-capture.ts";
+import type { StyleSignal } from "../src/core/types.ts";
 
 describe("captureSignals", () => {
   it("parses valid STYLE_SIGNAL comment from AI message", () => {

@@ -5,10 +5,10 @@
 //       子会话提炼的 context hook 全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
 // 红线：本文件只 export default 插件；所有 hook try-catch，错误绝不抛回宿主。
 import { Plugin } from "@opencode/plugin";
-import { SignalBuffer, captureSignals } from "../../core/signals/signal-capture";
-import { refine } from "../../core/refine/refinement";
-import type { LLMClient } from "../../core/refine/refinement";
-import { createSessionLLMClient } from "./session-llm";
+import { SignalBuffer, captureSignals } from "../../core/signals/signal-capture.ts";
+import { refine } from "../../core/refine/refinement.ts";
+import type { LLMClient } from "../../core/refine/refinement.ts";
+import { createSessionLLMClient } from "./session-llm.ts";
 import {
   readUserMd,
   writeUserMd,
@@ -17,31 +17,31 @@ import {
   parseUserMd,
   serializeUserMd,
   backupUserMd,
-} from "../../core/store/user-md";
-import { userMdLockPath, memoryIndexLockPath, withFileLock } from "../../core/store/lock";
-import { loadMemxConfig } from "../../core/config";
-import type { MemxConfig } from "../../core/config";
-import { shouldRun, markRun } from "../../core/llm/throttle";
-import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/memory-capture";
-import { refineMemory } from "../../core/refine/memory-refinement";
-import { readMemoryIndex, writeMemoryIndex, applyMemoryProposals, forgetMemory } from "../../core/store/memory-md";
-import { deriveSlug, MEMORY_TYPES } from "../../core/memory-types";
-import { writeProjectMemory, applyBreadcrumbLine } from "../../core/memory-write";
-import { createSync } from "../../core/sync";
-import type { SyncModule } from "../../core/sync";
-import { runHealthMaintenance, formatHealthLog } from "../../core/health/memory-health";
-import type { AutoFixLog } from "../../core/health/memory-health";
-import { INVALID_OUTPUT_STREAK_LIMIT } from "../../core/refine/refine-outcome";
-import { describeGate, DEFAULT_AGENT_GATE } from "../../core/injection";
-import type { AgentGate } from "../../core/injection";
-import { InjectionSourceCache, readInjectionSources } from "../../core/injection-source";
-import { applyContextHook } from "./context-hook";
-import type { ContextHookEvent } from "./context-hook";
+} from "../../core/store/user-md.ts";
+import { userMdLockPath, memoryIndexLockPath, withFileLock } from "../../core/store/lock.ts";
+import { loadMemxConfig } from "../../core/config.ts";
+import type { MemxConfig } from "../../core/config.ts";
+import { shouldRun, markRun } from "../../core/llm/throttle.ts";
+import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/memory-capture.ts";
+import { refineMemory } from "../../core/refine/memory-refinement.ts";
+import { readMemoryIndex, writeMemoryIndex, applyMemoryProposals, forgetMemory } from "../../core/store/memory-md.ts";
+import { deriveSlug, MEMORY_TYPES } from "../../core/memory-types.ts";
+import { writeProjectMemory, applyBreadcrumbLine } from "../../core/memory-write.ts";
+import { createSync } from "../../core/sync.ts";
+import type { SyncModule } from "../../core/sync.ts";
+import { runHealthMaintenance, formatHealthLog } from "../../core/health/memory-health.ts";
+import type { AutoFixLog } from "../../core/health/memory-health.ts";
+import { INVALID_OUTPUT_STREAK_LIMIT } from "../../core/refine/refine-outcome.ts";
+import { describeGate, DEFAULT_AGENT_GATE } from "../../core/injection.ts";
+import type { AgentGate } from "../../core/injection.ts";
+import { InjectionSourceCache, readInjectionSources } from "../../core/injection-source.ts";
+import { applyContextHook } from "./context-hook.ts";
+import type { ContextHookEvent } from "./context-hook.ts";
 
 /** v2 消息形状 / 归一 / 轮次提取 → 共享模块（index.ts 与 session-llm.ts 都依赖，
  *  不能互相 import，故放 context-shape.ts） */
-import { toMessages, planCapture } from "./context-shape";
-import { createFileAlertStore, formatBreadcrumb } from "../../core/alerts";
+import { toMessages, planCapture } from "./context-shape.ts";
+import { createFileAlertStore, formatBreadcrumb } from "../../core/alerts.ts";
 
 export default Plugin.define({
   id: "memx",

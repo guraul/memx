@@ -1,10 +1,10 @@
-import type { MemorySignal, MemoryProposal } from "../memory-types";
-import { MemoryProposalArraySchema } from "../memory-types";
-import { MEMORY_REFINEMENT_SYSTEM_PROMPT } from "./memory-prompts";
-import { readMemoryIndex } from "../store/memory-md";
-import type { LLMClient } from "./refinement";
-import type { RefineOutcome } from "./refine-outcome";
-import { formatIssues, snippet } from "./refine-outcome";
+import type { MemorySignal, MemoryProposal } from "../memory-types.ts";
+import { MemoryProposalArraySchema } from "../memory-types.ts";
+import { MEMORY_REFINEMENT_SYSTEM_PROMPT } from "./memory-prompts.ts";
+import { readMemoryIndex } from "../store/memory-md.ts";
+import type { LLMClient } from "./refinement.ts";
+import type { RefineOutcome } from "./refine-outcome.ts";
+import { formatIssues, snippet } from "./refine-outcome.ts";
 
 function buildUserMessage(signals: MemorySignal[], existingIndex: string): string {
   const signalLines = signals

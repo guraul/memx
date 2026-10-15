@@ -1,5 +1,5 @@
-import type { MemorySignal } from "../memory-types";
-import { MemorySignalSchema } from "../memory-types";
+import type { MemorySignal } from "../memory-types.ts";
+import { MemorySignalSchema } from "../memory-types.ts";
 
 const MAX_BUFFER_SIZE = 20;
 

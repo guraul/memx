@@ -16,8 +16,8 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { AlertStore } from "./alerts";
-import type { MemxSyncConfig } from "./config";
+import type { AlertStore } from "./alerts.ts";
+import type { MemxSyncConfig } from "./config.ts";
 // 显式 .ts：scripts/doctor.ts 走 `node --experimental-strip-types` 直接加载本模块，
 // 扩展名缺失会在运行时 ERR_MODULE_NOT_FOUND（tsc/vitest 都发现不了）。
 import { withFileLock } from "./store/lock.ts";
@@ -25,7 +25,7 @@ import { withFileLock } from "./store/lock.ts";
 // ---- GitRunner：编排逻辑与真实 git 解耦，测试注入脚本化假 runner ----
 
 export interface GitRunner {
-  exec(cmd: string[], cwd: string): { ok: boolean; stdout: string; stderr: string };
+  exec(cmd: string[], cwd: string): { ok: boolean; stdout: string; stderr: string; reason?: string };
 }
 
 export function createNodeGitRunner(): GitRunner {
@@ -33,7 +33,18 @@ export function createNodeGitRunner(): GitRunner {
     exec(cmd, cwd) {
       const [bin, ...args] = cmd;
       const r = spawnSync(bin!, args, { cwd, encoding: "utf8", timeout: 120_000 });
-      return { ok: r.status === 0, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+      // 失败原因不丢：ENOENT / 超时（r.error）、被信号杀（r.signal）、非零退出（r.status）拼成一句可读原因
+      const parts: string[] = [];
+      if (r.error) parts.push(r.error.message);
+      if (r.signal) parts.push(`signal ${r.signal}`);
+      if (r.status !== null && r.status !== 0) parts.push(`exit ${r.status}`);
+      const out: { ok: boolean; stdout: string; stderr: string; reason?: string } = {
+        ok: r.status === 0,
+        stdout: r.stdout ?? "",
+        stderr: r.stderr ?? "",
+      };
+      if (parts.length > 0) out.reason = parts.join("；");
+      return out;
     },
   };
 }
@@ -226,10 +237,10 @@ function prepareWorkdir(opts: { config: MemxSyncConfig; runner: GitRunner; workd
     );
     return clone.ok
       ? `已 clone ${config.repo} → ${workdir}（比对基准 = 远端 HEAD）`
-      : `clone 失败：${clone.stderr.trim() || "未知"}`;
+      : `clone 失败：${clone.stderr.trim() || clone.reason || "无输出"}`;
   }
   const fetch = runner.exec(["git", "fetch", "origin", config.branch], workdir);
-  if (!fetch.ok) return `fetch 失败：${fetch.stderr.trim() || "未知"}`;
+  if (!fetch.ok) return `fetch 失败：${fetch.stderr.trim() || fetch.reason || "无输出"}`;
   const ff = runner.exec(["git", "merge", "--ff-only", `origin/${config.branch}`], workdir);
   return ff.ok
     ? `已 fetch + 快进到 origin/${config.branch}（比对基准 = 远端 HEAD）`
@@ -401,7 +412,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     if (existsSync(join(workdir, ".git"))) return { ok: true };
     mkdirSync(dirname(workdir), { recursive: true });
     const r = runner.exec(["git", "clone", remoteUrl(config.repo), workdir], dirname(workdir));
-    if (!r.ok) return { ok: false, error: r.stderr.trim() || "clone 失败" };
+    if (!r.ok) return { ok: false, error: r.stderr.trim() || r.reason || "无输出" };
     return { ok: true };
   }
 
@@ -462,7 +473,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   /** 锁内部分：镜像 → commit → push（含一次 rebase 重试）。 */
   function pushLocked(files: SyncFileEntry[]): SyncResult {
     const ensured = ensureRepo();
-    if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "未知"}`);
+    if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "无输出"}`);
 
     for (const f of files) {
       const dest = join(workdir, f.repoPath);
@@ -472,6 +483,9 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
 
     const status = runner.exec(["git", "status", "--porcelain"], workdir);
     if (status.ok && status.stdout.trim() === "") {
+      // 通道正常但无改动，同样算恢复：销瞬时故障账（SYNC_PII_BLOCKED / SYNC_CONFLICT 需人工，不在此销）
+      opts.alerts.resolve("SYNC_ERROR");
+      opts.alerts.resolve("SYNC_PUSH_FAILED");
       save();
       return { ok: true, kind: "no-change", message: "无改动" };
     }
@@ -480,7 +494,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     const num = runner.exec(["git", "diff", "--cached", "--numstat"], workdir);
     const message = `memx@${config.machineName}: ${summarizeNumstat(num.stdout)}`;
     const commit = runner.exec(commitCommand(message), workdir);
-    if (!commit.ok) return failFast(`commit 失败：${commit.stderr.trim() || "未知"}`);
+    if (!commit.ok) return failFast(`commit 失败：${commit.stderr.trim() || commit.reason || "无输出"}`);
 
     let pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
     if (!pushRes.ok) {
@@ -497,7 +511,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       }
       pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
       if (!pushRes.ok) {
-        lastError = `push 重试仍失败：${pushRes.stderr.trim() || "未知"}`;
+        lastError = `push 重试仍失败：${pushRes.stderr.trim() || pushRes.reason || "无输出"}`;
         alert("warn", "SYNC_PUSH_FAILED", lastError);
         consecutiveFailures++;
         save();
@@ -505,6 +519,10 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       }
     }
 
+    // 成功即销账：SYNC_ERROR / SYNC_PUSH_FAILED 是瞬时故障账，恢复即清。
+    // SYNC_PII_BLOCKED / SYNC_CONFLICT 不自动销——需人工处置（改文件 / 解冲突），见下。
+    opts.alerts.resolve("SYNC_ERROR");
+    opts.alerts.resolve("SYNC_PUSH_FAILED");
     lastPushAt = new Date().toISOString();
     lastError = "";
     consecutiveFailures = 0;
@@ -524,10 +542,10 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   /** 锁内部分：fetch + rebase → 镜像回本地（覆盖前备份）。 */
   function pullLocked(): SyncResult {
     const ensured = ensureRepo();
-    if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "未知"}`);
+    if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "无输出"}`);
 
     const fetched = runner.exec(["git", "fetch", "origin", config.branch], workdir);
-    if (!fetched.ok) return failFast(`fetch 失败：${fetched.stderr.trim() || "未知"}`);
+    if (!fetched.ok) return failFast(`fetch 失败：${fetched.stderr.trim() || fetched.reason || "无输出"}`);
 
     const rebase = runner.exec(["git", "rebase", `origin/${config.branch}`], workdir);
     if (!rebase.ok) {
@@ -561,6 +579,9 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       copied++;
     }
 
+    // 成功即销账（同 pushLocked）：瞬时故障恢复即清；SYNC_PII_BLOCKED / SYNC_CONFLICT 需人工处置，不在此销
+    opts.alerts.resolve("SYNC_ERROR");
+    opts.alerts.resolve("SYNC_PUSH_FAILED");
     lastPullAt = new Date().toISOString();
     lastError = "";
     consecutiveFailures = 0;

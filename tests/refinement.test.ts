@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { refine } from "../src/core/refine/refinement";
-import type { LLMClient } from "../src/core/refine/refinement";
-import type { StyleSignal } from "../src/core/types";
-import { proposalsOf } from "../src/core/refine/refine-outcome";
+import { refine } from "../src/core/refine/refinement.ts";
+import type { LLMClient } from "../src/core/refine/refinement.ts";
+import type { StyleSignal } from "../src/core/types.ts";
+import { proposalsOf } from "../src/core/refine/refine-outcome.ts";
 
 function createMockLLM(response: string): LLMClient {
   return {

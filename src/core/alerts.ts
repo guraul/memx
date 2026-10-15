@@ -22,6 +22,8 @@ export interface AlertStore {
   list(): AlertEvent[];
   counts(): Record<AlertLevel, number>;
   clear(): void;
+  /** 删掉该 code 的全部事件并持久化，返回删掉的条数（瞬时故障恢复后销账用） */
+  resolve(code: string): number;
 }
 
 const DEFAULT_MAX = 200;
@@ -30,9 +32,10 @@ function defaultPath(): string {
   return join(homedir(), ".opencode", "memx-alerts.json");
 }
 
-export function createFileAlertStore(opts?: { path?: string; max?: number }): AlertStore {
+export function createFileAlertStore(opts?: { path?: string; max?: number; maxAgeDays?: number }): AlertStore {
   const filePath = opts?.path ?? defaultPath();
   const max = opts?.max ?? DEFAULT_MAX;
+  const maxAgeDays = opts?.maxAgeDays ?? 7;
   let events: AlertEvent[] = [];
 
   const load = (): void => {
@@ -50,6 +53,17 @@ export function createFileAlertStore(opts?: { path?: string; max?: number }): Al
             typeof (e as AlertEvent).message === "string" &&
             typeof (e as AlertEvent).ts === "string",
         );
+        // 剪龄：ts 可解析且早于 now - maxAgeDays 的丢弃（有变化才写盘）；
+        // ts 不可解析的事件保留（防御性：宁可多留，不可误删）
+        const cutoff = Date.now() - maxAgeDays * 86400e3;
+        const pruned = events.filter((e) => {
+          const t = Date.parse(e.ts);
+          return Number.isNaN(t) || t >= cutoff;
+        });
+        if (pruned.length !== events.length) {
+          events = pruned;
+          persist();
+        }
       }
     } catch {
       events = [];
@@ -85,6 +99,13 @@ export function createFileAlertStore(opts?: { path?: string; max?: number }): Al
       events = [];
       persist();
     },
+    resolve(code: string): number {
+      const before = events.length;
+      events = events.filter((e) => e.code !== code);
+      const removed = before - events.length;
+      if (removed > 0) persist();
+      return removed;
+    },
   };
 }
 
@@ -96,7 +117,7 @@ export function formatBreadcrumb(store: AlertStore): string {
   const parts: string[] = [];
   if (counts.warn > 0) parts.push(`${counts.warn} warn`);
   if (counts.critical > 0) parts.push(`${counts.critical} critical`);
-  return "<!-- memx: ⚠️ " + parts.join(" / ") + " — run `memx doctor` -->";
+  return "<!-- memx: ⚠️ " + parts.join(" / ") + " — run `pnpm run doctor` -->";
 }
 
 /** memx doctor 的面板文本（alerts 段落；纯函数，好测）。 */

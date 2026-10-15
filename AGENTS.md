@@ -90,7 +90,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor + sync-dry-run + sync-op（阶段 4）
-tests/                         - 23 文件 / 330 测试（基线，低于即回归；含 tests/scripts-smoke.test.ts）
+tests/                         - 24 文件 / 338 测试（基线，低于即回归；含 tests/scripts-smoke.test.ts）
   fixtures/                    - mock conversations + sample USER.md
 ```
 

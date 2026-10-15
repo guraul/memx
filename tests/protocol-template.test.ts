@@ -10,11 +10,11 @@ import {
   PROTOCOL_VERSION,
   PROTOCOL_FILE_NAME,
   PROTOCOL_INSTRUCTION,
-} from "../src/core/protocol-template";
-import { StyleSignalSchema, CATEGORIES, CONFIDENCES, SOURCES } from "../src/core/types";
-import { MemorySignalSchema, MEMORY_TYPES, MEMORY_SOURCES } from "../src/core/memory-types";
-import { captureSignals } from "../src/core/signals/signal-capture";
-import { captureMemorySignals } from "../src/core/signals/memory-capture";
+} from "../src/core/protocol-template.ts";
+import { StyleSignalSchema, CATEGORIES, CONFIDENCES, SOURCES } from "../src/core/types.ts";
+import { MemorySignalSchema, MEMORY_TYPES, MEMORY_SOURCES } from "../src/core/memory-types.ts";
+import { captureSignals } from "../src/core/signals/signal-capture.ts";
+import { captureMemorySignals } from "../src/core/signals/memory-capture.ts";
 
 /** 抽出模板里所有某一类信号注释的 JSON 原文。 */
 function extractJson(text: string, kind: "STYLE_SIGNAL" | "MEMORY_SIGNAL"): string[] {

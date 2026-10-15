@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { loadMemxConfig, getConfigPath } from "../src/core/config";
+import { loadMemxConfig, getConfigPath } from "../src/core/config.ts";
 import { writeFileSync, mkdirSync, existsSync, rmSync } from "fs";
 import { join } from "path";
 

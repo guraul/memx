@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { shouldRun, markRun, resetThrottle } from "../src/core/llm/throttle";
+import { shouldRun, markRun, resetThrottle } from "../src/core/llm/throttle.ts";
 
 describe("throttle", () => {
   beforeEach(() => {

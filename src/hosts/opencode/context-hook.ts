@@ -12,10 +12,10 @@
 //      宿主内容一起抹掉。
 //
 // hook 回调本身是同步的：文件读走 stat 校验缓存，配置走 TTL 快照，都不在这里 await。
-import type { AgentGate } from "../../core/injection";
-import { shouldInjectAgent } from "../../core/injection";
-import type { InjectionSources, SourceFact } from "../../core/injection";
-import { buildInjectionParts } from "../../core/injection";
+import type { AgentGate } from "../../core/injection.ts";
+import { shouldInjectAgent } from "../../core/injection.ts";
+import type { InjectionSources, SourceFact } from "../../core/injection.ts";
+import { buildInjectionParts } from "../../core/injection.ts";
 
 /** 宿主 `SessionContext` 里我们实际用到、且真的可变的部分（其余字段只读，无需建模）。 */
 export interface ContextHookEvent {

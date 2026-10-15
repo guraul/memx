@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync, existsSync, writeFileSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { withFileLock, FileLockTimeoutError } from "../src/core/store/lock";
+import { withFileLock, FileLockTimeoutError } from "../src/core/store/lock.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "memx-lock-test-"));
 const lockPath = join(dir, "test.lock");

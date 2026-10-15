@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { mkdirSync, rmSync } from "fs";
-import { runHealthCheck, autoFix, formatHealthLog, rebuildIndex, runHealthMaintenance } from "../src/core/health/memory-health";
-import { applyMemoryProposal } from "../src/core/store/memory-md";
-import type { MemoryProposal } from "../src/core/memory-types";
+import { runHealthCheck, autoFix, formatHealthLog, rebuildIndex, runHealthMaintenance } from "../src/core/health/memory-health.ts";
+import { applyMemoryProposal } from "../src/core/store/memory-md.ts";
+import type { MemoryProposal } from "../src/core/memory-types.ts";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();

@@ -12,10 +12,10 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { PROTOCOL_FILE_NAME } from "./protocol-template";
-import { getUserMdPath } from "./store/user-md";
-import { getMemoryIndexPath } from "./store/memory-md";
-import type { InjectionSources } from "./injection";
+import { PROTOCOL_FILE_NAME } from "./protocol-template.ts";
+import { getUserMdPath } from "./store/user-md.ts";
+import { getMemoryIndexPath } from "./store/memory-md.ts";
+import type { InjectionSources } from "./injection.ts";
 
 interface CacheEntry {
   mtimeMs: number;

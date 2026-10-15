@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "doctor": "node --experimental-strip-types scripts/doctor.ts",
     "sync:dry-run": "node --experimental-strip-types scripts/sync-dry-run.ts",
-    "sync:op": "node --experimental-strip-types scripts/sync-op.ts"
+    "sync:op": "node --experimental-strip-types scripts/sync-op.ts",
+    "alerts:clear": "node --experimental-strip-types scripts/alerts.ts"
   },
   "keywords": [
     "opencode",

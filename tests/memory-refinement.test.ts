@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { refineMemory } from "../src/core/refine/memory-refinement";
-import type { LLMClient } from "../src/core/refine/refinement";
-import type { MemorySignal } from "../src/core/memory-types";
-import { proposalsOf } from "../src/core/refine/refine-outcome";
+import { refineMemory } from "../src/core/refine/memory-refinement.ts";
+import type { LLMClient } from "../src/core/refine/refinement.ts";
+import type { MemorySignal } from "../src/core/memory-types.ts";
+import { proposalsOf } from "../src/core/refine/refine-outcome.ts";
 
 function createMockLLM(response: string): LLMClient {
   return { chat: async () => response };

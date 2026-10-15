@@ -9,8 +9,8 @@ import {
   writeMemoryFile,
   readMemoryFile,
   applyMemoryProposal,
-} from "../src/core/store/memory-md";
-import type { MemoryProposal } from "../src/core/memory-types";
+} from "../src/core/store/memory-md.ts";
+import type { MemoryProposal } from "../src/core/memory-types.ts";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();

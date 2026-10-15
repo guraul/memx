@@ -5,8 +5,8 @@ import {
   writeProjectMemory,
   deriveMemoryFilename,
   slugifyMemoryName,
-} from "../src/core/memory-write";
-import { readMemoryIndex, readMemoryFile, getMemoryFilePath } from "../src/core/store/memory-md";
+} from "../src/core/memory-write.ts";
+import { readMemoryIndex, readMemoryFile, getMemoryFilePath } from "../src/core/store/memory-md.ts";
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();

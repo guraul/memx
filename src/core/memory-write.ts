@@ -5,15 +5,15 @@
 // 与后台提炼（`applyMemoryProposals`）共用同一套写盘路径，因此不存在"两条写路各写各的格式"。
 import { createHash } from "crypto";
 import { existsSync } from "fs";
-import type { MemoryProposal, MemoryType } from "./memory-types";
-import { MEMORY_TYPES } from "./memory-types";
+import type { MemoryProposal, MemoryType } from "./memory-types.ts";
+import { MEMORY_TYPES } from "./memory-types.ts";
 import {
   applyMemoryProposals,
   getMemoryFilePath,
   readMemoryIndex,
   writeMemoryIndex,
-} from "./store/memory-md";
-import { memoryIndexLockPath, withFileLock } from "./store/lock";
+} from "./store/memory-md.ts";
+import { memoryIndexLockPath, withFileLock } from "./store/lock.ts";
 
 /** 与 MemoryProposalSchema.content 的上限一致（超过就只能拆成两条，不能悄悄截断） */
 export const MAX_MEMORY_TEXT = 500;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveSlug, MemorySignalSchema, MemoryProposalSchema, MemoryProposalArraySchema } from "../src/core/memory-types";
+import { deriveSlug, MemorySignalSchema, MemoryProposalSchema, MemoryProposalArraySchema } from "../src/core/memory-types.ts";
 
 describe("deriveSlug", () => {
   it("converts /root/project/foo to root-project-foo", () => {

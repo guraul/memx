@@ -1,8 +1,8 @@
 // P0-3（handoff-20261011 §4 阶段 3-3）：单遍应用 + 内容锚点寻址的回归测试。
 // 这里不 mock homedir：applyProposals / parseUserMd / serializeUserMd 都是纯函数（不碰盘）。
 import { describe, it, expect } from "vitest";
-import { applyProposals } from "../src/core/store/user-md";
-import type { StyleProposal } from "../src/core/types";
+import { applyProposals } from "../src/core/store/user-md.ts";
+import type { StyleProposal } from "../src/core/types.ts";
 
 /** 受管小节里第 5/6 行是目标条目；第 1-3 行是一个**空小节**（序列化时会被丢掉，
  *  正是批内行号漂移的来源）。 */

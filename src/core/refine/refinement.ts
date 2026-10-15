@@ -1,9 +1,9 @@
-import type { StyleSignal, StyleProposal } from "../types";
-import { StyleProposalArraySchema } from "../types";
-import { REFINEMENT_SYSTEM_PROMPT } from "./prompts";
-import { readUserMd } from "../store/user-md";
-import type { RefineOutcome } from "./refine-outcome";
-import { formatIssues, snippet } from "./refine-outcome";
+import type { StyleSignal, StyleProposal } from "../types.ts";
+import { StyleProposalArraySchema } from "../types.ts";
+import { REFINEMENT_SYSTEM_PROMPT } from "./prompts.ts";
+import { readUserMd } from "../store/user-md.ts";
+import type { RefineOutcome } from "./refine-outcome.ts";
+import { formatIssues, snippet } from "./refine-outcome.ts";
 
 export interface LLMClient {
   chat(params: {
