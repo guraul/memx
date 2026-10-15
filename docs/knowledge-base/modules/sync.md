@@ -95,7 +95,7 @@
 
 1. **GitRunner 可注入**：编排逻辑与真实 git 解耦——默认 `createNodeGitRunner()`（`spawnSync`，超时 120s，失败原因把 ENOENT/信号/退出码拼成可读串）；测试注入脚本化假 runner，另有一条**真实 git 端到端**（本地 bare 仓当远端，覆盖 clone/commit/push/fetch/rebase/copy 全序列）。
 2. **串行闸门用文件锁而非内存互斥**：插件每进程一实例，同一实例里两次快速写盘也会并发 `void sync.push()`——进程内与跨进程都得挡。
-3. **身份兜底**：commit 前探 `git config user.email`，没有就用 `-c user.name=memx-sync -c user.email=memx@localhost` 现造（prod 没配过 git 身份）；有真身份不覆盖。
+3. **身份兜底**：commit 前探 `git config user.email`，没有就用 `-c user.name=memx-sync -c user.email=memx@localhost` 现造（prod 没配过 git 身份）；有真身份不覆盖。**rebase（pull 路径 + push 被拒后的重试路径）无条件带同一身份**——否则无身份环境下重放提交缺 committer 会直接失败，被误判成内容冲突（`SYNC_CONFLICT` 误报，见 issue #7）。
 4. **报警去重**：同 code+message 与上一条完全相同的记录跳过（离线机器定时拉每 30 分钟失败一次，不去重会刷满 200 条账本）。
 5. **远端地址**（`remoteUrl`）：`owner/name` → `git@github.com:<owner>/<name>.git`；写成完整 URL / 绝对路径（`git@…` / `ssh://` / `https://` / `file:` / `/path`）则原样使用——后者供本机自测。
 

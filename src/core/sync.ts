@@ -49,6 +49,12 @@ export function createNodeGitRunner(): GitRunner {
   };
 }
 
+/** 会创建 commit 的 git 命令共用的兜底身份：prod 上 workdir 是新 clone，从没配过 git 身份，
+ *  commit / rebase 都要写 author/committer，缺身份会直接失败。commit 走 commitCommand
+ *  （workdir 已有真身份时不覆盖）；rebase 重放本地提交必然要写 committer，一律显式带上——
+ *  否则没有身份的环境下 rebase 会以 "Committer identity unknown" 失败，被误判成内容冲突（SYNC_CONFLICT 误报）。 */
+const SYNC_IDENTITY_ARGS = ["-c", "user.name=memx-sync", "-c", "user.email=memx@localhost"] as const;
+
 // ---- PII 闸门：命中只报行号 + 规则名，绝不回显内容 ----
 
 export interface PiiHit {
@@ -453,7 +459,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     const hasIdentity = probe.ok && probe.stdout.trim() !== "";
     return hasIdentity
       ? ["git", "commit", "-m", message]
-      : ["git", "-c", "user.name=memx-sync", "-c", "user.email=memx@localhost", "commit", "-m", message];
+      : ["git", ...SYNC_IDENTITY_ARGS, "commit", "-m", message];
   }
 
   /** workdir 内取 `origin/<branch>` 的 sha（完整 pull 成功后记录，供下次前置短路比对）。
@@ -522,7 +528,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     if (!pushRes.ok) {
       // 非快进（或任何 push 失败）→ fetch + rebase + 重试一次；不进入重试风暴
       runner.exec(["git", "fetch", "origin", config.branch], workdir);
-      const rebase = runner.exec(["git", "rebase", `origin/${config.branch}`], workdir);
+      const rebase = runner.exec(["git", ...SYNC_IDENTITY_ARGS, "rebase", `origin/${config.branch}`], workdir);
       if (!rebase.ok) {
         runner.exec(["git", "rebase", "--abort"], workdir);
         lastError = "push 被拒且 rebase 冲突，已回滚，需人工处理";
@@ -584,7 +590,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     const fetched = runner.exec(["git", "fetch", "origin", config.branch], workdir);
     if (!fetched.ok) return failFast(`fetch 失败：${fetched.stderr.trim() || fetched.reason || "无输出"}`);
 
-    const rebase = runner.exec(["git", "rebase", `origin/${config.branch}`], workdir);
+    const rebase = runner.exec(["git", ...SYNC_IDENTITY_ARGS, "rebase", `origin/${config.branch}`], workdir);
     if (!rebase.ok) {
       // 冲突不强行解：abort 回滚 + critical 报警，留人工
       runner.exec(["git", "rebase", "--abort"], workdir);
