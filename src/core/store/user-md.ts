@@ -184,8 +184,11 @@ export interface ApplyResult {
 }
 
 /** 内容锚点归一：去掉所有空白与常见 markdown 装饰再小写比较。
- *  LLM 抄写时多一个空格/星号不该丢掉锚，故 fuzzy 面比精确面宽。 */
-function normalizeAnchor(text: string): string {
+ *  LLM 抄写时多一个空格/星号不该丢掉锚，故 fuzzy 面比精确面宽。
+ *
+ *  ⚠️ 不变量：append 去重与 dedupeUserMd 必须复用本函数。若另写一套归一，
+ *  "锚点认为相同"与"去重认为相同"就会分叉（改错条目 / 删错行）。 */
+export function normalizeAnchor(text: string): string {
   return text
     .toLowerCase()
     .replace(/[`*_~]/g, "")
@@ -273,6 +276,16 @@ function applyOneProposal(doc: UserMdDoc, proposal: StyleProposal, today: string
 
   switch (proposal.action) {
     case "append": {
+      // 去重与锚点归一复用同一套 normalizeAnchor（见其不变量注释）。
+      // 查整个 doc 而非只查目标小节：同一批在内存 doc 上顺序应用，故同批重复也会被这里挡住。
+      const anchor = normalizeAnchor(proposal.content);
+      const duplicated = doc.sections.some((s) =>
+        s.lines.some((e) => !e.deprecated && normalizeAnchor(e.text) === anchor),
+      );
+      if (anchor && duplicated) {
+        warnings.push(`append 与既有条目重复 → 跳过: "${proposal.content.slice(0, 40)}"`);
+        return;
+      }
       targetSection.lines.push(newEntry);
       return;
     }
@@ -305,6 +318,63 @@ function applyOneProposal(doc: UserMdDoc, proposal: StyleProposal, today: string
 }
 
 /**
+ * USER.md 写盘自愈（纯函数，可单测）：清掉两类历史重复。
+ *  - deprecated 行与同小节有效条目同文 → 删（"重新记一次"留下的划掉旧行）
+ *  - 同小节有效条目归一后同文 → 只留位置最早的那条，date 取该组最大值并同步重写 raw
+ *
+ * ⚠️ 两遍扫描：先扫完一个章节再判。边扫边判会在"划掉的行排在有效行之前"时漏删
+ * （判到它时 active 集合还没建好）。
+ */
+export function dedupeUserMd(doc: UserMdDoc): { droppedDeprecated: number; mergedDuplicates: number } {
+  let droppedDeprecated = 0;
+  let mergedDuplicates = 0;
+
+  for (const section of doc.sections) {
+    const activeKeys = new Set<string>();
+    for (const entry of section.lines) {
+      if (!entry.deprecated) activeKeys.add(normalizeAnchor(entry.text));
+    }
+    section.lines = section.lines.filter((entry) => {
+      if (entry.deprecated && activeKeys.has(normalizeAnchor(entry.text))) {
+        droppedDeprecated++;
+        return false;
+      }
+      return true;
+    });
+  }
+
+  for (const section of doc.sections) {
+    // 组内最新日期：ISO 字符串直接比大小，不依赖文件顺序
+    const latestDate = new Map<string, string>();
+    for (const entry of section.lines) {
+      if (entry.deprecated) continue;
+      const key = normalizeAnchor(entry.text);
+      const prev = latestDate.get(key);
+      if (prev === undefined || entry.date > prev) latestDate.set(key, entry.date);
+    }
+
+    const seen = new Set<string>();
+    section.lines = section.lines.filter((entry) => {
+      if (entry.deprecated) return true;
+      const key = normalizeAnchor(entry.text);
+      if (seen.has(key)) {
+        mergedDuplicates++;
+        return false;
+      }
+      seen.add(key);
+      const date = latestDate.get(key);
+      if (date !== undefined && date !== entry.date) {
+        entry.date = date;
+        entry.raw = `- [${date}] ${entry.text}`;
+      }
+      return true;
+    });
+  }
+
+  return { droppedDeprecated, mergedDuplicates };
+}
+
+/**
  * P0-3(e) 单遍应用：parse 一次 → 内存中把整批 proposal 应用完 → serialize 一次。
  *
  * 旧实现每个 proposal 都独立 parse→修改→serialize 全文件，同批前面的 proposal 一旦改变了
@@ -318,6 +388,10 @@ export function applyProposals(proposals: StyleProposal[], content: string): App
   for (const proposal of proposals) {
     applyOneProposal(doc, proposal, today, warnings);
   }
+  // 落盘前自愈历史重复（deprecate 分支不改：同一次写盘里由这里收口）
+  const { droppedDeprecated, mergedDuplicates } = dedupeUserMd(doc);
+  if (mergedDuplicates > 0) warnings.push(`自愈：合并 ${mergedDuplicates} 条重复条目`);
+  if (droppedDeprecated > 0) warnings.push(`自愈：删除 ${droppedDeprecated} 条与有效条目同文的 deprecated 行`);
   return { content: serializeUserMd(doc), warnings };
 }
 

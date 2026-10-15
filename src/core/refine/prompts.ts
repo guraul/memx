@@ -39,6 +39,8 @@ Compare against the existing USER.md content provided:
 - If a new signal semantically duplicates an existing entry, set action to "update" with the existing entry's **target_text**, not "append"
 - If a new signal contradicts and supersedes an existing entry (e.g., user moved from Vue to Svelte), set action to "deprecate" on the old entry, and "append" the new one
 - If a new signal merely restates an existing entry with no added information, drop it (return nothing for that signal)
+- Never emit the same entry twice in one batch: if several signals point to the same preference, emit ONE proposal
+- Before using "append", check both the existing USER.md and the proposals you have already emitted in this batch for an entry with the same meaning; if one exists, use "update" on it instead
 
 ## How to point at an existing entry (target_text, target_line)
 

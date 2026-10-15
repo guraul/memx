@@ -47,7 +47,7 @@ Always run `typecheck` before committing - TypeScript strict mode catches easy-t
 - **Concurrency guard**: `runRefinement` + `runMemoryRefinement` share mutex (`refinementInFlight`), `markRun()` fires BEFORE the LLM call - both prevent child-session storms / duplicate writes when events overlap. Throttle is **in-memory only** (`lastRunAt`), so restarting the host resets it
 - **捕获游标（P0-1）**: per-session 增量游标锚在**消息 id** 上，存 `ctx.storage` 的 `cursor:<sessionID>`；决策全在 `planCapture()`（`context-shape.ts`，纯函数可单测：fresh / resumed / anchor-lost），host 侧只做 storage 读写与信号解析。`session.deleted` 时删游标。**别再拿 `extractLastTurn` 做捕获**（它留给 session-llm 取子会话回复），否则又退回"只扫最后一轮"
 - **提炼三态（P0-2）**: `refine()` / `refineMemory()` 返回 `RefineOutcome`（`refine/refine-outcome.ts`）：`proposals` 落盘；`adjudicated-empty` **清缓冲结案**（合法空数组 ≠ 坏输出，否则同批信号每轮重烧 LLM）；`invalid-output` 保留缓冲 + `diag.invalidStreak` 计数，连续 3 次才丢弃并记 alert
-- **写盘（P0-3 / P0-4）**: 整批提案走 `applyProposals` / `applyMemoryProposals` **单遍应用**（parse 一次 → 内存改完 → serialize 一次）；read-modify-write 包 `withFileLock(userMdLockPath()|memoryIndexLockPath(), …)`，**锁内重读文件**再应用（消掉快照读→写盘窗口里的丢更新）。update/deprecate 定位顺序：`target_text` 精确 → 归一（去空白/markdown 装饰）→ 唯一包含 → `target_line` 兜底；降级与未命中都写 `diag.lastWarnings`，绝不静默改错条目
+- **写盘（P0-3 / P0-4）**: 整批提案走 `applyProposals` / `applyMemoryProposals` **单遍应用**（parse 一次 → 内存改完 → serialize 一次）；read-modify-write 包 `withFileLock(userMdLockPath()|memoryIndexLockPath(), …)`，**锁内重读文件**再应用（消掉快照读→写盘窗口里的丢更新）。update/deprecate 定位顺序：`target_text` 精确 → 归一（去空白/markdown 装饰）→ 唯一包含 → `target_line` 兜底；降级与未命中都写 `diag.lastWarnings`，绝不静默改错条目。**Track 1 去重**：`append` 前用 `normalizeAnchor` 查**全 doc** 有无同文 active（去重与锚点共用同一套归一，同批顺序应用 → 批内重复自动被挡）；落盘前 `dedupeUserMd` **两遍扫描**自愈——删掉与同小节有效条目同文的 deprecated 行、合并归一后同文的 active（留位置最早那条，`date` 取组内最新并重写 `raw`），命中写 `diag.lastWarnings`（`自愈：…`）。`deprecate` 分支不改，自愈在同一次写盘里收口
 - **健康日志（P0-5）**: `runHealthMaintenance()` 返回 `{index, logs, report}`，logs 只进 `diag.health` / alerts；**不再把 `formatHealthLog()` 追加进 MEMORY.md**（那些 HTML 注释会被下一次序列化吃掉，是历史 bug）
 - **显式写入（出口①，issue #82 §B）**: `memory_write` 工具 → `core/memory-write.ts` 的 `writeProjectMemory(slug, input)` → 与后台提炼**同一条写路**（`applyMemoryProposals` 单遍 + `withFileLock` 锁内重读索引）。写盘逻辑放 core 的理由 = 多宿主（opencode 今天、DSH 未来）只有一份格式/锁实现，宿主壳只做参数映射与回执文案。同名同类型 = 修订（update）；纯中文名走确定性哈希文件名（否则每次写都新建文件，更新语义失效）。**工具声明 `options: { codemode: false }`**——2026-10-12 真机实测：默认 codemode 会把调用包成 `execute` 工具（参数在 `state.input.code`、结果在 `state.content`），App 按工具名渲染的回执 chip 认不出来；直调后 `part.tool` 就是 `memory_write`
 - **v2 工具结果形状（2026-10-12 真机实测）**: 工具结果在 **`state.content: [{type:"text",text}]`**，**不是 `state.output`**（`state` 字段实测只有 `status/input/content/metadata`）。App/宿主侧消费工具输出时别再只读 `output`
@@ -90,7 +90,7 @@ src/
     session-llm.ts             - LLMClient 适配：子会话 create→prompt→wait→context→remove
     context-shape.ts           - V2 消息形状：toMessages / extractLastTurn（上面两个文件共享）
   cli/                         - doctor + sync-dry-run + sync-op（阶段 4）
-tests/                         - 22 文件 / 322 测试（基线，低于即回归；含 tests/scripts-smoke.test.ts）
+tests/                         - 23 文件 / 330 测试（基线，低于即回归；含 tests/scripts-smoke.test.ts）
   fixtures/                    - mock conversations + sample USER.md
 ```
 
@@ -128,7 +128,7 @@ tests/                         - 22 文件 / 322 测试（基线，低于即回�
 
 ## Test patterns
 
-- **基线：22 文件 / 322 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
+- **基线：23 文件 / 330 测试全绿 + `pnpm run typecheck` 0 错误**（低于即回归）。用 `pnpm test` / `pnpm run typecheck` 跑（仓库的 npm scripts 经 pnpm 调用；**不要 install、不要动 lockfile**）
 - Tests use `vitest` API (`describe`, `it`, `expect`)
 - LLM calls are mocked in refinement tests (`refine` / `refineMemory`)
 - Tests mock `homedir` to a tmp home - they must NEVER touch real `~/.opencode` files
