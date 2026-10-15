@@ -1,6 +1,6 @@
 # OPERATIONS.md — 安装、配置、测试与调试
 
-> 最后更新: 2026-10-15 · commit `77ccc97`
+> 最后更新: 2026-10-15 · commit `fe26fa1`
 
 ## 1. 安装（install.sh，6 步幂等）
 
