@@ -54,7 +54,8 @@ try {
     console.log(`push → ok=${r.ok} kind=${r.kind} ${r.message}`);
   }
   if (op === "pull" || op === "both") {
-    const r = await sync.pull();
+    // 人工通道默认强制真实 pull：手动跑就是要把远端搬下来，不参与"远端无变化则跳过"
+    const r = await sync.pull({ force: true });
     console.log(`pull → ok=${r.ok} kind=${r.kind} ${r.message}`);
   }
   for (const name of ["USER.md", "MEMORY.md"]) {

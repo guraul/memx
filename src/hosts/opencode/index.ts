@@ -69,7 +69,9 @@ export default Plugin.define({
     let syncTimer: ReturnType<typeof setInterval> | null = null;
     if (initialConfig.sync.enabled && initialConfig.sync.machineName !== "") {
       sync = createSync({ config: initialConfig.sync, alerts: alertStore });
-      void sync.pull();
+      // 启动这次强制走真实 pull：重启后要能补齐落下的远端变更（短路只看 sha，不搬文件）
+      void sync.pull({ force: true });
+      // 定时拉走短路路径：远端没新提交时一次 ls-remote 就收工（夜里空转降到最低）
       syncTimer = setInterval(() => void sync?.pull(), initialConfig.sync.intervalMinutes * 60_000);
       // 定时器不该拖住宿主退出（与注入闸门定时器同一处理）
       (syncTimer as { unref?: () => void }).unref?.();
