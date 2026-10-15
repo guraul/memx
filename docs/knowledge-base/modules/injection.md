@@ -1,6 +1,6 @@
 # modules/injection.md — system prompt 注入
 
-> 最后更新: 2026-10-13 · commit `1bb53cc` · 2026-10-15 复核：内容未变（`77ccc97`，仅 import 扩展名统一）
+> 最后更新: 2026-10-13 · commit `1bb53cc` · 2026-10-15 复核：内容未变（`fe26fa1`，仅 import 扩展名统一）
 
 ## 职责
 

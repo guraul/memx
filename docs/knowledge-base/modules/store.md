@@ -1,6 +1,6 @@
 # modules/store.md — 写盘层（USER.md / MEMORY.md / .mem）
 
-> 最后更新: 2026-10-15 · commit `77ccc97`
+> 最后更新: 2026-10-15 · commit `fe26fa1`
 
 ## 职责
 

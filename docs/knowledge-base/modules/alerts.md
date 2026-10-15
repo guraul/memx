@@ -1,6 +1,6 @@
 # modules/alerts.md — 报警账本
 
-> 最后更新: 2026-10-15 · commit `77ccc97`
+> 最后更新: 2026-10-15 · commit `fe26fa1`
 
 ## 职责
 
