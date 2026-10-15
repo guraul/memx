@@ -144,6 +144,9 @@ export interface SyncState {
   lastError: string;
   consecutiveFailures: number;
   lastPiiScan: { at: string; files: number; hits: number } | null;
+  /** 上一次**成功** pull 记录的远端 branch sha（`git rev-parse origin/<branch>`）。
+   *  下次 pull 用它做前置短路比对；旧状态文件没有该字段 → null = 未知 → 走真实 pull（向后兼容）。 */
+  lastRemoteSha: string | null;
 }
 
 export function syncStatePath(): string {
@@ -170,6 +173,7 @@ export function readSyncState(path?: string): SyncState | null {
         typeof raw.lastPiiScan === "object" && raw.lastPiiScan !== null
           ? (raw.lastPiiScan as SyncState["lastPiiScan"])
           : null,
+      lastRemoteSha: typeof raw.lastRemoteSha === "string" ? raw.lastRemoteSha : null,
     };
   } catch {
     return null;
@@ -313,6 +317,14 @@ export function remoteUrl(repo: string): string {
   return /^(git@|ssh:\/\/|https?:\/\/|file:|\/|\.\/|\.\.\/)/.test(repo) ? repo : `git@github.com:${repo}.git`;
 }
 
+/** 解析 `git ls-remote origin refs/heads/<branch>` 输出：首行首字段（sha）。空 / 非 sha → ""，
+ *  调用方据此回落完整 pull（fail-open，绝不让这个优化把 pull 弄坏）。 */
+function parseLsRemoteSha(stdout: string): string {
+  const first = stdout.split("\n").map((l) => l.trim()).find((l) => l !== "");
+  const sha = first?.split(/\s+/)[0] ?? "";
+  return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : "";
+}
+
 // ---- 模块 ----
 
 export interface SyncResult {
@@ -332,7 +344,8 @@ export interface SyncStatus {
 
 export interface SyncModule {
   push(): Promise<SyncResult>;
-  pull(): Promise<SyncResult>;
+  /** force:true → 跳过"远端无变化"前置短路，强制走完整 pull（启动补齐 / 人工通道用）。 */
+  pull(opts?: { force?: boolean }): Promise<SyncResult>;
   status(): SyncStatus;
   dryRun(): DryRunReport;
   dispose(): void;
@@ -375,9 +388,10 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   let lastError = persisted?.lastError ?? "";
   let consecutiveFailures = persisted?.consecutiveFailures ?? 0;
   let lastPiiScan = persisted?.lastPiiScan ?? null;
+  let lastRemoteSha = persisted?.lastRemoteSha ?? null;
 
   const save = (): void => {
-    writeSyncState(statePath, { lastPushAt, lastPullAt, lastError, consecutiveFailures, lastPiiScan });
+    writeSyncState(statePath, { lastPushAt, lastPullAt, lastError, consecutiveFailures, lastPiiScan, lastRemoteSha });
   };
 
   // 同一事实不重复刷屏：定时拉在离线机器上每 30 分钟失败一次，不去重会把 200 条账本塞满同一行
@@ -440,6 +454,14 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     return hasIdentity
       ? ["git", "commit", "-m", message]
       : ["git", "-c", "user.name=memx-sync", "-c", "user.email=memx@localhost", "commit", "-m", message];
+  }
+
+  /** workdir 内取 `origin/<branch>` 的 sha（完整 pull 成功后记录，供下次前置短路比对）。
+   *  取不到（命令失败 / 输出非 sha）→ null = 未知，下次照样走真实 pull。 */
+  function readOriginSha(): string | null {
+    const r = runner.exec(["git", "rev-parse", `origin/${config.branch}`], workdir);
+    const sha = r.ok ? r.stdout.trim() : "";
+    return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
   }
 
   async function push(): Promise<SyncResult> {
@@ -530,19 +552,34 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     return { ok: true, kind: "pushed", message };
   }
 
-  async function pull(): Promise<SyncResult> {
+  async function pull(pullOpts?: { force?: boolean }): Promise<SyncResult> {
     if (!active) return { ok: false, kind: "error", message: "sync 未启用（enabled=false 或 machineName 为空）" };
     try {
-      return await withSyncLock(() => pullLocked());
+      return await withSyncLock(() => pullLocked(pullOpts));
     } catch (err) {
       return failFast(err instanceof Error ? err.message : String(err));
     }
   }
 
-  /** 锁内部分：fetch + rebase → 镜像回本地（覆盖前备份）。 */
-  function pullLocked(): SyncResult {
+  /** 锁内部分：fetch + rebase → 镜像回本地（覆盖前备份）。
+   *  前置短路：记得上次成功的远端 sha 且与远端一致 → 一次 `ls-remote` 就收工（省夜里空转）。 */
+  function pullLocked(pullOpts?: { force?: boolean }): SyncResult {
     const ensured = ensureRepo();
     if (!ensured.ok) return failFast(`clone 失败：${ensured.error ?? "无输出"}`);
+
+    // 短路只敢在"完全确定"时开：有 sha 记忆 + 上次 pull 是成功的（无 lastError、无失败累计）。
+    // 任何一项不满足都不探远端，直接走完整流程——first run / 上一轮失败后必须真拉。
+    if (!pullOpts?.force && lastRemoteSha !== null && consecutiveFailures === 0 && lastError === "") {
+      const ls = runner.exec(["git", "ls-remote", "origin", `refs/heads/${config.branch}`], workdir);
+      const remoteSha = ls.ok ? parseLsRemoteSha(ls.stdout) : "";
+      if (remoteSha !== "" && remoteSha === lastRemoteSha) {
+        // 只刷新时间戳（状态面板"活着"的语义）。跳过不是一次真拉取：不销账、不动 lastError/consecutiveFailures。
+        lastPullAt = new Date().toISOString();
+        save();
+        return { ok: true, kind: "no-change", message: `远端无新提交，跳过拉取（${remoteSha.slice(0, 7)}）` };
+      }
+      // ls-remote 失败 / 远端变了 / 解析不出 sha → fail-open：继续走原来的完整 pull，绝不因优化中断。
+    }
 
     const fetched = runner.exec(["git", "fetch", "origin", config.branch], workdir);
     if (!fetched.ok) return failFast(`fetch 失败：${fetched.stderr.trim() || fetched.reason || "无输出"}`);
@@ -585,6 +622,8 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     lastPullAt = new Date().toISOString();
     lastError = "";
     consecutiveFailures = 0;
+    // 记下这次拉到哪个远端 sha：下次 pull 的前置短路拿它做比对（取不到 → null = 未知，下次真拉）
+    lastRemoteSha = readOriginSha();
     save();
     const backupNote = backedUp > 0 ? `（${backedUp} 个本地差异件已备份为 .bak.<时间戳>）` : "";
     return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件${backupNote}` };

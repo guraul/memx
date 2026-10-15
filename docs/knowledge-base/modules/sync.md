@@ -1,6 +1,6 @@
 # modules/sync.md — 多机云同步
 
-> 最后更新: 2026-10-15 · commit `fe26fa1`
+> 最后更新: 2026-10-15 · commit `0685bed`
 
 ## 职责
 
@@ -10,7 +10,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `src/core/sync.ts`（612 行） | 全部编排：`GitRunner` / `scanSensitive` / `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
+| `src/core/sync.ts`（651 行） | 全部编排：`GitRunner` / `scanSensitive` / `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
 | `src/core/config.ts` | `MemxSyncConfigSchema`（enabled / repo / branch / machineName / intervalMinutes） |
 | `src/hosts/opencode/index.ts` | 接线：setup 建 sync、启动拉一次、定时拉、两个 push 触发点 |
 | `scripts/sync-op.ts` | 手工通道（status / pull / push / both，`--machine=<name>` 覆盖） |
@@ -33,8 +33,8 @@
 
 | 动作 | 时机 | 实现 |
 |------|------|------|
-| pull（启动一次） | setup 时 | `void sync.pull()`（不 await） |
-| pull（定时） | 每 `intervalMinutes` | `setInterval(() => void sync?.pull(), …)` |
+| pull（启动一次） | setup 时 | `void sync.pull({ force: true })`（**强制真实 pull**：重启后要补齐落下的远端变更） |
+| pull（定时） | 每 `intervalMinutes` | `setInterval(() => void sync?.pull(), …)`（走前置短路路径） |
 | push | **Track 2 提炼写盘成功后** | index.ts:435 `void sync?.push()` |
 | push | **`memory_write` 工具成功后** | index.ts:758 `void sync?.push()` |
 
@@ -55,11 +55,21 @@
 ## pull 流程
 
 ```
-锁内 fetch → 逐文件比对（远端优先）
-  → 本地内容与将写入的不同 → 先存 <file>.bak.<ts>（每文件留最新 5 份）
-  → 覆盖
-  → rebase 冲突 → rebase --abort + SYNC_CONFLICT critical（留人工）
+锁内 ensureRepo
+  → 前置短路（仅当 pullOpts.force≠true + 有 lastRemoteSha + consecutiveFailures=0 + lastError=""）
+       git ls-remote origin refs/heads/<branch> → sha 与 lastRemoteSha 相同
+         → 只刷 lastPullAt（不销账、不动 lastError/consecutiveFailures）→ kind="no-change" 收工
+         ⚠️ ls-remote 失败 / 远端变了 / 解析不出 → fail-open，继续下面的完整流程
+  → fetch → 逐文件比对（远端优先）
+       → 本地内容与将写入的不同 → 先存 <file>.bak.<ts>（每文件留最新 5 份）
+       → 覆盖
+       → rebase 冲突 → rebase --abort + SYNC_CONFLICT critical（留人工）
+  → 成功：git rev-parse origin/<branch> 写入 lastRemoteSha（取不到 → null = 未知，下次真拉）
 ```
+
+**为什么要短路**：定时拉每 `intervalMinutes` 跑一次，夜里没人用也照跑——每次都是 `fetch` + rebase + 逐文件比对（即使无变化也要一次网络往返 + git 目录 churn）。远端 sha 没变时一次 `ls-remote` 就能收工。
+
+**判定为什么这么保守**：短路只在"上次 pull 确实成功过 + 记得那次拉到哪个 sha"时才敢开；`force:true`（启动 / 人工通道）一律绕过它。
 
 ## 镜像范围（`walkMirror` / `listToSync`）
 
@@ -72,7 +82,7 @@
 | 路径 | 内容 |
 |------|------|
 | `~/.opencode/memx-sync-repo/` | Git workdir（不存在则 clone，存在则 fetch） |
-| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{hits,files,at}` |
+| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{hits,files,at}` / `lastRemoteSha`（上次成功 pull 的远端 sha；**旧文件无此字段 = null = 未知 → 走真实 pull**） |
 | `~/.opencode/.memx-sync.lock` | 串行闸门（`withFileLock`，ttl 10 分钟 / 等锁上限 5 分钟） |
 
 ## PII 脱敏闸门（`scanSensitive`）
@@ -99,6 +109,7 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 ```
 
 - **与插件同一条代码路径**（`createSync` 的 push/pull），不是第二套实现。
+- `pull` / `both` **强制真实 pull**（`sync.pull({ force: true })`）——人工跑就是要把远端搬下来，不参与"远端无变化则跳过"。
 - `--machine=<name>` = 显式覆盖 `{enabled:true, machineName:<name>}`，用于"配置还没开、但要人工跑一次首推/首拉"（prod 首次合并）；**它不改配置文件**，运行中的宿主不受影响。不传则完全按配置（未启用直接拒绝）。
 - 存在的理由：`createSync` 对 `enabled=false` 是硬拒绝，而"先开配置再推"会让运行中的宿主开始自动同步——手工通道把这两件事解耦。
 
@@ -127,4 +138,4 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 
 ## 测试
 
-`tests/sync.test.ts`（假 runner 编排 + 真实 git 端到端 + PII/备份/锁/重试）+ `tests/scripts-smoke.test.ts`（CLI 真跑）。每文件独立 tmp home。
+`tests/sync.test.ts`（假 runner 编排 + 真实 git 端到端 + PII/备份/锁/重试/前置短路）+ `tests/scripts-smoke.test.ts`（CLI 真跑）。每文件独立 tmp home。

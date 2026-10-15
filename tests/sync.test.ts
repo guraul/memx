@@ -5,6 +5,7 @@ import { spawnSync } from "child_process";
 import {
   createSync,
   createNodeGitRunner,
+  readSyncState,
   remoteUrl,
   scanSensitive,
   listToSync,
@@ -77,6 +78,25 @@ function makeSync(runner: FakeRunner, name: string, workdir?: string, config = S
     statePath: join(HOME, `state-${name}.json`),
   });
 }
+
+/** 直接落一份状态文件（模拟"上次 pull 留下的状态"）；statePath 与 makeSync 的约定一致 */
+function writeStateFile(name: string, state: Record<string, unknown>): string {
+  const path = join(HOME, `state-${name}.json`);
+  writeFileSync(path, JSON.stringify(state, null, 2), "utf-8");
+  return path;
+}
+
+const SHA_A = "a".repeat(40);
+const SHA_B = "b".repeat(40);
+/** 上次 pull 成功的状态底稿：想看短路就必须先满足"有 sha + 无失败" */
+const okState = (sha: string | null) => ({
+  lastPushAt: null,
+  lastPullAt: "2026-01-01T00:00:00.000Z",
+  lastError: "",
+  consecutiveFailures: 0,
+  lastPiiScan: null,
+  lastRemoteSha: sha,
+});
 
 describe("scanSensitive", () => {
   it("正例：8 类规则各命中一次，只报行号+规则名", () => {
@@ -326,6 +346,157 @@ describe("pull", () => {
     expect(readFileSync(join(OPENCODE, "MEMORY.md"), "utf-8")).toBe("remote index\n");
     expect(readFileSync(join(OPENCODE, "projects", "bar", ".mem", "x.md"), "utf-8")).toBe("remote mem\n");
     expect(sync.status().lastPullAt).not.toBeNull();
+  });
+});
+
+describe("远端无变化前置短路（省夜里空转）", () => {
+  it("a) 远端 sha 未变 + 上次成功 → 跳过：零 fetch/rebase/rev-parse，只刷 lastPullAt 不销账", async () => {
+    const workdir = join(HOME, "workdir-skip");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const before = "2026-01-01T00:00:00.000Z";
+    const statePath = writeStateFile("skip", okState(SHA_A));
+    const runner = new FakeRunner((cmd) =>
+      cmd.join(" ").includes("ls-remote")
+        ? { ok: true, stdout: `${SHA_A}\trefs/heads/main\n`, stderr: "" }
+        : { ok: true, stdout: "", stderr: "" },
+    );
+    const alerts = makeAlerts("skip");
+    alerts.append({ level: "warn", code: "SYNC_ERROR", message: "旧账", ts: before });
+    const sync = createSync({ config: SYNC_CONFIG, alerts, runner, workdir, statePath });
+
+    const result = await sync.pull();
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("no-change");
+    expect(result.message).toContain("远端无新提交，跳过拉取");
+    expect(runner.calls).toHaveLength(1);
+    expect(runner.calls[0]!.join(" ")).toContain("ls-remote");
+    expect(runner.count("fetch")).toBe(0);
+    expect(runner.count("rebase")).toBe(0);
+    expect(runner.count("rev-parse")).toBe(0);
+    expect(sync.status().lastPullAt).not.toBe(before);
+    // 跳过不是一次真拉取 → 旧账不销、sha 记忆保留（下次还能短路）
+    expect(alerts.list().some((a) => a.code === "SYNC_ERROR")).toBe(true);
+    const state = readSyncState(statePath);
+    expect(state?.lastRemoteSha).toBe(SHA_A);
+    expect(state?.lastPullAt).not.toBe(before);
+  });
+
+  it("b) 远端 sha 变了 → 完整流程（fetch/rebase/镜像）并把新 sha 写回状态", async () => {
+    const workdir = join(HOME, "workdir-skip-changed");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    writeFileSync(join(workdir, "MEMORY.md"), "remote v2\n", "utf-8");
+    writeMemoryFile("MEMORY.md", "local v1\n");
+    const statePath = writeStateFile("skip-changed", okState(SHA_A));
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("ls-remote")) return { ok: true, stdout: `${SHA_B}\trefs/heads/main\n`, stderr: "" };
+      if (j.includes("rev-parse")) return { ok: true, stdout: `${SHA_B}\n`, stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "skip-changed", workdir);
+
+    const result = await sync.pull();
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pulled");
+    expect(runner.called("fetch origin main")).toBe(true);
+    expect(runner.called("rebase origin/main")).toBe(true);
+    expect(readFileSync(join(OPENCODE, "MEMORY.md"), "utf-8")).toBe("remote v2\n");
+    expect(readSyncState(statePath)?.lastRemoteSha).toBe(SHA_B);
+  });
+
+  it("c) 无 lastRemoteSha（旧状态文件）→ 不探 ls-remote，直接完整流程", async () => {
+    const workdir = join(HOME, "workdir-skip-nosha");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    // 旧版写出来的状态文件：没有 lastRemoteSha 字段
+    const statePath = writeStateFile("skip-nosha", {
+      lastPushAt: null,
+      lastPullAt: "2026-01-01T00:00:00.000Z",
+      lastError: "",
+      consecutiveFailures: 0,
+      lastPiiScan: null,
+    });
+    expect(readSyncState(statePath)?.lastRemoteSha).toBeNull();
+    const runner = new FakeRunner((cmd) =>
+      cmd.join(" ").includes("rev-parse") ? { ok: true, stdout: `${SHA_A}\n`, stderr: "" } : { ok: true, stdout: "", stderr: "" },
+    );
+    const sync = makeSync(runner, "skip-nosha", workdir);
+
+    const result = await sync.pull();
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pulled");
+    expect(runner.called("ls-remote")).toBe(false);
+    expect(runner.called("fetch origin main")).toBe(true);
+    expect(readSyncState(statePath)?.lastRemoteSha).toBe(SHA_A);
+  });
+
+  it("d) force:true → 即使 sha 未变也走完整流程（连 ls-remote 都不探）", async () => {
+    const workdir = join(HOME, "workdir-skip-force");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    writeStateFile("skip-force", okState(SHA_A));
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("ls-remote")) return { ok: true, stdout: `${SHA_A}\trefs/heads/main\n`, stderr: "" };
+      if (j.includes("rev-parse")) return { ok: true, stdout: `${SHA_A}\n`, stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "skip-force", workdir);
+
+    const result = await sync.pull({ force: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pulled");
+    expect(runner.called("ls-remote")).toBe(false);
+    expect(runner.called("fetch origin main")).toBe(true);
+    expect(runner.called("rebase origin/main")).toBe(true);
+  });
+
+  it("e) 上次 pull 失败（lastError 非空 / consecutiveFailures>0）→ 不短路，走完整流程", async () => {
+    const variants = [
+      { name: "skip-failerr", state: { ...okState(SHA_A), lastError: "fetch 失败：Could not resolve host" } },
+      { name: "skip-failcount", state: { ...okState(SHA_A), consecutiveFailures: 2 } },
+    ];
+    for (const v of variants) {
+      const workdir = join(HOME, `workdir-${v.name}`);
+      mkdirSync(join(workdir, ".git"), { recursive: true });
+      writeStateFile(v.name, v.state);
+      const runner = new FakeRunner((cmd) =>
+        cmd.join(" ").includes("ls-remote")
+          ? { ok: true, stdout: `${SHA_A}\trefs/heads/main\n`, stderr: "" }
+          : { ok: true, stdout: "", stderr: "" },
+      );
+      const sync = makeSync(runner, v.name, workdir);
+
+      const result = await sync.pull();
+
+      expect(result.ok).toBe(true);
+      expect(result.kind).toBe("pulled");
+      expect(runner.called("fetch origin main")).toBe(true);
+      expect(runner.called("ls-remote")).toBe(false);
+    }
+  });
+
+  it("f) ls-remote 失败 → fail-open：回落完整流程并成功", async () => {
+    const workdir = join(HOME, "workdir-skip-failopen");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const statePath = writeStateFile("skip-failopen", okState(SHA_A));
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("ls-remote")) return { ok: false, stdout: "", stderr: "Could not resolve host: github.com", reason: "exit 128" };
+      if (j.includes("rev-parse")) return { ok: true, stdout: `${SHA_A}\n`, stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "skip-failopen", workdir);
+
+    const result = await sync.pull();
+
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pulled");
+    expect(runner.called("fetch origin main")).toBe(true);
+    expect(readSyncState(statePath)?.lastRemoteSha).toBe(SHA_A);
+    expect(sync.status().lastError).toBe("");
   });
 });
 
@@ -700,6 +871,63 @@ describe("真实 git 端到端（本地 bare 仓当远端，不打桩）", () =>
     expect(second.ok).toBe(true);
     expect(second.kind).toBe("no-change");
     expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("2");
+  });
+});
+
+describe("短路：真实 git 端到端（本地 bare 仓，不打桩）", () => {
+  const hasGit = spawnSync("git", ["--version"]).status === 0;
+
+  it.skipIf(!hasGit)("g) 成功 pull 记下远端 sha；无新提交再 pull → 跳过且只剩一次 ls-remote", async () => {
+    const remote = join(HOME, "skip-origin.git");
+    rmSync(remote, { recursive: true, force: true });
+    const git = (args: string[], cwd?: string): string => {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")} 失败：${r.stderr}`);
+      return r.stdout ?? "";
+    };
+    git(["init", "--bare", remote]);
+    git([`--git-dir=${remote}`, "symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    writeMemoryFile("USER.md", "skip e2e\n");
+    const workdir = join(HOME, "workdir-skip-e2e");
+    rmSync(workdir, { recursive: true, force: true });
+    // 真 git + 记录命令序列：既要真跑，又要断言"确实没 fetch"
+    const inner = createNodeGitRunner();
+    const calls: string[][] = [];
+    const runner: GitRunner = {
+      exec: (cmd, cwd) => {
+        calls.push([...cmd]);
+        return inner.exec(cmd, cwd);
+      },
+    };
+    const statePath = join(HOME, "state-skip-e2e.json");
+    const sync = createSync({
+      config: { ...SYNC_CONFIG, repo: remote },
+      alerts: makeAlerts("skip-e2e"),
+      runner,
+      workdir,
+      statePath,
+    });
+
+    // 先把远端造出来（空 bare 仓 fetch 不到 main），push 与 pull 都是完整流程
+    const pushed = await sync.push();
+    expect(pushed.ok).toBe(true);
+    const pulled = await sync.pull();
+    expect(pulled.ok).toBe(true);
+    expect(pulled.kind).toBe("pulled");
+    const remoteSha = git([`--git-dir=${remote}`, "rev-parse", "main"]).trim();
+    expect(readSyncState(statePath)?.lastRemoteSha).toBe(remoteSha);
+
+    calls.length = 0;
+    const skipped = await sync.pull();
+
+    expect(skipped.ok).toBe(true);
+    expect(skipped.kind).toBe("no-change");
+    expect(skipped.message).toContain("跳过拉取");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.join(" ")).toContain("ls-remote");
+    expect(calls.some((c) => c.includes("fetch"))).toBe(false);
+    expect(readSyncState(statePath)?.lastRemoteSha).toBe(remoteSha);
   });
 });
 
