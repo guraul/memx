@@ -4,5 +4,7 @@ dist/
 .git/
 .superpowers/
 prd.md
-docs/
+docs/*
 !docs/handoff/
+!docs/knowledge-base/
+!docs/USER-GUIDE.md

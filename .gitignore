@@ -1,4 +1,6 @@
 node_modules/
 dist/
-docs/
+docs/*
+!docs/knowledge-base/
+!docs/USER-GUIDE.md
 .DS_Store
