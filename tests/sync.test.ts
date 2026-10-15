@@ -246,6 +246,8 @@ describe("push", () => {
     expect(fetch).toBeGreaterThan(firstPush);
     expect(rebase).toBeGreaterThan(fetch);
     expect(secondPush).toBeGreaterThan(rebase);
+    // rebase 必须带兜底身份：无身份环境下 rebase 重放提交缺 committer 会直接失败（被误报成冲突）
+    expect(seq[rebase]).toContain("-c user.name=memx-sync -c user.email=memx@localhost rebase");
   });
 
   it("重试仍失败 → SYNC_PUSH_FAILED warn alert + consecutiveFailures 累加", async () => {
@@ -402,6 +404,10 @@ describe("远端无变化前置短路（省夜里空转）", () => {
     expect(result.kind).toBe("pulled");
     expect(runner.called("fetch origin main")).toBe(true);
     expect(runner.called("rebase origin/main")).toBe(true);
+    // pull 路径的 rebase 同样必须带身份（prod 上 workdir 是新 clone，没有 git 身份）
+    expect(runner.calls.find((c) => c.join(" ").includes("rebase origin/main"))!.join(" ")).toContain(
+      "-c user.name=memx-sync -c user.email=memx@localhost rebase origin/main",
+    );
     expect(readFileSync(join(OPENCODE, "MEMORY.md"), "utf-8")).toBe("remote v2\n");
     expect(readSyncState(statePath)?.lastRemoteSha).toBe(SHA_B);
   });
@@ -989,4 +995,119 @@ describe("并发串行闸门（workdir 只有一份，push/pull 不能同时碰�
       expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("1");
     },
   );
+});
+
+describe("非快进重试必须带 git 身份（回归：rebase 缺 committer 被误报 SYNC_CONFLICT）", () => {
+  const hasGit = spawnSync("git", ["--version"]).status === 0;
+
+  /** 显式构造"没有 git 身份"的环境：清掉 author/committer 的 env，global config 换成一个只有
+   *  `user.useConfigOnly = true` 的文件（既没有 user.name/email，又关掉 git 从 hostname 自动推断
+   *  身份的能力），system config 指到 /dev/null。
+   *  ⚠️ 光清 config 不够：开发者机器上 git 会用 `user@hostname` 自动补一个合法 email，测试会假绿。 */
+  async function withNoGitIdentity<T>(fn: () => Promise<T>): Promise<T> {
+    const keys = [
+      "GIT_AUTHOR_NAME",
+      "GIT_AUTHOR_EMAIL",
+      "GIT_COMMITTER_NAME",
+      "GIT_COMMITTER_EMAIL",
+      "GIT_CONFIG_GLOBAL",
+      "GIT_CONFIG_SYSTEM",
+    ];
+    const saved = new Map<string, string | undefined>();
+    for (const k of keys) saved.set(k, process.env[k]);
+    for (const k of keys.slice(0, 4)) delete process.env[k];
+    const noIdentConfig = join(HOME, "no-identity.gitconfig");
+    writeFileSync(noIdentConfig, "[user]\n\tuseConfigOnly = true\n", "utf-8");
+    process.env.GIT_CONFIG_GLOBAL = noIdentConfig;
+    process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+    try {
+      return await fn();
+    } finally {
+      for (const k of keys) {
+        const v = saved.get(k);
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  }
+
+  it.skipIf(!hasGit)("无身份 + 非快进推送 → rebase 重试成功（kind=pushed，无 SYNC_CONFLICT）", async () => {
+    await withNoGitIdentity(async () => {
+      const remote = join(HOME, "nf-origin.git");
+      rmSync(remote, { recursive: true, force: true });
+      const run = (args: string[], cwd?: string) => spawnSync("git", args, { cwd, encoding: "utf8" });
+      const git = (args: string[], cwd?: string): string => {
+        const r = run(args, cwd);
+        if (r.status !== 0) throw new Error(`git ${args.join(" ")} 失败：${r.stderr}`);
+        return r.stdout ?? "";
+      };
+      git(["init", "--bare", remote]);
+      git([`--git-dir=${remote}`, "symbolic-ref", "HEAD", "refs/heads/main"]);
+
+      writeMemoryFile("USER.md", "A v1\n");
+      const workdir = join(HOME, "workdir-nf-identity");
+      rmSync(workdir, { recursive: true, force: true });
+      // 真 git + 记录命令序列与每次输出：既要真跑，又要在失败时把 git 原文暴露出来
+      const inner = createNodeGitRunner();
+      const calls: string[][] = [];
+      const results: Array<{ cmd: string; ok: boolean; stderr: string }> = [];
+      const runner: GitRunner = {
+        exec: (cmd, cwd) => {
+          const r = inner.exec(cmd, cwd);
+          calls.push([...cmd]);
+          results.push({ cmd: cmd.join(" "), ok: r.ok, stderr: r.stderr });
+          return r;
+        },
+      };
+      const alerts = makeAlerts("nf-identity");
+      const sync = createSync({
+        config: { ...SYNC_CONFIG, repo: remote },
+        alerts,
+        runner,
+        workdir,
+        statePath: join(HOME, "state-nf-identity.json"),
+      });
+
+      // A 首推：workdir 由 sync clone 出来
+      const first = await sync.push();
+      expect(first.ok).toBe(true);
+      expect(first.kind).toBe("pushed");
+      // 环境自检：clone 出来的 workdir 确实没有任何 git 身份（user.email / user.name 都取不到）
+      expect(run(["config", "user.email"], workdir).stdout.trim()).toBe("");
+      expect(run(["config", "user.name"], workdir).stdout.trim()).toBe("");
+
+      // 另一台机器推进远端（改的是另一个文件 → 无内容冲突）
+      const other = join(HOME, "nf-other");
+      rmSync(other, { recursive: true, force: true });
+      git(["clone", remote, other]);
+      writeFileSync(join(other, "MEMORY.md"), "B memory\n", "utf-8");
+      git(["add", "-A"], other);
+      git(["-c", "user.name=B", "-c", "user.email=b@localhost", "commit", "-m", "from B"], other);
+      git(["push", "origin", "main"], other);
+
+      // A 本地又改 USER.md → 与远端分叉 → push 非快进 → fetch + rebase 重试（此处正是昨晚炸的那条路径）
+      writeMemoryFile("USER.md", "A v2\n");
+      calls.length = 0;
+      results.length = 0;
+      const result = await sync.push();
+
+      // 无身份环境下 rebase 不得报 identity 错误（失败时把 git 原文贴进 diff）
+      const rebaseResults = results.filter((r) => r.cmd.includes("rebase") && !r.cmd.includes("--abort"));
+      expect(rebaseResults.map((r) => r.stderr).join(" | ")).not.toMatch(/identity unknown/i);
+      expect(rebaseResults.every((r) => r.ok)).toBe(true);
+
+      expect(result.ok).toBe(true);
+      expect(result.kind).toBe("pushed"); // 旧行为此处会是 "conflict"
+      expect(alerts.list().some((a) => a.code === "SYNC_CONFLICT")).toBe(false);
+
+      // 重试确实走了 rebase，且带了兜底身份
+      const rebaseCall = calls.find((c) => c.includes("rebase") && !c.includes("--abort"));
+      expect(rebaseCall).toBeDefined();
+      expect(rebaseCall!.join(" ")).toContain("-c user.name=memx-sync -c user.email=memx@localhost rebase");
+
+      // 远端最终同时含 A 的 USER.md 与 B 的 MEMORY.md（rebase 真的重放成功）
+      expect(git([`--git-dir=${remote}`, "show", "main:USER.md"])).toBe("A v2\n");
+      expect(git([`--git-dir=${remote}`, "show", "main:MEMORY.md"])).toBe("B memory\n");
+    });
+  });
 });
