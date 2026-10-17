@@ -49,6 +49,10 @@ OpenCode V2 双轨记忆插件（Track 1 用户风格 + Track 2 项目记忆）�
 13. **状态面板用 `pnpm run doctor`**，别用 `pnpm doctor`（pnpm 有同名内建命令，会静默跑成 pnpm 自检）。
 14. **测试每文件用独立 tmp home**，绝不碰真实 `~/.opencode`；测试禁 `bun:test`。
 15. **判断插件真实状态先跑 doctor / 查 kv 表**——`memx_status` 回执只是固定字段（`alerts` 例外，以账本文件为准）。
+16. **worktree 纪律（2026-10-17 用户明确「issue 关闭，相应的 worktree 也要清理」）**：
+    - ① **issue / PR 一旦关闭，必须立刻清理对应 worktree + 本地分支**：`git worktree remove --force <path>` → `git branch -D <branch>`（squash 合并后提交**不是** main 祖先，故用 `-D`）→ `git worktree prune` → `git worktree list` 确认只剩主工作区。
+    - ② **本仓的任务分支必须落在仓库外的 worktree 容器** `/Users/gubin/workspace/memx-worktrees/`，**绝不** checkout 在主仓 —— 本机 opencode **从主仓加载本插件源码**（`~/.config/opencode/plugins/memx.ts` → `src/hosts/opencode/index`），主仓切到未合并分支会让**插件加载到未合并代码**（已真实发生过一次）。
+    - ③ 建 worktree 一律**绝对路径 + 从主仓根执行**（在子目录里跑 `git worktree add .worktrees/X` 会嵌进错误的 worktree）；`scripts/pipeline/new-task.sh` 依赖 HTTPS fetch、在本机可能挂 → 先 `git fetch`（SSH）再手工 `git worktree add`。
 
 ## 常用命令（详情见 OPERATIONS.md）
 
