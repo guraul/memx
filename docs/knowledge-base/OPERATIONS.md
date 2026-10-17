@@ -60,7 +60,7 @@ pnpm sync:op -- push --machine=<name>   # 2) 人工首推（不改配置，宿�
 ## 3. 开发与验证
 
 ```bash
-pnpm test            # vitest run —— 基线 24 文件 / 338 用例全绿，低于即回归
+pnpm test            # vitest run —— 基线 25 文件 / 359 用例全绿，低于即回归
 pnpm run typecheck   # tsc --noEmit（strict + exactOptionalPropertyTypes + noUncheckedIndexedAccess）
 
 # 阶段 4 CLI（全部只读或显式手工操作，退出码恒 0）
@@ -69,6 +69,26 @@ pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永�
 pnpm sync:op -- status|pull|push|both [--machine=<name>]
 pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
 ```
+
+## 3.1 对外 CRUD 面（`scripts/mem.ts`，issue #13 / agent-mobile#62 路径 A 切片 1）
+
+DSH 与外部工具当客户端、经 bash 直接调用的**只读+受控写**入口。命令面：
+
+```bash
+pnpm mem slug [--dir <path>]                # 按宿主同款规则推导 slug（deriveSlug）
+pnpm mem list [--json]                      # 列索引里的 slug 小节与条目
+pnpm mem search <kw> [--slug <s>] [--json]  # 跨 .mem/*.md 检索（标题/hook/正文，给行号）
+pnpm mem get <slug> <filename> [--json]     # 打印单条记忆
+pnpm mem status [--json]                    # 计数 + 健康摘要
+pnpm mem write --slug <s> [--dry-run] [--json]   # stdin 读 JSON（MemoryProposal[]）→ 锁内 applyMemoryProposals + 写索引
+pnpm mem forget <keyword> --slug <s> [--dry-run] [--json]  # 软删（进 .trash）+ 移除索引条目
+```
+
+- `--slug` 与 `--dir` 二选一（`--dir` 走 `deriveSlug`）；`slug`/`list`/`status` 之外缺这两者报用法错误。
+- 退出码：`0` 成功 / `1` 用法错误 / `2` 业务错误（slug 不存在、未匹配、载荷非法）。
+- **与提炼单写者的关系**：提炼（refine/refineMemory）仍是**唯一写者**、路径不变；CLI 与 `memory_write` 工具**共用同一写入口**（`withFileLock` + `applyMemoryProposals` / `forgetMemory` + `writeMemoryIndex`），不另写解析、不直写 markdown——避免两个写者 + 格式分叉。
+- 写盘副作用：`writeMemoryIndex` 覆盖前自动生成 `MEMORY.md.bak.<ts>`（留 5 份）；`forget`/`deprecate` 把文件移入 `.mem/.trash/`（软删可恢复）。
+- 集成测试 `tests/mem-cli.test.ts`：每用例独立 `HOME=<tmp>`（绝不碰真实 `~/.opencode`），child_process 真跑 CLI。
 
 - ⚠️ **必须 `pnpm run doctor`**，别用 `pnpm doctor`——pnpm 有同名内建命令，会静默跑成 pnpm 自检而不是 memx 面板。
 - CLI 走 `node --experimental-strip-types` 直载 `.ts`：**相对 import 必须带 `.ts` 扩展名**（缺了 tsc/vitest 都发现不了，运行时才 `ERR_MODULE_NOT_FOUND`）；`tests/scripts-smoke.test.ts` 真跑脚本兜这条，所以**加了 CLI 就要让它进冒烟测试**。
