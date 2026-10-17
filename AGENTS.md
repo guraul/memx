@@ -53,6 +53,10 @@ OpenCode V2 双轨记忆插件（Track 1 用户风格 + Track 2 项目记忆）�
     - ① **issue / PR 一旦关闭，必须立刻清理对应 worktree + 本地分支**：`git worktree remove --force <path>` → `git branch -D <branch>`（squash 合并后提交**不是** main 祖先，故用 `-D`）→ `git worktree prune` → `git worktree list` 确认只剩主工作区。
     - ② **本仓的任务分支必须落在仓库外的 worktree 容器** `/Users/gubin/workspace/memx-worktrees/`，**绝不** checkout 在主仓 —— 本机 opencode **从主仓加载本插件源码**（`~/.config/opencode/plugins/memx.ts` → `src/hosts/opencode/index`），主仓切到未合并分支会让**插件加载到未合并代码**（已真实发生过一次）。
     - ③ 建 worktree 一律**绝对路径 + 从主仓根执行**（在子目录里跑 `git worktree add .worktrees/X` 会嵌进错误的 worktree）；`scripts/pipeline/new-task.sh` 依赖 HTTPS fetch、在本机可能挂 → 先 `git fetch`（SSH）再手工 `git worktree add`。
+17. **对外记忆 I/O 只走 `scripts/mem.ts`（#13 / agent-mobile#62 路径 A）**：DSH 与其它外部客户端**读写本仓记忆一律经 `pnpm mem …`** —— 读 `list` / `search` / `get` / `status`；写 `write`（stdin 传 `MemoryProposal[]`）/ `forget`（软删进 `.trash`）；**写前先 `--dry-run`**。
+    - **禁止直写 `~/.opencode/**` 的 markdown**：会绕过 `withFileLock` + 索引更新 + `.bak`，留下"**不在索引里的孤儿**"（2026-10-17 实测 `status` 报 `orphanFiles=3`：文件在磁盘、注入链看不到）与格式分叉。
+    - 语义（规格如此，勿当 bug）：`list` 列**所有** slug 小节；`status` 报**全局**计数 + 健康摘要（含 `deadLinks`/`orphanFiles`/`indexLines`）；退出码 `0` 成功 / `1` 用法错误 / `2` 业务错误。
+    - 命令面与示例见 `docs/knowledge-base/OPERATIONS.md §3.1`；实现 = PR #14（`4f32fbd`）。
 
 ## 常用命令（详情见 OPERATIONS.md）
 
