@@ -107,6 +107,7 @@ sqlite3 ~/.local/share/opencode/opencode.db \
 |--------|--------|--------|
 | 后台提炼（refine/refineMemory） | USER.md / MEMORY.md + .mem | 下一 step 的 context hook 注入 |
 | memory_write 工具 | 同上（同一条写路、同一把锁） | 同上 |
+| 对外 CRUD 面 CLI（`scripts/mem.ts`，DSH/外部客户端，#13） | 同上（同一写入口 + 同一把锁，`--dry-run` 可预览） | 同上 |
 | forget / deprecate | 移入 .trash + 索引改条目 | 注入的索引随之更新 |
 | health auto-fix | MEMORY.md 索引（同锁内） | 同上 |
 | 报警（`recordAlert`） | `memx-alerts.json`（事实源）+ kv `diag.alerts`（镜像）+ MEMORY.md 首行面包屑 | doctor / `memx_status` / **模型**（面包屑随索引被注入） |
