@@ -63,7 +63,19 @@ export interface PiiHit {
 }
 
 const PII_RULES: ReadonlyArray<{ pattern: string; re: RegExp }> = [
-  { pattern: "openai-key", re: /sk-[A-Za-z0-9_-]{10,}/ },
+  // 词边界 + 现实前缀/长度（issue #10）：旧写法 /sk-[A-Za-z0-9_-]{10,}/ 无边界，
+  // 把 `risk-management-foo`、`task-spec-branch-name-verify` 中段出现的 `sk-…` 当成 key，
+  // 一次词形误报就把整机同步 fail-closed 锁死。新规则三重约束：
+  //   ① 前导 `[^A-Za-z0-9_-]`（或行首）= `sk-` 必须是**词的开头**，中段一律不算；
+  //   ② 现行真实前缀 `proj-` / `ant-` 直接放行（`sk-proj-…`、`sk-ant-api03-…`）；
+  //   ③ 其余裸 `sk-` 要求 ≥20 位 base62 且**含大写字母或数字**——真实 key 是随机串，
+  //      全小写的连字符词组（`spec-branch-name-verify`）因此被排除，不必逐个枚举词表。
+  // 明确的取舍：一律小写、无数字的 20+ 位 token 不拦（随机性太弱），本次现场两类误报与经典
+  // `sk-` + 长 base62 形态都能正确区分；要放宽就把 ③ 的正向前瞻删掉。
+  {
+    pattern: "openai-key",
+    re: /(^|[^A-Za-z0-9_-])sk-(?:(?:proj-|ant-)[A-Za-z0-9][A-Za-z0-9-]{5,}|(?=[A-Za-z0-9_-]{20,})[A-Za-z0-9_-]*(?=[A-Z0-9])[A-Za-z0-9_-]*)/,
+  },
   { pattern: "aws-access-key", re: /AKIA[0-9A-Z]{16}/ },
   { pattern: "github-token", re: /ghp_[A-Za-z0-9]{20,}/ },
   { pattern: "github-pat", re: /github_pat_[A-Za-z0-9_]{20,}/ },

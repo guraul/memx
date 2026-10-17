@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 const CASES = [
   { script: "scripts/doctor.ts", args: [], marker: "sync: enabled=" },
   { script: "scripts/sync-dry-run.ts", args: [], marker: "memx sync dry-run" },
-  // status 是只读模式：不发任何 git 命令，所以在测试里跑真实 config 也安全
+  // status / pii 都是只读模式：不发任何 git 命令，所以在测试里跑真实 config 也安全
   { script: "scripts/sync-op.ts", args: ["status"], marker: "待同步" },
+  { script: "scripts/sync-op.ts", args: ["pii"], marker: "PII 自查" },
 ];
 
 describe("CLI 脚本能真的加载并跑完（node --experimental-strip-types）", () => {

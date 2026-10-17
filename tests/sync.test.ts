@@ -101,7 +101,7 @@ const okState = (sha: string | null) => ({
 describe("scanSensitive", () => {
   it("正例：8 类规则各命中一次，只报行号+规则名", () => {
     const text = [
-      "openai: sk-abc123XYZ7890abcd",
+      "openai: sk-abc123XYZ7890abcdefg",
       "aws: AKIAIOSFODNN7EXAMPLE",
       "gh: ghp_12345678901234567890",
       "pat: github_pat_ABCDEFGHIJ1234567890",
@@ -198,7 +198,7 @@ describe("createSync 启停", () => {
 
 describe("push", () => {
   it("命中 PII → 拒推（fake runner 零命令）+ critical alert，不回显内容", async () => {
-    writeMemoryFile("USER.md", "my key is sk-abc123XYZ7890abcd\n");
+    writeMemoryFile("USER.md", "my key is sk-abc123XYZ7890abcdefg\n");
     const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
     const alerts = makeAlerts("pii");
     const sync = createSync({
