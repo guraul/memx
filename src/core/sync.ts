@@ -63,7 +63,19 @@ export interface PiiHit {
 }
 
 const PII_RULES: ReadonlyArray<{ pattern: string; re: RegExp }> = [
-  { pattern: "openai-key", re: /sk-[A-Za-z0-9_-]{10,}/ },
+  // 词边界 + 现实前缀/长度（issue #10）：旧写法 /sk-[A-Za-z0-9_-]{10,}/ 无边界，
+  // 把 `risk-management-foo`、`task-spec-branch-name-verify` 中段出现的 `sk-…` 当成 key，
+  // 一次词形误报就把整机同步 fail-closed 锁死。新规则三重约束：
+  //   ① 前导 `[^A-Za-z0-9_-]`（或行首）= `sk-` 必须是**词的开头**，中段一律不算；
+  //   ② 现行真实前缀 `proj-` / `ant-` 直接放行（`sk-proj-…`、`sk-ant-api03-…`）；
+  //   ③ 其余裸 `sk-` 要求 ≥20 位 base62 且**含大写字母或数字**——真实 key 是随机串，
+  //      全小写的连字符词组（`spec-branch-name-verify`）因此被排除，不必逐个枚举词表。
+  // 明确的取舍：一律小写、无数字的 20+ 位 token 不拦（随机性太弱），本次现场两类误报与经典
+  // `sk-` + 长 base62 形态都能正确区分；要放宽就把 ③ 的正向前瞻删掉。
+  {
+    pattern: "openai-key",
+    re: /(^|[^A-Za-z0-9_-])sk-(?:(?:proj-|ant-)[A-Za-z0-9][A-Za-z0-9-]{5,}|(?=[A-Za-z0-9_-]{20,})[A-Za-z0-9_-]*(?=[A-Z0-9])[A-Za-z0-9_-]*)/,
+  },
   { pattern: "aws-access-key", re: /AKIA[0-9A-Z]{16}/ },
   { pattern: "github-token", re: /ghp_[A-Za-z0-9]{20,}/ },
   { pattern: "github-pat", re: /github_pat_[A-Za-z0-9_]{20,}/ },
@@ -153,6 +165,9 @@ export interface SyncState {
   /** 上一次**成功** pull 记录的远端 branch sha（`git rev-parse origin/<branch>`）。
    *  下次 pull 用它做前置短路比对；旧状态文件没有该字段 → null = 未知 → 走真实 pull（向后兼容）。 */
   lastRemoteSha: string | null;
+  /** 最近一次观测到的**未推提交数**（`git rev-list --count @{u}..HEAD`，issue #12 的可观测字段）。
+   *  老状态文件没有该字段 → 0（向后兼容）。 */
+  unsyncedCommits: number;
 }
 
 export function syncStatePath(): string {
@@ -180,6 +195,7 @@ export function readSyncState(path?: string): SyncState | null {
           ? (raw.lastPiiScan as SyncState["lastPiiScan"])
           : null,
       lastRemoteSha: typeof raw.lastRemoteSha === "string" ? raw.lastRemoteSha : null,
+      unsyncedCommits: typeof raw.unsyncedCommits === "number" ? raw.unsyncedCommits : 0,
     };
   } catch {
     return null;
@@ -346,6 +362,8 @@ export interface SyncStatus {
   lastError: string;
   pendingFiles: number;
   consecutiveFailures: number;
+  /** 未推提交数（issue #12）：>0 = 本地有提交还没出门，push 必须真的执行（不再被 no-change 短路）。 */
+  unsyncedCommits: number;
 }
 
 export interface SyncModule {
@@ -395,9 +413,18 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   let consecutiveFailures = persisted?.consecutiveFailures ?? 0;
   let lastPiiScan = persisted?.lastPiiScan ?? null;
   let lastRemoteSha = persisted?.lastRemoteSha ?? null;
+  let unsyncedCommits = persisted?.unsyncedCommits ?? 0;
 
   const save = (): void => {
-    writeSyncState(statePath, { lastPushAt, lastPullAt, lastError, consecutiveFailures, lastPiiScan, lastRemoteSha });
+    writeSyncState(statePath, {
+      lastPushAt,
+      lastPullAt,
+      lastError,
+      consecutiveFailures,
+      lastPiiScan,
+      lastRemoteSha,
+      unsyncedCommits,
+    });
   };
 
   // 同一事实不重复刷屏：定时拉在离线机器上每 30 分钟失败一次，不去重会把 200 条账本塞满同一行
@@ -470,6 +497,20 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
   }
 
+  /** 未推提交数（issue #12）：`git rev-list --count @{u}..HEAD`。
+   *  **不吞任何错误**：workdir 没 clone / 没有上游 / git 不可用 / 输出不可解析 → null = 未知。
+   *  调用方对 null 的处置各不相同：push 短路要 fail-open（照常 push，绝不再把积压藏起来），
+   *  status 只报已记录值（保持只读、少 spawn）。 */
+  function countUnsyncedCommits(): number | null {
+    if (!existsSync(join(workdir, ".git"))) return null;
+    const r = runner.exec(["git", "rev-list", "--count", "@{u}..HEAD"], workdir);
+    if (!r.ok) return null;
+    const text = r.stdout.trim();
+    if (!/^\d+$/.test(text)) return null;
+    const n = Number(text);
+    return Number.isSafeInteger(n) ? n : null;
+  }
+
   async function push(): Promise<SyncResult> {
     if (!active) return { ok: false, kind: "error", message: "sync 未启用（enabled=false 或 machineName 为空）" };
     try {
@@ -510,19 +551,31 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     }
 
     const status = runner.exec(["git", "status", "--porcelain"], workdir);
-    if (status.ok && status.stdout.trim() === "") {
-      // 通道正常但无改动，同样算恢复：销瞬时故障账（SYNC_PII_BLOCKED / SYNC_CONFLICT 需人工，不在此销）
+    const noFileDiff = status.ok && status.stdout.trim() === "";
+    // issue #12：无文件差异不等于无事可做——断网期攒下的未推提交也必须在这里推出去。
+    // 无条件先数一次未推提交（不看 status），>0 就一定要真的 git push。
+    // count 为 null（workdir 未 clone / 无上游 / git 不可用）→ fail-open：不据此短路，走完整流程。
+    const unsynced = countUnsyncedCommits();
+    if (unsynced !== null) unsyncedCommits = unsynced;
+    if (noFileDiff && unsynced === 0) {
+      // 通道正常但确实无改动，同样算恢复：销瞬时故障账（SYNC_PII_BLOCKED / SYNC_CONFLICT 需人工，不在此销）
       opts.alerts.resolve("SYNC_ERROR");
       opts.alerts.resolve("SYNC_PUSH_FAILED");
       save();
-      return { ok: true, kind: "no-change", message: "无改动" };
+      return { ok: true, kind: "no-change", message: "无改动（无文件差异且无未推提交）" };
     }
 
-    runner.exec(["git", "add", "-A"], workdir);
-    const num = runner.exec(["git", "diff", "--cached", "--numstat"], workdir);
-    const message = `memx@${config.machineName}: ${summarizeNumstat(num.stdout)}`;
-    const commit = runner.exec(commitCommand(message), workdir);
-    if (!commit.ok) return failFast(`commit 失败：${commit.stderr.trim() || commit.reason || "无输出"}`);
+    // 有未推提交但没有新文件差异 → 不造空提交，直接走到 push 把积压送出去。
+    let message = "";
+    if (noFileDiff) {
+      message = `memx@${config.machineName}: 补推 ${unsynced ?? "?"} 个未推提交`;
+    } else {
+      runner.exec(["git", "add", "-A"], workdir);
+      const num = runner.exec(["git", "diff", "--cached", "--numstat"], workdir);
+      message = `memx@${config.machineName}: ${summarizeNumstat(num.stdout)}`;
+      const commit = runner.exec(commitCommand(message), workdir);
+      if (!commit.ok) return failFast(`commit 失败：${commit.stderr.trim() || commit.reason || "无输出"}`);
+    }
 
     let pushRes = runner.exec(["git", "push", "origin", config.branch], workdir);
     if (!pushRes.ok) {
@@ -554,6 +607,8 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     lastPushAt = new Date().toISOString();
     lastError = "";
     consecutiveFailures = 0;
+    // push 成功 = 本地提交已全部出门（含这次顺带补推的积压）→ 归零，别让状态面板继续报旧数
+    unsyncedCommits = 0;
     save();
     return { ok: true, kind: "pushed", message };
   }
@@ -630,11 +685,15 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     consecutiveFailures = 0;
     // 记下这次拉到哪个远端 sha：下次 pull 的前置短路拿它做比对（取不到 → null = 未知，下次真拉）
     lastRemoteSha = readOriginSha();
+    // 顺手刷一次未推提交数（rebase 之后本地积压可能变化；取不到就保持旧值，不拿 null 覆盖）
+    unsyncedCommits = countUnsyncedCommits() ?? unsyncedCommits;
     save();
     const backupNote = backedUp > 0 ? `（${backedUp} 个本地差异件已备份为 .bak.<时间戳>）` : "";
     return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件${backupNote}` };
   }
 
+  /** 只读状态：pendingFiles 现算（只遍历本地镜像），unsyncedCommits 用最近一次观测值
+   *  （不在状态查询里 spawn git——doctor/status 的高频调用不该被网络化的 workdir 拖住）。 */
   function status(): SyncStatus {
     return {
       lastPushAt,
@@ -642,6 +701,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       lastError,
       pendingFiles: listToSync().length,
       consecutiveFailures,
+      unsyncedCommits,
     };
   }
 

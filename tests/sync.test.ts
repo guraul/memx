@@ -69,6 +69,16 @@ const pushOkResponder = (cmd: string[]) => {
   return { ok: true, stdout: "", stderr: "" };
 };
 
+/** 默认「无未推提交」：issue #12 起 push 会先数 `git rev-list --count @{u}..HEAD`，
+ *  假 runner 的裸兜底返回 "" 会让它判成"未知"→ fail-open 走完整流程。想让"真无变化"短路成立
+ *  的测试用这个 responder 打底，再叠自己的分支。 */
+const noUnsyncedResponder = (cmd: string[]) => {
+  const j = cmd.join(" ");
+  if (j.includes("rev-list --count")) return { ok: true, stdout: "0\n", stderr: "" };
+  if (j.includes("status --porcelain")) return { ok: true, stdout: "", stderr: "" };
+  return { ok: true, stdout: "", stderr: "" };
+};
+
 function makeSync(runner: FakeRunner, name: string, workdir?: string, config = SYNC_CONFIG) {
   return createSync({
     config,
@@ -101,7 +111,7 @@ const okState = (sha: string | null) => ({
 describe("scanSensitive", () => {
   it("正例：8 类规则各命中一次，只报行号+规则名", () => {
     const text = [
-      "openai: sk-abc123XYZ7890abcd",
+      "openai: sk-abc123XYZ7890abcdefg",
       "aws: AKIAIOSFODNN7EXAMPLE",
       "gh: ghp_12345678901234567890",
       "pat: github_pat_ABCDEFGHIJ1234567890",
@@ -132,6 +142,38 @@ describe("scanSensitive", () => {
       "sk-tooshort 不是合法 key",
     ].join("\n");
     expect(scanSensitive(text)).toEqual([]);
+  });
+
+  // issue #10 回归：旧规则 /sk-[A-Za-z0-9_-]{10,}/ 无词边界，把中段的 `sk-` 当 key，
+  // 现场就是这两类记忆名（`task-spec-*` / `risk-*`）把整机同步 fail-closed 锁死一天。
+  it("issue #10 反例：词中段 sk-（task-spec-* / risk-*）不得命中 openai-key", () => {
+    const lines = [
+      "name: task-spec-branch-name-verify",
+      "- [task-spec-branch-name-verify](~/.opencode/projects/x/.mem/y.md) - 说明",
+      "risk-management-foo 是风险描述，不是密钥",
+      "disk-usage-report-for-machine-a 同理",
+      "flask-workshop-notes-index-entry",
+      "sk-spec-branch-name-verify", // 词首但 `sk-` 后仍是连字符词组、长度也不足 → 不再当 key
+      "sk-short",
+      "sk-abc123XYZ7890abcd", // 18 位 < 20：旧规则拦、新规则不拦（既有反例语义）
+    ];
+    expect(scanSensitive(lines.join("\n"))).toEqual([]);
+  });
+
+  it("issue #10 正例：真 key 形态（sk-proj- / sk-ant- / 经典 sk- + ≥20 位）仍必须命中", () => {
+    const lines = [
+      "openai key: sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+      "anthropic: sk-ant-api03-abcdefghijklmnopqrstuvwxyz-AAA",
+      "sk-abc123XYZ7890abcdefg",
+      "- sk-ant-abcdefghijklmnopqrstuvwxyz",
+    ];
+    const hits = scanSensitive(lines.join("\n"));
+    expect(hits.map((h) => [h.line, h.pattern])).toEqual([
+      [1, "openai-key"],
+      [2, "openai-key"],
+      [3, "openai-key"],
+      [4, "openai-key"],
+    ]);
   });
 
   it("命中只含 pattern+line 两个字段，绝不回显内容", () => {
@@ -198,7 +240,7 @@ describe("createSync 启停", () => {
 
 describe("push", () => {
   it("命中 PII → 拒推（fake runner 零命令）+ critical alert，不回显内容", async () => {
-    writeMemoryFile("USER.md", "my key is sk-abc123XYZ7890abcd\n");
+    writeMemoryFile("USER.md", "my key is sk-abc123XYZ7890abcdefg\n");
     const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
     const alerts = makeAlerts("pii");
     const sync = createSync({
@@ -214,7 +256,7 @@ describe("push", () => {
     expect(runner.calls).toHaveLength(0);
     const list = alerts.list();
     expect(list.some((a) => a.code === "SYNC_PII_BLOCKED" && a.level === "critical")).toBe(true);
-    expect(JSON.stringify(list)).not.toContain("sk-abc123XYZ7890abcd");
+    expect(JSON.stringify(list)).not.toContain("sk-abc123XYZ7890abcdefg");
   });
 
   it("非快进 → fetch + rebase + 重试一次（命令序列与顺序）", async () => {
@@ -275,20 +317,74 @@ describe("push", () => {
     expect(sync.status().consecutiveFailures).toBe(1);
   });
 
-  it("无改动 → 不 commit 不 push", async () => {
+  it("无改动（无文件差异 + 无未推提交）→ 不 commit 不 push", async () => {
     writeMemoryFile("USER.md", "same\n");
     const workdir = join(HOME, "workdir-nochange");
     mkdirSync(join(workdir, ".git"), { recursive: true });
     writeFileSync(join(workdir, "USER.md"), "same\n", "utf-8");
-    const runner = new FakeRunner((cmd) => {
-      if (cmd.join(" ").includes("status --porcelain")) return { ok: true, stdout: "", stderr: "" };
-      return { ok: true, stdout: "", stderr: "" };
-    });
+    const runner = new FakeRunner(noUnsyncedResponder);
     const sync = makeSync(runner, "nochange", workdir);
     const result = await sync.push();
     expect(result.kind).toBe("no-change");
+    expect(runner.called("rev-list --count")).toBe(true); // issue #12：无条件先数未推提交
     expect(runner.called("commit")).toBe(false);
     expect(runner.called("push")).toBe(false);
+  });
+
+  it("issue #12：无文件差异但有未推提交 → 不 commit 空提交，仍执行 git push 把积压送出去", async () => {
+    writeMemoryFile("USER.md", "same\n");
+    const workdir = join(HOME, "workdir-unsynced");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    writeFileSync(join(workdir, "USER.md"), "same\n", "utf-8"); // 与本地一致 = 无文件差异
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("rev-list --count")) return { ok: true, stdout: "2\n", stderr: "" }; // 断网期攒的 2 个
+      if (j.includes("status --porcelain")) return { ok: true, stdout: "", stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "unsynced", workdir);
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pushed"); // 旧行为此处是 no-change，提交永远滞留
+    expect(result.message).toContain("补推 2 个未推提交");
+    expect(runner.called("push")).toBe(true);
+    expect(runner.called("commit")).toBe(false); // 无新差异，不造空提交
+    expect(runner.called("add -A")).toBe(false);
+  });
+
+  it("issue #12：有文件差异时照旧 add/commit/push，不因未推提交数而改变", async () => {
+    writeMemoryFile("USER.md", "line1\n");
+    const workdir = join(HOME, "workdir-unsynced-plus");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("rev-list --count")) return { ok: true, stdout: "1\n", stderr: "" };
+      return pushOkResponder(cmd);
+    });
+    const sync = makeSync(runner, "unsynced-plus", workdir);
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe("memx@mbp: USER.md +1 行");
+    expect(runner.called("commit -m memx@mbp: USER.md +1 行")).toBe(true);
+    expect(runner.called("push origin main")).toBe(true);
+  });
+
+  it("issue #12：未推提交数不可知（无上游 / 输出不可解析）→ fail-open，不据此短路成无积压", async () => {
+    writeMemoryFile("USER.md", "same\n");
+    const workdir = join(HOME, "workdir-unsynced-unknown");
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    writeFileSync(join(workdir, "USER.md"), "same\n", "utf-8");
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("rev-list --count")) return { ok: false, stdout: "", stderr: "fatal: no upstream" };
+      if (j.includes("status --porcelain")) return { ok: true, stdout: "", stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "unsynced-unknown", workdir);
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pushed");
+    expect(runner.called("push origin main")).toBe(true);
   });
 
   it("成功 → commit message 形如 memx@mbp: USER.md +1 行，status 更新", async () => {
@@ -304,6 +400,7 @@ describe("push", () => {
     const st = sync.status();
     expect(st.lastPushAt).not.toBeNull();
     expect(st.consecutiveFailures).toBe(0);
+    expect(st.unsyncedCommits).toBe(0); // 推成功后归零（#12 可观测字段）
   });
 });
 
@@ -876,6 +973,67 @@ describe("真实 git 端到端（本地 bare 仓当远端，不打桩）", () =>
     const second = await sync.push();
     expect(second.ok).toBe(true);
     expect(second.kind).toBe("no-change");
+    expect(second.message).toContain("无未推提交"); // issue #12：判据写进文案，便于观测
+    expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("2");
+  });
+});
+
+// issue #12 回归（真实 git，不打桩）：断网期本地攒下的提交，恢复后一次 push 必须能清空积压。
+// 场景与现场一致：镜像工作树**没有**新的文件差异（本地记忆文件与 workdir 副本一致），
+// 只有已经存在于 workdir 里的本地提交没推出去。旧行为 → kind=no-change 且 git push 从未执行。
+describe("issue #12：未推提交不再被 no-change 短路（真实 git 端到端）", () => {
+  const hasGit = spawnSync("git", ["--version"]).status === 0;
+
+  it.skipIf(!hasGit)("无文件差异 + 本地有未推提交 → 仍 push，远端追上且 unsyncedCommits 归零", async () => {
+    const remote = join(HOME, "unsynced-origin.git");
+    rmSync(remote, { recursive: true, force: true });
+    const git = (args: string[], cwd?: string): string => {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")} 失败：${r.stderr}`);
+      return r.stdout ?? "";
+    };
+    git(["init", "--bare", remote]);
+    git([`--git-dir=${remote}`, "symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    writeMemoryFile("USER.md", "unsynced A\n");
+    const workdir = join(HOME, "workdir-unsynced-e2e");
+    rmSync(workdir, { recursive: true, force: true });
+    const sync = createSync({
+      config: { ...SYNC_CONFIG, repo: remote },
+      alerts: makeAlerts("unsynced-e2e"),
+      runner: createNodeGitRunner(),
+      workdir,
+      statePath: join(HOME, "state-unsynced-e2e.json"),
+    });
+
+    const first = await sync.push();
+    expect(first.ok).toBe(true);
+    expect(first.kind).toBe("pushed");
+    expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("1");
+
+    // 断网模拟：直接在 workdir 里落一个本地提交，**不 push**。
+    // ⚠️ 提交内容必须同时等于本地记忆文件（`writeMemoryFile`）——否则 push 时 mirror 拷贝会制造
+    // 新的文件差异，这条路就不会经过"无文件差异但有待推提交"的目标分支。
+    writeMemoryFile("MEMORY.md", "offline memory\n");
+    writeFileSync(join(workdir, "MEMORY.md"), "offline memory\n", "utf-8");
+    git(["add", "-A"], workdir);
+    git(["-c", "user.name=memx-sync", "-c", "user.email=memx@localhost", "commit", "-m", "offline commit"], workdir);
+    expect(git(["rev-list", "--count", "@{u}..HEAD"], workdir).trim()).toBe("1");
+    expect(git(["status", "--porcelain"], workdir).trim()).toBe(""); // 前置条件：镜像工作树无文件差异
+    expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("1"); // 远端仍停在旧提交
+
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pushed"); // 旧行为：no-change，提交永久滞留
+    expect(result.message).toContain("补推 1 个未推提交");
+    // 积压真的到远端了
+    expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("2");
+    expect(git([`--git-dir=${remote}`, "show", "main:MEMORY.md"]).trim()).toBe("offline memory");
+    expect(sync.status().unsyncedCommits).toBe(0);
+
+    // 再推一次：这回才是真·无变化（无文件差异 + 无未推提交）→ no-change 且不发 push
+    const again = await sync.push();
+    expect(again.kind).toBe("no-change");
     expect(git([`--git-dir=${remote}`, "rev-list", "--count", "main"]).trim()).toBe("2");
   });
 });

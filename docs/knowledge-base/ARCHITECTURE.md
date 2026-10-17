@@ -159,9 +159,12 @@ push 触发点（两处，均 void 不 await）：
 
 push 流程：scanSensitive(全部待推文件) → 命中即拒推 + SYNC_PII_BLOCKED critical
         → withFileLock(.memx-sync.lock, ttl 10min / 等锁 5min) 内：
-             fetch → copy → commit（身份兜底）→ push
+             copy → git status（文件差异）+ git rev-list --count @{u}..HEAD（未推提交，issue #12）
+             无文件差异且无未推提交 → no-change 收工
+             有未推提交（哪怕无文件差异）→ 照样 push（不造空提交）
+             有差异 → add → commit（身份兜底）→ push
              被拒（非快进）→ fetch + rebase + 重试一次 → 再失败 SYNC_PUSH_FAILED warn
-        → 状态写 memx-sync-state.json → 成功 resolve 报警
+        → 状态写 memx-sync-state.json（含 unsyncedCommits）→ 成功 resolve 报警
 
 pull 流程：锁内 fetch → 逐文件比对（远端优先）
         → 本地有差异先存 <file>.bak.<ts>（每文件留 5 份，.bak. 不入镜像）

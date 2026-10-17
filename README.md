@@ -268,8 +268,12 @@ workdir with the remote first — use that mode before the *first* pull on a new
 can only say "remote not fetched". `pnpm sync:op -- status|pull|push` runs a single manual sync through the
 same code path as the plugin; `--machine=<name>` forces `{enabled: true, machineName: <name>}` **without touching
 the config file** — that's how a machine does its first push/pull before sync is switched on. Pull is remote-wins: before overwriting a local file whose content differs,
-the local copy is saved as `<file>.bak.<ts>` (5 kept per file). A PII gate (8 rule types) blocks any push
-containing tokens/keys — hits are reported as file+line+rule only, never echoed. Deliberately not in v1:
+the local copy is saved as `<file>.bak.<ts>` (5 kept per file). `pnpm sync:op pii` is a read-only PII
+self-check that lists the hits as file / line / rule name only. A PII gate (8 rule types) blocks any push
+containing tokens/keys — hits are reported as file+line+rule only, never echoed. Push first counts
+`git rev-list --count @{u}..HEAD`, so unpushed commits are pushed even when no file content changed
+(commits accumulated while offline no longer get stranded); that count is stored and shown by `doctor` /
+`sync:op status`. Deliberately not in v1:
 delete propagation, per-line merge (same file edited on both machines relies on git rebase, which aborts to
 manual on conflict), pull-vs-write locking (the `.bak` copy is the safety net there; sync ops are serialized against each other by `.memx-sync.lock`).
 
