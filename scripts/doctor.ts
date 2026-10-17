@@ -84,14 +84,16 @@ void (async () => {
         console.log(
           `sync.status: lastPushAt=${state.lastPushAt ?? "从未"} lastPullAt=${state.lastPullAt ?? "从未"} consecutiveFailures=${state.consecutiveFailures} lastError=${state.lastError || "无"}`,
         );
+        // issue #12：未推提交数要可见——否则"断网期攒的提交推不出去"会一直伪装成"同步正常"
+        console.log(`sync.unsyncedCommits: ${state.unsyncedCommits ?? 0}`);
       } else {
         console.log("sync.status: 未取到（尚未发生过 push/pull）");
       }
       const pii = state?.lastPiiScan;
       console.log(
         pii
-          ? `sync.pii: ${pii.hits} 处命中 / ${pii.files} 个文件 @ ${pii.at}`
-          : "sync.pii: 未取到（尚未扫描）",
+          ? `sync.pii: ${pii.hits} 处命中 / ${pii.files} 个文件 @ ${pii.at}；明细自查：pnpm sync:op pii`
+          : "sync.pii: 未取到（尚未扫描）；自查：pnpm sync:op pii",
       );
     }
   } catch {

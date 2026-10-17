@@ -34,7 +34,7 @@ OpenCode V2 双轨记忆插件（Track 1 用户风格 + Track 2 项目记忆）�
 
 ## 强制规定（完整红线清单见 CONVENTIONS.md §4）
 
-1. **提交前必过两项**：`pnpm run typecheck` 0 错误 + `pnpm test` 全绿（基线 **25 文件 / 359 用例**，低于即回归）。**不要 install、不要动 lockfile。**
+1. **提交前必过两项**：`pnpm run typecheck` 0 错误 + `pnpm test` 全绿（基线 **25 文件 / 366 用例**，低于即回归）。**不要 install、不要动 lockfile。**
 2. **包管理只用 pnpm**（全局规则）；不用 npm/yarn/bun/npx。
 3. **宿主入口只 default 导出**：`src/hosts/opencode/index.ts` 多导出任何命名函数都会被宿主当插件调用而 crash（`plugin config hook failed`）；`~/.config/opencode/plugins/memx.ts` 的 re-export 同理只导 default。
 4. **core 层零宿主依赖**：`src/core/` 禁止 import `@opencode-*`；core 也不反向依赖宿主持有的实例（AlertStore 由宿主注入、面包屑字符串由宿主算好传入）。
@@ -61,11 +61,12 @@ OpenCode V2 双轨记忆插件（Track 1 用户风格 + Track 2 项目记忆）�
 ## 常用命令（详情见 OPERATIONS.md）
 
 ```bash
-pnpm test            # vitest run（基线 25 文件 / 359 用例）
+pnpm test            # vitest run（基线 25 文件 / 366 用例）
 pnpm run typecheck   # tsc --noEmit
 pnpm mem <slug|list|search|get|status|write|forget> [...]  # 对外 CRUD 面（#13）：只经 core 既有函数，退出码 0/1/2
-pnpm run doctor      # 只读状态面板：alerts / memory files / opencode diag / sync
+pnpm run doctor      # 只读状态面板：alerts / memory files / opencode diag / sync（含 sync.unsyncedCommits）
 pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永不 push）
 pnpm sync:op -- status|pull|push|both [--machine=<name>]
+pnpm sync:op pii     # 只读 PII 自查：命中明细 file / 行号 / 规则名（绝不回显内容）
 pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
 ```

@@ -1,6 +1,6 @@
 # modules/sync.md — 多机云同步
 
-> 最后更新: 2026-10-15 · commit `0685bed`
+> 最后更新: 2026-10-17 · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）
 
 ## 职责
 
@@ -10,12 +10,12 @@
 
 | 文件 | 职责 |
 |------|------|
-| `src/core/sync.ts`（651 行） | 全部编排：`GitRunner` / `scanSensitive` / `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
+| `src/core/sync.ts`（717 行） | 全部编排：`GitRunner` / `scanSensitive` / `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
 | `src/core/config.ts` | `MemxSyncConfigSchema`（enabled / repo / branch / machineName / intervalMinutes） |
 | `src/hosts/opencode/index.ts` | 接线：setup 建 sync、启动拉一次、定时拉、两个 push 触发点 |
-| `scripts/sync-op.ts` | 手工通道（status / pull / push / both，`--machine=<name>` 覆盖） |
+| `scripts/sync-op.ts` | 手工通道（status / pii / pull / push / both，`--machine=<name>` 覆盖） |
 | `scripts/sync-dry-run.ts` | 只读预览（`-- --fetch` 先取远端） |
-| `scripts/doctor.ts` | 面板 sync 段（config / pendingFiles / status / pii） |
+| `scripts/doctor.ts` | 面板 sync 段（config / pendingFiles / status / unsyncedCommits / pii） |
 
 ## 配置（`~/.opencode/memx.config.json` 的 `sync` 段）
 
@@ -46,10 +46,15 @@
 1. scanSensitive(全部待推文件)        ← 锁外做
    命中 → 拒推 + SYNC_PII_BLOCKED critical（只报行号+规则名，绝不回显内容）
 2. withFileLock(~/.opencode/.memx-sync.lock, ttl 10min / 等锁 5min)
-     fetch → copy 到 workdir → commit → push
-     push 被拒（非快进）→ fetch + rebase + 重试一次
+     copy 到 workdir
+     → git status --porcelain（有无文件差异）
+     → git rev-list --count @{u}..HEAD（未推提交数，issue #12；取不到 = null → fail-open 不据此短路）
+     → 无文件差异 **且** 未推提交 = 0 → kind="no-change" 收工（销 SYNC_ERROR / SYNC_PUSH_FAILED）
+     → 有文件差异：add → commit
+     → 有未推提交但无文件差异：不造空提交，直接进入 push（补推）
+     → push 被拒（非快进）→ fetch + rebase + 重试一次
      再失败 → SYNC_PUSH_FAILED warn
-3. 写 memx-sync-state.json；成功路径 resolve("SYNC_ERROR") / resolve("SYNC_PUSH_FAILED")
+3. 写 memx-sync-state.json（含 unsyncedCommits）；成功路径 resolve("SYNC_ERROR") / resolve("SYNC_PUSH_FAILED")
 ```
 
 ## pull 流程
@@ -82,14 +87,21 @@
 | 路径 | 内容 |
 |------|------|
 | `~/.opencode/memx-sync-repo/` | Git workdir（不存在则 clone，存在则 fetch） |
-| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{hits,files,at}` / `lastRemoteSha`（上次成功 pull 的远端 sha；**旧文件无此字段 = null = 未知 → 走真实 pull**） |
+| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{hits,files,at}` / `lastRemoteSha`（上次成功 pull 的远端 sha；**旧文件无此字段 = null = 未知 → 走真实 pull**） / `unsyncedCommits`（最近一次观测到的未推提交数；**旧文件无此字段 = 0**，issue #12） |
 | `~/.opencode/.memx-sync.lock` | 串行闸门（`withFileLock`，ttl 10 分钟 / 等锁上限 5 分钟） |
 
 ## PII 脱敏闸门（`scanSensitive`）
 
 8 类规则：`openai-key` / `aws-access-key` / `github-token` / `github-pat` / `slack-token` / `jwt` / `private-key` / `env-assignment`。
 
+`openai-key` **必须带词边界**（issue #10 教训）：旧写法 `/sk-[A-Za-z0-9_-]{10,}/` 会把
+`task-spec-branch-name-verify`、`risk-management-foo` 这类普通词的**中段** `sk-…` 判成 key，
+一次词形误报就把整机同步 fail-closed 锁死一整天。现行规则 =
+`(^|[^A-Za-z0-9_-])sk-` 词边界 + 真实前缀（`proj-` / `ant-`）放行 + 裸 `sk-` 要求 ≥20 位 base62 且含大写或数字。
+**改这条规则必须同时补正反例**（`tests/sync.test.ts` 的 `issue #10` 两条用例）。
+
 命中即**拒推** + `SYNC_PII_BLOCKED` critical alert，报告只含**行号 + 规则名**，绝不回显命中内容。
+用户/运维自查走 `pnpm sync:op pii`（同一份 `scanSensitive`，列出 file / 行号 / 规则名，同样不回显内容）。
 
 ## 关键设计
 
@@ -103,12 +115,15 @@
 
 ```
 pnpm sync:op status                       只读：config + 待同步清单 + PII + 近况（连 fetch 都不做）
+pnpm sync:op pii                          只读：PII 自查明细（file / 行号 / 规则名，绝不回显内容）
 pnpm sync:op -- pull  [--machine=prod]    拉取（远端优先，本地差异自动 .bak.<ts>）
 pnpm sync:op -- push  [--machine=prod]    推送（PII 命中即拒推）
 pnpm sync:op -- both  [--machine=prod]    先拉后推
 ```
 
-- **与插件同一条代码路径**（`createSync` 的 push/pull），不是第二套实现。
+- **与插件同一条代码路径**（`createSync` 的 push/pull + `scanSensitive`），不是第二套实现。
+- `pii`（issue #10 DoD ③）= 用户不必读源码的自查入口：闸门只存/只报行号+规则名，此命令用同一份
+  `scanSensitive` 把命中明细列成 `file:line  规则名`，**绝不回显命中内容**（不打印那一行文字）。
 - `pull` / `both` **强制真实 pull**（`sync.pull({ force: true })`）——人工跑就是要把远端搬下来，不参与"远端无变化则跳过"。
 - `--machine=<name>` = 显式覆盖 `{enabled:true, machineName:<name>}`，用于"配置还没开、但要人工跑一次首推/首拉"（prod 首次合并）；**它不改配置文件**，运行中的宿主不受影响。不传则完全按配置（未启用直接拒绝）。
 - 存在的理由：`createSync` 对 `enabled=false` 是硬拒绝，而"先开配置再推"会让运行中的宿主开始自动同步——手工通道把这两件事解耦。
@@ -132,9 +147,10 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 1. **`.ts` 扩展名**：`sync.ts` 会被 `scripts/*.ts` 用 `node --experimental-strip-types` 直载——相对 import 必须带 `.ts`，缺了 tsc/vitest 都发现不了（只有 `tests/scripts-smoke.test.ts` 真跑才炸）。
 2. **push 必须保持"不 await"**：写盘路径上任何 await sync 都会把 git 网络延迟带进记忆写入。
 3. **PII 扫描必须在锁外**：锁窗口只含 git 动作（持锁做全量扫描会拖长临界区）。
-4. 新增可自愈的失败码时，在成功分支补 `alerts.resolve(code)`，否则账本永远挂着旧账。
-5. 镜像范围改动要同步 `walkMirror` 与测试（`.trash/`、`.bak.` 的排除是有原因的，别顺手放开）。
-6. 真实 git 端到端测试用本地 bare 仓，**不要**改成联网远端（CI 无凭据）。
+4. **`no-change` 必须同时满足"无文件差异 + 无未推提交"**（issue #12）：只看 `git status --porcelain` 会把断网期攒下的提交静默滞留；`rev-list` 取不到数时 fail-open（宁可多 push 一次，不可藏积压）。
+5. 新增可自愈的失败码时，在成功分支补 `alerts.resolve(code)`，否则账本永远挂着旧账。
+6. 镜像范围改动要同步 `walkMirror` 与测试（`.trash/`、`.bak.` 的排除是有原因的，别顺手放开）。
+7. 真实 git 端到端测试用本地 bare 仓，**不要**改成联网远端（CI 无凭据）。
 
 ## 测试
 

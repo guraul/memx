@@ -253,7 +253,10 @@ pnpm 有同名内建命令。想查看 memx 健康状态而不触发提炼时使
 拉取是**远端优先**：覆盖前若本地内容与远端不同，先把本地存成 `<file>.bak.<ts>`（每文件保留 5 份）。
 `pnpm sync:op -- status|pull|push` 走**与插件同一条代码路径**做一次手工同步；`--machine=<name>` 会显式
 覆盖成 `{enabled:true, machineName:<name>}` 但**不改配置文件**——这是"同步还没开、先人工跑一次首推/首拉"的通道。
+`pnpm sync:op pii` 是只读的 PII 自查：列出命中明细 **file / 行号 / 规则名**（绝不回显内容）。
 PII 闸门（8 类规则）拦截含 token/密钥的推送——命中只报 文件+行号+规则名，绝不回显内容。
+push 先数 `git rev-list --count @{u}..HEAD`：**无文件差异但有未推提交时照样 push**（断网期攒下的提交不再滞留）；
+未推提交数落进状态文件，`doctor` / `sync:op status` 可见。
 v1 有意不做：删除传播、逐行合并（同一文件两台机器都改靠 git rebase，冲突即 abort 留人工）。
 
 ## 故障排查
@@ -268,7 +271,7 @@ v1 有意不做：删除传播、逐行合并（同一文件两台机器都改�
 
 ```bash
 pnpm install       # 安装依赖
-pnpm test          # 运行测试（基线：24 文件 / 338 用例全绿，低于即回归）
+pnpm test          # 运行测试（基线：25 文件 / 366 用例全绿，低于即回归）
 pnpm run typecheck # 类型检查
 ```
 

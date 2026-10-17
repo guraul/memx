@@ -146,7 +146,7 @@ index.ts ──→ session-llm.ts ──→ context-shape.ts
 任何 `recordAlert(level, code, message)` → `AlertStore.append`（`~/.opencode/memx-alerts.json`，封顶 200、剪龄 7 天）+ `diag.alerts` 只写镜像 → 面包屑 / doctor / `memx_status` 都读 store。
 
 **多机云同步（阶段 4 第二半，默认关）**：
-启用后 setup 时 `void sync.pull()` 一次 + 每 `intervalMinutes` 定时拉；**推触发点** = Track 2 提炼写盘成功后 + `memory_write` 工具成功后（`void sync.push()` 不 await）→ `push()` 先 `scanSensitive()` 全量 PII 扫描（命中即拒推 + critical 报警）→ `.memx-sync.lock` 串行闸门内做 git 动作（镜像 = USER.md + MEMORY.md + `.mem/**/*.md`，排除 `.trash/`、`.bak.`）→ 状态落 `memx-sync-state.json`。pull 远端优先，覆盖前把本地差异件存 `.bak.<ts>`。
+启用后 setup 时 `void sync.pull()` 一次 + 每 `intervalMinutes` 定时拉；**推触发点** = Track 2 提炼写盘成功后 + `memory_write` 工具成功后（`void sync.push()` 不 await）→ `push()` 先 `scanSensitive()` 全量 PII 扫描（命中即拒推 + critical 报警；自查走 `pnpm sync:op pii`，只列 file/行号/规则名）→ `.memx-sync.lock` 串行闸门内做 git 动作（镜像 = USER.md + MEMORY.md + `.mem/**/*.md`，排除 `.trash/`、`.bak.`；`no-change` 判据 = 无文件差异**且** `rev-list --count @{u}..HEAD` = 0，未推提交不再被短路）→ 状态落 `memx-sync-state.json`（含 `unsyncedCommits`）。pull 远端优先，覆盖前把本地差异件存 `.bak.<ts>`。
 
 **显式出口**：用户说"记一下" → `memory_write` 工具 → `memory-write.writeProjectMemory` → 与后台提炼同一条写路（同锁同单遍）→ 成功后同样触发 `sync.push()`。
 
