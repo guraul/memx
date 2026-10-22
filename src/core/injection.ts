@@ -38,7 +38,7 @@ export interface InjectionSources {
   memory?: string | null | undefined;
 }
 
-/** 与宿主 SystemPart 结构兼容的最小文本 part（core 不 import @opencode/ai，hook 现场转型）。 */
+/** 与宿主 SystemPart 结构兼容的最小文本 part（core 不 import 宿主自己的 AI 包，hook 现场转型）。 */
 export interface InjectionPart {
   type: "text";
   text: string;
