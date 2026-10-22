@@ -46,12 +46,17 @@ interface Harness {
   logs: string[];
   agent: DshAgent;
   emit(type: string, turn?: number, extra?: Record<string, unknown>): void;
+  /** 改宿主兜底目录（模拟"没有会话目录记录"时 cwd 变化）。 */
+  setDefaultDirectory(dir: string): void;
 }
 
 function makeHarness(options?: {
   agentOptions?: { provider?: string; model?: string } | undefined;
   llmText?: string;
   cwd?: string;
+  /** 按会话 id 指定 cwd（多会话测试用）。 */
+  cwdBySession?: Record<string, string>;
+  defaultDirectory?: string;
 }): Harness {
   const sections: DshPromptSection[] = [];
   const tools: DshToolDefinition[] = [];
@@ -59,6 +64,7 @@ function makeHarness(options?: {
   const calls: DshGenerateOptions[] = [];
   const injected: unknown[] = [];
   const logs: string[] = [];
+  let defaultDirectory = options?.defaultDirectory ?? "/fallback";
 
   const agent: DshAgent = {
     id: "sess-1",
@@ -83,8 +89,10 @@ function makeHarness(options?: {
       },
     },
     workingDirectory: {
-      get: () => options?.cwd ?? "/work/proj-a",
-      defaultDirectory: "/fallback",
+      get: (session) => options?.cwdBySession?.[session.id] ?? options?.cwd ?? "/work/proj-a",
+      get defaultDirectory() {
+        return defaultDirectory;
+      },
     },
     llm: {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -120,6 +128,9 @@ function makeHarness(options?: {
         data: { ...(turn !== undefined ? { turn } : {}), ...(extra ?? {}) },
       };
       for (const listener of listeners) listener(agent.session, event);
+    },
+    setDefaultDirectory(dir) {
+      defaultDirectory = dir;
     },
   };
 }
@@ -227,6 +238,44 @@ describe("注入（每会话一次、字节恒定）", () => {
     const second = evaluate({ agent: other });
     expect(second).not.toBe(first);
     expect(second).toContain("USER-SECOND-SESSION");
+  });
+
+  it("拿不到会话键时绝不缓存：两次求值各自重算（cwd 变了就跟着变）", () => {
+    const h = makeHarness({ defaultDirectory: "/work/proj-a" });
+    apply(h.ctx, {});
+    const evaluate = h.sections[0]!.text as (c: unknown) => string;
+
+    const first = evaluate(undefined);
+    expect(first).toContain(`## ${PROJ_SLUG}`);
+    expect(first).not.toContain(OTHER_SLUG);
+
+    // 兜底目录换了：若走全局兜底缓存，这里还会是 A 项目的旧文本（串项目）
+    h.setDefaultDirectory("/work/other");
+    const second = evaluate(undefined);
+    expect(second).toContain(`## ${OTHER_SLUG}`);
+    expect(second).not.toContain("本项目专属钩子");
+  });
+
+  it("两个不同 agent（不同 cwd）各自拿到自己的小节，互不串味", () => {
+    const h = makeHarness({
+      cwdBySession: { "sess-1": "/work/proj-a", "sess-2": "/work/other" },
+    });
+    apply(h.ctx, {});
+    const evaluate = h.sections[0]!.text as (c: unknown) => string;
+    const other = { ...h.agent, id: "sess-2", session: { id: "sess-2" } } as DshAgent;
+
+    const a = evaluate({ agent: h.agent });
+    const b = evaluate({ agent: other });
+
+    expect(a).toContain(`## ${PROJ_SLUG}`);
+    expect(a).not.toContain(OTHER_SLUG);
+    expect(b).toContain(`## ${OTHER_SLUG}`);
+    expect(b).not.toContain(PROJ_SLUG);
+    expect(b).not.toContain("本项目专属钩子");
+
+    // 各自命中自己的缓存，仍不串
+    expect(evaluate({ agent: h.agent })).toBe(a);
+    expect(evaluate({ agent: other })).toBe(b);
   });
 });
 

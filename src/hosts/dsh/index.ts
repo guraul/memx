@@ -195,9 +195,6 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
   const injectionCache = new InjectionSourceCache();
   const sessions = new Map<string, SessionState>();
 
-  /** 看不到 agent 时的兜底键（诊断装配、测试里没有 agent 的场景）。 */
-  const fallbackInjectionKey = {};
-
   const log = (message: string): void => {
     try {
       ctx.logger?.warn?.(`[memx] ${message}`);
@@ -232,6 +229,7 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
   };
 
   // ── ① 注入 ────────────────────────────────────────────────────────────────
+  /** 会话键 → 注入文本。**只会有键的装配才落进来**（无键绝不缓存，见 injectionTextFor）。 */
   const injectedText = new WeakMap<object, string>();
 
   const buildInjectionText = (agent: DshAgent | undefined): string => {
@@ -249,10 +247,19 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
    * 每个会话只算一次：键取 `context.agent`（官方装配里 `scope` 与 `agent` 同一个对象）。
    * 之后同一会话的每次装配都拿同一串字节——文件后来变了也不重算（本会话新写的记忆
    * 本会话不可见，下一会话生效，这是 issue 拍板的语义）。
+   *
+   * ⚠️ 拿不到会话键时**绝不落缓存**：`agent`/`scope` 都缺失意味着这是全局兜底，
+   * 一旦缓存就会所有会话共用一条文本（A 项目的小节串给 B 项目）。宁可每次重算
+   * （slug 也取不到 → 只出协议 + 画像），也不能串项目。
    */
   const injectionTextFor = (context: DshAssembleContext | undefined): string => {
     try {
-      const key: object = context?.agent ?? context?.scope ?? fallbackInjectionKey;
+      const key = context?.agent ?? context?.scope;
+      if (key === undefined) {
+        diag.injections++;
+        diag.updatedAt = new Date().toISOString();
+        return buildInjectionText(context?.agent);
+      }
       const cached = injectedText.get(key);
       if (cached !== undefined) return cached;
       const text = buildInjectionText(context?.agent);
