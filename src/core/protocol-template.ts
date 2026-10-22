@@ -17,7 +17,7 @@ import { CATEGORIES, CONFIDENCES, SOURCES } from "./types.ts";
 import { MEMORY_SOURCES, MEMORY_TYPES } from "./memory-types.ts";
 
 /** 协议版本。写进文件末尾，改动协议文本时递增——install.sh 用它判断是否需要刷新。 */
-export const PROTOCOL_VERSION = "1.1.0";
+export const PROTOCOL_VERSION = "1.2.0";
 
 /** 落盘文件名（相对 $OCP_DATA_DIR，即 ~/.opencode/）。 */
 export const PROTOCOL_FILE_NAME = "memx-protocol.md";
@@ -43,6 +43,13 @@ export const PROTOCOL_TEMPLATE = `# memx signal protocol
 
 \`memx\` reads machine signals out of your raw reply text: anything you write inside an HTML
 comment is captured, refined and written to long-term memory. You never manage it again.
+
+## What is already in your context
+
+This protocol is injected together with a **user profile** and the **current project's
+memory index**. That is live memory — answer from it directly. Only open the underlying
+\`~/.opencode/projects/*/.mem/*.md\` files when you need detail the index does not show, and
+do not ask the user for facts that are already listed there.
 
 ## Rules
 
