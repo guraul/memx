@@ -1,4 +1,4 @@
-// 注入来源的文件读取层单测（core/injection-source.ts）：路径解析 + mtime/size 缓存失效。
+// 注入来源的文件读取层单测（core/pipeline/injection-source.ts）：路径解析 + mtime/size 缓存失效。
 //
 // 缓存存在的理由是 hook 每 step 触发一次（一轮回复十几次）。这里不测"缓存命中率"这种
 // 性能指标，而是测**失效正确性**：改了文件必须看得见，删了文件必须读不到，
@@ -10,7 +10,7 @@ import {
   InjectionSourceCache,
   getProtocolPath,
   readInjectionSources,
-} from "../src/core/injection-source.ts";
+} from "../src/core/pipeline/injection-source.ts";
 
 const HOME = "/tmp/opencode-memx-test-home-inject";
 

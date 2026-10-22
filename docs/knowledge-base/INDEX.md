@@ -35,7 +35,7 @@ OpenCode V2 双轨记忆插件：主 AI 在回复里用 HTML 注释打信号标�
 | 记忆库健康检查（死链/孤儿，auto-fix ≤3） | core | `src/core/health/memory-health.ts` |
 | 报警账本（单一事实源 + 剪龄 + 销账） | core | `src/core/alerts.ts` |
 | 多机云同步（Git 镜像 + PII 闸门 + dry-run） | core | `src/core/sync.ts` |
-| system prompt 注入装配（三块、200 行/25KB 上限、agent 闸门） | core | `src/core/injection.ts` + `injection-source.ts` |
+| system prompt 注入装配（三块、200 行/25KB 上限、agent 闸门） | core | `src/core/injection.ts` + `pipeline/injection-source.ts` |
 | context hook 判定（子会话整体替换 vs 其余 append） | hosts | `src/hosts/opencode/context-hook.ts` |
 | 信号协议唯一真源（v1.1.0） | core | `src/core/protocol-template.ts` |
 | 配置加载（memx.config.json + Zod 默认值） | core | `src/core/config.ts` |
@@ -72,7 +72,7 @@ memx/
 │   │   ├── config.ts             # memx.config.json 加载（含 sync 段）+ 默认值
 │   │   ├── protocol-template.ts  # 信号协议唯一真源（PROTOCOL_VERSION=1.1.0）
 │   │   ├── injection.ts          # 注入装配纯函数（顺序/上限/截断提示/闸门真值表）
-│   │   ├── injection-source.ts   # 三块来源文件读取 + stat 缓存
+│   │   ├── pipeline/             # 宿主无关流水线（#17）：session.ts + injection-source.ts
 │   │   ├── alerts.ts             # 报警账本（文件单一事实源 + 面包屑/面板格式化）
 │   │   ├── sync.ts               # 多机云同步（GitRunner 注入 + PII 闸门 + dry-run 报告）
 │   │   ├── memory-write.ts       # memory_write 工具的 core 写路（含确定性文件名哈希）
@@ -118,7 +118,7 @@ refine/memory-refinement.ts  → memory-types + memory-prompts + store/memory-md
 health/memory-health.ts      → store/memory-md
 memory-write.ts              → memory-types + store/memory-md + store/lock
 sync.ts                      → config(类型) + alerts(类型) + store/lock
-injection-source.ts          → protocol-template + store/user-md + store/memory-md + injection
+pipeline/injection-source.ts  → protocol-template + store/user-md + store/memory-md + injection
 ```
 
 hosts 壳（单向，严禁回环）：
@@ -157,7 +157,7 @@ index.ts ──→ session-llm.ts ──→ context-shape.ts
 | 加/改提炼字段（Track 1） | `core/types.ts` → `refine/prompts.ts` → `protocol-template.ts` → `store/user-md.ts`（如需落盘）→ 对应测试 |
 | 加/改提炼字段（Track 2） | `core/memory-types.ts` → `refine/memory-prompts.ts` → `protocol-template.ts` → `store/memory-md.ts` + `health/memory-health.ts`（frontmatter 解析）→ `memory-write.ts` + index.ts 工具 schema |
 | 改触发条件/节流 | `hosts/opencode/index.ts`（事件循环、flushAll）+ `core/llm/throttle.ts` + `core/config.ts`（throttleMinutes） |
-| 改注入内容/顺序/上限 | `core/injection.ts` + `injection-source.ts` + `hosts/opencode/context-hook.ts` + index.ts（诊断计数） |
+| 改注入内容/顺序/上限 | `core/injection.ts` + `core/pipeline/injection-source.ts` + `hosts/opencode/context-hook.ts` + index.ts（诊断计数） |
 | 加一个工具 | `hosts/opencode/index.ts` 的 `ctx.tool.transform`（参照 memory_write 的 `codemode:false`） |
 | 改记忆文件格式 | `store/memory-md.ts`（writeMemoryFile/parse/serialize）+ `health/memory-health.ts` |
 | 改提炼模型 | `~/.opencode/memx.config.json` 的 `refinementModel`（即时生效）+ `hosts/opencode/session-llm.ts` 的 `toModelRef` |

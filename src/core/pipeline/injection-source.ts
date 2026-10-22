@@ -9,13 +9,18 @@
 // 注意 mtimeMs 精度：同一毫秒内的两次写入理论上会被误判为没变。memx 的写盘是
 // writeFileSync(tmp) + renameSync()，rename 会换 inode 且 mtime 必然前进，实测不存在
 // 这个窗口；而为了它加 inode 比较属于过度设计。
+//
+// 位置说明（#17 A 步）：本文件原先在 `core/injection-source.ts`，与 `core/pipeline/` 的
+// 会话流水线同属"多宿主共用"的一层，故一并搬进 pipeline/。导入方（opencode 宿主、
+// 单测）跟着改路径，语义与缓存行为不变；新增的 `readInjectionSourcesForSlug` 是给
+// **只注入当前项目小节**的宿主（DSH）用的增量能力，opencode 仍读整份 MEMORY.md。
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { PROTOCOL_FILE_NAME } from "./protocol-template.ts";
-import { getUserMdPath } from "./store/user-md.ts";
-import { getMemoryIndexPath } from "./store/memory-md.ts";
-import type { InjectionSources } from "./injection.ts";
+import { PROTOCOL_FILE_NAME } from "../protocol-template.ts";
+import { getUserMdPath } from "../store/user-md.ts";
+import { getMemoryIndexPath, parseMemoryIndex, serializeMemoryIndex } from "../store/memory-md.ts";
+import type { InjectionSources } from "../injection.ts";
 
 interface CacheEntry {
   mtimeMs: number;
@@ -82,5 +87,39 @@ export function readInjectionSources(cache: InjectionSourceCache): InjectionSour
     protocol: cache.read(getProtocolPath()),
     user: cache.read(getUserMdPath()),
     memory: cache.read(getMemoryIndexPath()),
+  };
+}
+
+/**
+ * 从整份 MEMORY.md 里只摘出 `## <slug>` 这一节（标题 + 指针行），原样保留条目顺序。
+ *
+ * 为什么要有这个函数：DSH 宿主的注入面是"当前项目一节"，而不是整份索引——索引里其他
+ * 项目的条目对本会话只是噪声（且越长越挤占 system）。抽取是纯函数 + 不排序、不改写，
+ * 所以同一份索引在任何时刻都渲染出同一段字节。
+ *
+ * 非受管行（`extras`：健康日志注释、用户手写说明）**不注入**：它们不是给模型的记忆，
+ * 而且带时间戳的话会破坏"会话内字节恒定"。
+ */
+export function memorySectionForSlug(indexContent: string | null | undefined, slug: string): string | null {
+  if (typeof indexContent !== "string" || indexContent.trim() === "") return null;
+  if (slug.trim() === "") return null;
+  const section = parseMemoryIndex(indexContent).sections.find((s) => s.slug === slug);
+  if (!section || section.entries.length === 0) return null;
+  const rendered = serializeMemoryIndex({
+    preamble: [],
+    sections: [{ slug: section.slug, entries: section.entries }],
+  }).trim();
+  return rendered === "" ? null : rendered;
+}
+
+/**
+ * 只注入"协议 + 画像 + 当前 slug 一节"的变体（DSH 宿主用）。
+ * 协议与画像的读法与 `readInjectionSources` 完全一致（同一个 cache、同一份文件）。
+ */
+export function readInjectionSourcesForSlug(cache: InjectionSourceCache, slug: string): InjectionSources {
+  return {
+    protocol: cache.read(getProtocolPath()),
+    user: cache.read(getUserMdPath()),
+    memory: memorySectionForSlug(cache.read(getMemoryIndexPath()), slug),
   };
 }

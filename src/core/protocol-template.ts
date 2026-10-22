@@ -24,7 +24,7 @@ export const PROTOCOL_FILE_NAME = "memx-protocol.md";
 
 /** 写进 opencode.json 的 instructions 条目（相对 $HOME 的路径展开形式）。
  *  ⚠️ v2.0.26 上这是**死字段**（宿主不从这里读文件），只为向前兼容保留；真正的注入
- *  由插件的 `context` hook 完成，路径由 core/injection-source.ts 解析。 */
+ *  由插件的 `context` hook 完成，路径由 core/pipeline/injection-source.ts 解析。 */
 export const PROTOCOL_INSTRUCTION = "~/.opencode/" + PROTOCOL_FILE_NAME;
 
 /** 累积数据（与协议分开注入）：风格画像 / 项目记忆索引。同样只是 instructions 的

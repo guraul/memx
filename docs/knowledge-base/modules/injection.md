@@ -11,7 +11,7 @@
 | 文件 | 职责 |
 |------|------|
 | `src/core/injection.ts` | 装配纯函数：来源顺序、200 行/25KB 上限、截断提示行、`shouldInjectAgent` 闸门真值表、`describeGate` |
-| `src/core/injection-source.ts` | 三块来源读取 + `stat(mtimeMs+size)` 缓存（缺失也缓存，mtimeMs=-1）+ `InjectionSourceCache` |
+| `src/core/pipeline/injection-source.ts` | 三块来源读取 + `stat(mtimeMs+size)` 缓存（缺失也缓存，mtimeMs=-1）+ `InjectionSourceCache` |
 | `src/hosts/opencode/context-hook.ts` | hook 判定与装配（子会话整体替换 vs 其余 append）——机制见 ARCHITECTURE.md §5 |
 | `src/core/protocol-template.ts` | 协议文本常量（注入内容之一） |
 

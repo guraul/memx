@@ -5,36 +5,21 @@
 //       子会话提炼的 context hook 全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
 // 红线：本文件只 export default 插件；所有 hook try-catch，错误绝不抛回宿主。
 import { Plugin } from "@opencode/plugin";
-import { SignalBuffer, captureSignals } from "../../core/signals/signal-capture.ts";
-import { refine } from "../../core/refine/refinement.ts";
-import type { LLMClient } from "../../core/refine/refinement.ts";
+import { captureSignals } from "../../core/signals/signal-capture.ts";
+import { captureMemorySignals } from "../../core/signals/memory-capture.ts";
 import { createSessionLLMClient } from "./session-llm.ts";
-import {
-  readUserMd,
-  writeUserMd,
-  applyProposals,
-  isOverLimit,
-  parseUserMd,
-  serializeUserMd,
-  backupUserMd,
-} from "../../core/store/user-md.ts";
-import { userMdLockPath, memoryIndexLockPath, withFileLock } from "../../core/store/lock.ts";
 import { loadMemxConfig } from "../../core/config.ts";
 import type { MemxConfig } from "../../core/config.ts";
-import { shouldRun, markRun } from "../../core/llm/throttle.ts";
-import { MemorySignalBuffer, captureMemorySignals } from "../../core/signals/memory-capture.ts";
-import { refineMemory } from "../../core/refine/memory-refinement.ts";
-import { readMemoryIndex, writeMemoryIndex, applyMemoryProposals, forgetMemory } from "../../core/store/memory-md.ts";
+import { readMemoryIndex, writeMemoryIndex, forgetMemory } from "../../core/store/memory-md.ts";
 import { deriveSlug, MEMORY_TYPES } from "../../core/memory-types.ts";
 import { writeProjectMemory, applyBreadcrumbLine } from "../../core/memory-write.ts";
 import { createSync } from "../../core/sync.ts";
 import type { SyncModule } from "../../core/sync.ts";
-import { runHealthMaintenance, formatHealthLog } from "../../core/health/memory-health.ts";
-import type { AutoFixLog } from "../../core/health/memory-health.ts";
-import { INVALID_OUTPUT_STREAK_LIMIT } from "../../core/refine/refine-outcome.ts";
 import { describeGate, DEFAULT_AGENT_GATE } from "../../core/injection.ts";
 import type { AgentGate } from "../../core/injection.ts";
-import { InjectionSourceCache, readInjectionSources } from "../../core/injection-source.ts";
+import { InjectionSourceCache, readInjectionSources } from "../../core/pipeline/injection-source.ts";
+import { SessionPipeline } from "../../core/pipeline/session.ts";
+import type { PipelineHost } from "../../core/pipeline/session.ts";
 import { applyContextHook } from "./context-hook.ts";
 import type { ContextHookEvent } from "./context-hook.ts";
 
@@ -46,13 +31,10 @@ import { createFileAlertStore, formatBreadcrumb } from "../../core/alerts.ts";
 export default Plugin.define({
   id: "memx",
   async setup(ctx) {
-    const buffer = new SignalBuffer();
-    const memoryBuffer = new MemorySignalBuffer();
     // 活跃子会话集合：sessionID → system 提炼提示词（context hook 按 ∈ 集合过滤）
     const childSessions = new Map<string, string>();
     // memx 自己的提炼子会话 ID（活到它的 session.deleted 事件被消费）——见事件循环注释
     const childSessionIds = new Set<string>();
-    let refinementInFlight = false;
     let currentSlug = deriveSlug(ctx.location.directory ?? "");
     const controller = new AbortController();
     // 诊断键按目录隔离：#82 实测 ctx.storage 的键是全局的，多 serve / 多目录的 memx 实例
@@ -198,10 +180,6 @@ export default Plugin.define({
       }
     })();
 
-    function sleep(ms: number): Promise<void> {
-      return new Promise((resolve) => setTimeout(resolve, ms));
-    }
-
     // ---- P0-1：per-session 增量游标（存 ctx.storage，键按 sessionID 隔离）----
     // 为什么不用"扫最后一轮"：长会话中间轮次的 SIGNAL 会整段丢（事件漏拍 / 一次 execution
     // 跨多轮 / 客户端批量提交）。为什么不用 message.list 游标：v2 宿主未注册该 rpc
@@ -247,23 +225,15 @@ export default Plugin.define({
       return applyBreadcrumbLine(content, formatBreadcrumb(alertStore));
     }
 
-    async function runRefinement(_sessionID: string, force = false): Promise<string> {
-      if (buffer.length === 0) return "[memx] 无信号，跳过";
-
-      const config = await loadMemxConfig();
-      if (!force && !shouldRun(config.throttleMinutes)) return "[memx] 节流中，跳过";
-
-      if (refinementInFlight) {
-        if (!force) return "[memx] 提炼进行中，跳过";
-        while (refinementInFlight) await sleep(200);
-      }
-      refinementInFlight = true;
-      try {
-        markRun();
-        diag.refinements++;
-        const signals = buffer.getAll();
-        const existingContent = readUserMd();
-        const llm: LLMClient = createSessionLLMClient(ctx, config.refinementModel, {
+    // ---- 宿主无关流水线（#17 A 步）：缓冲 / 节流 / 提炼 / 写盘 / 回执全在 core ----
+    // 本文件只剩"接线"：配置怎么读、LLM 客户端怎么造、诊断落哪、报警写哪里、
+    // 面包屑谁算、写盘后要不要推同步——全部经 PipelineHost 窄口传进去。
+    const pipeline = new SessionPipeline({
+      diag,
+      slug: currentSlug,
+      loadConfig: loadMemxConfig,
+      createLLM: (config: MemxConfig) =>
+        createSessionLLMClient(ctx, config.refinementModel, {
           onCreated: (id, system) => {
             childSessions.set(id, system);
             childSessionIds.add(id);
@@ -271,183 +241,22 @@ export default Plugin.define({
           onRemoved: (id) => {
             childSessions.delete(id);
           },
-        });
-        const outcome = await refine(signals, llm, existingContent, config.refinementModel);
-
-        // P0-2：坏输出 → 保留缓冲重试；连续 N 次仍坏 → 丢弃缓冲 + 记报警（防坏模型无限循环）
-        if (outcome.kind === "invalid-output") {
-          const streak = (diag.invalidStreak ??= { style: 0, memory: 0 });
-          streak.style++;
-          diag.lastError = `[style invalid-output #${streak.style}] ${outcome.error}\nraw: ${outcome.rawSnippet}`;
-          diag.updatedAt = new Date().toISOString();
-          if (streak.style >= INVALID_OUTPUT_STREAK_LIMIT) {
-            recordAlert(
-              "critical",
-              "REFINEMENT_FAILURE_STREAK",
-              `style 提炼连续 ${streak.style} 次输出无效，丢弃 ${buffer.length} 条缓冲：${outcome.error.slice(0, 120)}`,
-            );
-            streak.style = 0;
-            buffer.clear();
-            void persistDiag();
-            return `[memx] 提炼输出连续 ${INVALID_OUTPUT_STREAK_LIMIT} 次无效，已丢弃缓冲`;
-          }
-          void persistDiag();
-          return `[memx] 提炼输出无效（第 ${streak.style}/${INVALID_OUTPUT_STREAK_LIMIT} 次），保留缓冲重试`;
-        }
-        if (diag.invalidStreak) diag.invalidStreak.style = 0;
-
-        // P0-2：合法空数组/全被过滤 = LLM 已裁决"不值得存" → 清缓冲结案
-        if (outcome.kind === "adjudicated-empty") {
-          buffer.clear();
-          diag.updatedAt = new Date().toISOString();
-          void persistDiag();
-          return `[memx] 无可提炼偏好（${outcome.reason}，已结案）`;
-        }
-
-        const proposals = outcome.proposals;
-
-        // P0-4 + P0-3：锁内**重读**当前文件 → 单遍应用整批 proposal → 单次写盘。
-        // 锁只包住 read-modify-write（LLM 调用在锁外，绝不能持锁等模型）；
-        // 重读是为了消掉"快照读 → 写盘"窗口里别的 memx 实例写进来的条目。
-        const applied = await withFileLock(userMdLockPath(), () => {
-          let content = readUserMd();
-          const result = applyProposals(proposals, content);
-          content = result.content;
-          if (isOverLimit(content)) {
-            backupUserMd();
-            content = serializeUserMd(parseUserMd(content));
-          }
-          writeUserMd(content);
-          return result;
-        });
-
-        buffer.clear();
-        diag.written += proposals.length;
-        if (applied.warnings.length > 0) diag.lastWarnings = applied.warnings.slice(-10);
-        diag.updatedAt = new Date().toISOString();
+        }),
+      recordAlert,
+      persist: () => {
         void persistDiag();
-
-        const warnNote = applied.warnings.length > 0 ? `（${applied.warnings.length} 条定位告警）` : "";
-        return `[memx] 已写入 ${proposals.length} 条${warnNote}`;
-      } catch (err) {
-        diag.failures++;
-        diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
-        diag.updatedAt = new Date().toISOString();
-        void persistDiag();
-        throw err;
-      } finally {
-        refinementInFlight = false;
-      }
-    }
-
-    async function runMemoryRefinement(_sessionID: string, force = false): Promise<string> {
-      if (memoryBuffer.length === 0) return "[memx] 无记忆信号，跳过";
-
-      const config = await loadMemxConfig();
-      if (!force && !shouldRun(config.throttleMinutes)) return "[memx] 节流中，跳过";
-
-      if (refinementInFlight) {
-        if (!force) return "[memx] 提炼进行中，跳过";
-        while (refinementInFlight) await sleep(200);
-      }
-      refinementInFlight = true;
-      try {
-        markRun();
-        diag.refinements++;
-        const signals = memoryBuffer.getAll();
-        const existingIndex = readMemoryIndex();
-        const llm: LLMClient = createSessionLLMClient(ctx, config.refinementModel, {
-          onCreated: (id, system) => {
-            childSessions.set(id, system);
-            childSessionIds.add(id);
-          },
-          onRemoved: (id) => {
-            childSessions.delete(id);
-          },
-        });
-        const outcome = await refineMemory(signals, llm, existingIndex, config.refinementModel);
-
-        if (outcome.kind === "invalid-output") {
-          const streak = (diag.invalidStreak ??= { style: 0, memory: 0 });
-          streak.memory++;
-          diag.lastError = `[memory invalid-output #${streak.memory}] ${outcome.error}\nraw: ${outcome.rawSnippet}`;
-          diag.updatedAt = new Date().toISOString();
-          if (streak.memory >= INVALID_OUTPUT_STREAK_LIMIT) {
-            recordAlert(
-              "critical",
-              "REFINEMENT_FAILURE_STREAK",
-              `memory 提炼连续 ${streak.memory} 次输出无效，丢弃 ${memoryBuffer.length} 条缓冲：${outcome.error.slice(0, 120)}`,
-            );
-            streak.memory = 0;
-            memoryBuffer.clear();
-            void persistDiag();
-            return `[memx] 记忆提炼输出连续 ${INVALID_OUTPUT_STREAK_LIMIT} 次无效，已丢弃缓冲`;
-          }
-          void persistDiag();
-          return `[memx] 记忆提炼输出无效（第 ${streak.memory}/${INVALID_OUTPUT_STREAK_LIMIT} 次），保留缓冲重试`;
-        }
-        if (diag.invalidStreak) diag.invalidStreak.memory = 0;
-
-        if (outcome.kind === "adjudicated-empty") {
-          memoryBuffer.clear();
-          diag.updatedAt = new Date().toISOString();
-          void persistDiag();
-          return `[memx] 无可提炼记忆（${outcome.reason}，已结案）`;
-        }
-
-        const proposals = outcome.proposals;
-
-        // P0-4 + P0-3 + P0-5：一把锁内完成"重读索引 → 单遍应用提案 → 健康维护 → 单次写盘"。
-        // 健康日志只回传给诊断（P0-5），**不再追加 HTML 注释到 MEMORY.md**——那正是被下一次
-        // 序列化吃掉的那份日志。
-        const applied = await withFileLock(memoryIndexLockPath(), () => {
-          const result = applyMemoryProposals(proposals, readMemoryIndex(), currentSlug);
-          let indexContent = result.content;
-          let healthLogs: AutoFixLog[] = [];
-          let escalated = 0;
-          try {
-            const maintenance = runHealthMaintenance(indexContent, currentSlug);
-            indexContent = maintenance.index;
-            healthLogs = maintenance.logs;
-            escalated = maintenance.report.escalated.length;
-          } catch {
-            // health check must never block refinement
-          }
-          writeMemoryIndex(applyAlertBreadcrumb(indexContent));
-          return { warnings: result.warnings, healthLogs, escalated };
-        });
-
-        memoryBuffer.clear();
-        diag.written += proposals.length;
-        if (applied.warnings.length > 0) diag.lastWarnings = applied.warnings.slice(-10);
-        if (applied.healthLogs.length > 0 || applied.escalated > 0) {
-          diag.health = {
-            fixes: applied.healthLogs.filter((l) => l.action !== "escalated-manual").length,
-            escalated: applied.escalated,
-            lastLog: formatHealthLog(applied.healthLogs).split("\n").slice(-5).join("\n"),
-            updatedAt: new Date().toISOString(),
-          };
-          if (applied.escalated > 0) {
-            recordAlert("warn", "HEALTH_ESCALATED", `MEMORY.md 有 ${applied.escalated} 项需要人工处理`);
-          }
-        }
-        diag.updatedAt = new Date().toISOString();
-        void persistDiag();
+      },
+      decorateIndex: applyAlertBreadcrumb,
+      onMemoryWritten: () => {
         // 写盘成功后异步推云同步（不 await，绝不阻塞写盘）
         void sync?.push();
+      },
+    } satisfies PipelineHost);
 
-        const healthNote = applied.healthLogs.length > 0 ? `，health: ${applied.healthLogs.length} 项` : "";
-        return `[memx] 已写入 ${proposals.length} 条记忆${healthNote}`;
-      } catch (err) {
-        diag.failures++;
-        diag.lastError = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
-        diag.updatedAt = new Date().toISOString();
-        void persistDiag();
-        throw err;
-      } finally {
-        refinementInFlight = false;
-      }
-    }
+    const runRefinement = (_sessionID: string, force = false): Promise<string> => pipeline.refineStyle(force);
+    const runMemoryRefinement = (_sessionID: string, force = false): Promise<string> => pipeline.refineMemory(force);
+    const buffer = pipeline.style;
+    const memoryBuffer = pipeline.memory;
 
     // #82 实测定案：取消息用 ctx.session.context（SessionDomain 确认方法，返回完整
     // messages）——rpc message.list 宿主未注册、inbox.delivered 无负载（均实测）。
