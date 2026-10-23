@@ -184,14 +184,24 @@ describe("插件契约", () => {
     expect([...inject]).toContain("llm");
   });
 
-  it("Config 是 standard-schema：缺省合法、类型错给 issues、volatile 只有 provider/model", () => {
+  it("Config 是 standard-schema：缺省合法、类型错给 issues、volatile 四个字段全在", () => {
     expect(Config["~standard"].validate({})).toEqual({ value: {} });
     expect(Config["~standard"].validate({ provider: "p", model: "m" })).toEqual({
       value: { provider: "p", model: "m" },
     });
     const bad = Config["~standard"].validate({ provider: 1 }) as { issues?: unknown[] };
     expect(Array.isArray(bad.issues)).toBe(true);
-    expect([...Config.volatileKeys]).toEqual(["provider", "model"]);
+    expect([...Config.volatileKeys]).toEqual(["provider", "model", "autoRefine", "throttleMinutes"]);
+  });
+
+  it("Config 校验 autoRefine：布尔通过、非布尔给 issues", () => {
+    expect(Config["~standard"].validate({ autoRefine: false })).toEqual({ value: { autoRefine: false } });
+    expect(Config["~standard"].validate({ autoRefine: true })).toEqual({ value: { autoRefine: true } });
+    for (const bad of ["true", 1, 0, {}]) {
+      const result = Config["~standard"].validate({ autoRefine: bad }) as { issues?: Array<{ path: string[] }> };
+      expect(Array.isArray(result.issues)).toBe(true);
+      expect(result.issues?.[0]?.path).toEqual(["autoRefine"]);
+    }
   });
 });
 
@@ -348,6 +358,110 @@ describe("轮末补记", () => {
 
     expect(h.calls.length).toBe(0);
     expect(h.logs.some((l) => l.includes("取不到提炼模型"))).toBe(true);
+  });
+
+  it("autoRefine=false → 轮末不触发提炼（有信号也不调 llm.stream）", async () => {
+    const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
+    apply(h.ctx, { autoRefine: false });
+
+    emitTurn(h, 1, `信号${SIGNAL}`);
+    await settle();
+
+    expect(h.calls.length).toBe(0);
+  });
+
+  it("autoRefine=false 只关自动补记：显式 memory_write 仍然写盘", async () => {
+    const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
+    apply(h.ctx, { autoRefine: false });
+    const tool = h.tools.find((t) => t.name === "memory_write")!;
+
+    const value = (await tool.execute({ text: "关了自动提炼也要能显式记住", name: "显式记住" }, { agent: h.agent })) as {
+      ok: boolean;
+    };
+    expect(value.ok).toBe(true);
+
+    emitTurn(h, 1, `信号${SIGNAL}`);
+    await settle();
+    expect(h.calls.length).toBe(0);
+    expect(readFileSync(join(DIR, "MEMORY.md"), "utf-8")).toContain("关了自动提炼也要能显式记住");
+  });
+
+  it("autoRefine=true → 触发提炼（显式开启与缺省同义）", async () => {
+    const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
+    apply(h.ctx, { autoRefine: true });
+
+    emitTurn(h, 1, `信号${SIGNAL}`);
+    await settle();
+
+    expect(h.calls.length).toBe(1);
+  });
+
+  it("宿主 volatile cell 形态的配置也能读全（provider/model/autoRefine/throttleMinutes）", async () => {
+    const cell = <T,>(value: T) => ({ get: () => value });
+    const h = makeHarness({ agentOptions: { provider: "session-p", model: "session-m" } });
+    apply(
+      h.ctx,
+      {
+        provider: cell("cfg-p"),
+        model: cell("cfg-m"),
+        autoRefine: cell(true),
+        throttleMinutes: cell(0.0001),
+      } as unknown as Parameters<typeof apply>[1],
+    );
+
+    emitTurn(h, 1, `第一轮${SIGNAL}`);
+    await settle();
+    emitTurn(h, 2, `第二轮${SIGNAL}`);
+    await settle();
+
+    // provider/model 拆包成功（否则会落到 session-p/session-m）；throttle 拆包成功（否则第二轮被 10 分钟节流）
+    expect(h.calls.length).toBe(2);
+    expect(h.calls[0]!.provider).toBe("cfg-p");
+    expect(h.calls[0]!.model).toBe("cfg-m");
+  });
+
+  it("宿主 volatile cell 的 autoRefine=false 同样能关掉补记", async () => {
+    const cell = <T,>(value: T) => ({ get: () => value });
+    const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
+    apply(h.ctx, { autoRefine: cell(false) } as unknown as Parameters<typeof apply>[1]);
+
+    emitTurn(h, 1, `信号${SIGNAL}`);
+    await settle();
+
+    expect(h.calls.length).toBe(0);
+  });
+
+  it("volatile cell 是活的：设置改了下一轮就生效（不在 apply 时快照）", async () => {
+    let provider = "cfg-p1";
+    let autoRefine = true;
+    const h = makeHarness({ agentOptions: { provider: "session-p", model: "session-m" } });
+    apply(
+      h.ctx,
+      {
+        provider: { get: () => provider },
+        model: { get: () => "cfg-m" },
+        autoRefine: { get: () => autoRefine },
+        throttleMinutes: { get: () => 0.0001 },
+      } as unknown as Parameters<typeof apply>[1],
+    );
+
+    emitTurn(h, 1, `第一轮${SIGNAL}`);
+    await settle();
+    expect(h.calls.length).toBe(1);
+    expect(h.calls[0]!.provider).toBe("cfg-p1");
+
+    // 模拟宿主 loader/volatile-update：cell 里的值原位变了
+    provider = "cfg-p2";
+    emitTurn(h, 2, `第二轮${SIGNAL}`);
+    await settle();
+    expect(h.calls.length).toBe(2);
+    expect(h.calls[1]!.provider).toBe("cfg-p2");
+
+    // 关掉开关同样立即生效
+    autoRefine = false;
+    emitTurn(h, 3, `第三轮${SIGNAL}`);
+    await settle();
+    expect(h.calls.length).toBe(2);
   });
 
   it("插件配置优先于会话模型", async () => {

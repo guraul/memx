@@ -44,8 +44,19 @@ lockfile**。所以：
 - insert:
     - id: memx
       name: "<包名或绝对路径>"
-      config: { }        # provider / model / throttleMinutes，空 = 跟随会话
+      config: { }        # provider / model / autoRefine / throttleMinutes
 ```
+
+配置字段（四个都是"改了即时生效"的热更字段；薄壳包用 schemastery `.volatile()` 声明，
+宿主因此以**引用 cell** 的形态把它们传进 `apply`，本层**每次轮末现读**（不在 apply 时快照，
+否则设置页改完要等重启才生效））：
+
+| 字段 | 类型 | 缺省 | 语义 |
+|------|------|------|------|
+| `provider` | string | `""` | 提炼用 provider；空 = 跟随当前会话 |
+| `model` | string | `""` | 提炼用 model；空 = 跟随当前会话 |
+| `autoRefine` | boolean | `true` | 轮末自动提炼开关；`false` 只关**轮末补记**，显式 `memory_write` 不受影响 |
+| `throttleMinutes` | number | `10` | 轮末补记的会话级节流（分钟，1–1440） |
 
 安装与生效语义（细节见 `docs/knowledge-base/DSH-ADAPT.md` §3）：
 
@@ -89,9 +100,10 @@ dsh plugin --profile web add <包名或绝对路径>
    之后同一 `agent` 对象拿到同一串字节。注入正文里**不含时间/计数/随机**——否则每轮字节漂移
    会让宿主缓存全失效。
 2. **工具**：`memory_write` 的参数与 opencode 那版逐字段对齐；成功回执 `[memx] 已记住：<name>`。
-3. **轮末补记**：`turn/end` → 同 turn 幂等 → 本轮有工具写入则跳过 → `captureMemorySignals`
-   无信号则跳过 → 会话级节流（`throttleMinutes`）→ 解析路由 → `pipeline.refineMemory(true)`。
-   整个过程 `queueMicrotask` 起步，**不 await 阻塞事件分发**。
+3. **轮末补记**：`turn/end` → `autoRefine === false` 直接跳过 → 同 turn 幂等 → 本轮有工具写入则跳过
+   → `captureMemorySignals` 无信号则跳过 → 会话级节流（`throttleMinutes`）→ 解析路由 →
+   `pipeline.refineMemory(true)`。整个过程 `queueMicrotask` 起步，**不 await 阻塞事件分发**。
+   （跳过原因计数在 `diag.skipped`：`disabled` / `duplicate` / `written` / `empty` / `throttle` / `noModel`。）
 4. **提示**：写入成功且能拿到 `createUserMessage` 时，用 `agent.inject` 排一条
    `[memx] 已记住 N 条`（≤120 字）。
 
