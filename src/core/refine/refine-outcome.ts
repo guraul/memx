@@ -14,7 +14,14 @@
 export type AdjudicatedEmptyReason = "no-signals" | "llm-empty" | "all-filtered";
 
 export type RefineOutcome<T> =
-  | { kind: "proposals"; proposals: T[] }
+  | {
+      kind: "proposals";
+      proposals: T[];
+      /** #9 补丁：逐条校验时被丢弃的坏条目数（0 或缺省 = 整批合法） */
+      dropped?: number;
+      /** 每条坏条目的原因（`proposal[i] dropped: ...`），便于 diag 定位模型坏在哪 */
+      warnings?: string[];
+    }
   | { kind: "adjudicated-empty"; reason: AdjudicatedEmptyReason }
   | { kind: "invalid-output"; error: string; rawSnippet: string };
 

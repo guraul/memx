@@ -103,6 +103,49 @@ describe("refine", () => {
     }
   });
 
+  it("drops only the bad proposal in a batch (one bad does not sink the batch) (#9)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        { action: "append", category: "communication", content: "", reason: "empty" },
+        { action: "append", category: "toolchain", content: "项目内跑测试一律用 pnpm", reason: "valid" },
+      ]),
+    );
+    const result = await refine(sampleSignals, llm, "");
+    expect(result.kind).toBe("proposals");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.content).toBe("项目内跑测试一律用 pnpm");
+    if (result.kind === "proposals") {
+      expect(result.dropped).toBe(1);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings![0]).toMatch(/proposal\[0\] dropped/);
+      expect(result.warnings![0]).toMatch(/append requires non-empty content/);
+    }
+  });
+
+  it("reports invalid-output when every proposal in the batch is invalid (#9)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        { action: "append", category: "communication", content: "", reason: "empty" },
+        { action: "update", category: "toolchain", content: "", reason: "empty" },
+      ]),
+    );
+    const result = await refine(sampleSignals, llm, "");
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") {
+      expect(result.error).toMatch(/schema/);
+      expect(result.error).toMatch(/proposal\[0\]/);
+      expect(result.error).toMatch(/proposal\[1\]/);
+    }
+  });
+
+  it("reports invalid-output when the payload is not an array (#9)", async () => {
+    const llm = createMockLLM(JSON.stringify({ action: "append", content: "x" }));
+    const result = await refine(sampleSignals, llm, "");
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") expect(result.error).toMatch(/expected array/);
+  });
+
   it("keeps a deprecate proposal whose content is empty (#9)", async () => {
     const llm = createMockLLM(
       JSON.stringify([
