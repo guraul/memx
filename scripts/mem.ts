@@ -31,6 +31,9 @@ import {
 } from "../src/core/store/memory-md.ts";
 import { withFileLock, memoryIndexLockPath } from "../src/core/store/lock.ts";
 import { runHealthCheck } from "../src/core/health/memory-health.ts";
+import { loadMemxConfig } from "../src/core/config.ts";
+import { createFileAlertStore } from "../src/core/alerts.ts";
+import { createSync } from "../src/core/sync.ts";
 
 class UsageError extends Error {}
 class BusinessError extends Error {}
@@ -267,6 +270,21 @@ function forgetPreview(keyword: string, slug: string): string[] {
     .map((e) => e.filePath.split("/").pop() ?? e.filePath);
 }
 
+/** 本地删除后立刻推一次云同步（issue #21）：不推的话下一轮 pull 会把刚删的文件原样拉回。
+ *  未启用 / 失败都不影响本地删除结果——这里只做尽力收敛，绝不让同步问题把 forget 变成失败。 */
+async function pushAfterForget(): Promise<string> {
+  try {
+    const config = (await loadMemxConfig()).sync;
+    if (!config.enabled || config.machineName === "") return "";
+    const sync = createSync({ config, alerts: createFileAlertStore() });
+    const r = await sync.push();
+    sync.dispose();
+    return r.ok ? `；云同步：${r.message}` : `；云同步未推成功：${r.message}`;
+  } catch (err) {
+    return `；云同步异常（本地删除已生效）：${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 async function cmdForget(keyword: string, slug: string, dryRun: boolean, json: boolean): Promise<void> {
   if (!keyword) throw new UsageError("用法：mem forget <keyword> --slug <s> [--dry-run] [--json]");
 
@@ -286,7 +304,9 @@ async function cmdForget(keyword: string, slug: string, dryRun: boolean, json: b
   });
   if (removed.length === 0) throw new BusinessError(`未匹配：${keyword} (slug=${slug})`);
 
+  const syncNote = await pushAfterForget();
   const human = [`已移除 ${removed.length} 条（移入 .trash 并更新索引）`, ...removed.map((f) => `  - ${f}`)];
+  if (syncNote) human.push(syncNote.slice(1));
   out(json, { dryRun: false, slug, keyword, removed, indexChanged: true }, human);
 }
 

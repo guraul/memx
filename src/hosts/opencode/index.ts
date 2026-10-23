@@ -596,6 +596,9 @@ export default Plugin.define({
               return { content: `[memx] forget: no memories matched "${keyword}"` };
             }
             writeMemoryIndex(applyAlertBreadcrumb(newIndex));
+            // 删除也要立刻推（issue #21）：不推的话下一轮 pull 会把刚 forget 的文件原样拉回。
+            // 与写盘触发点一致：不 await，绝不让网络/同步拖住工具返回。
+            void sync?.push();
             return { content: `[memx] forgot ${removed.length} memories: ${removed.join(", ")}` };
           } catch (err) {
             return { content: `[memx] forget failed: ${String(err)}` };

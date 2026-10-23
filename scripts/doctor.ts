@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 
 import { createFileAlertStore, formatAlertsPanel } from "../src/core/alerts.ts";
 import { loadMemxConfig } from "../src/core/config.ts";
-import { listToSync, readSyncState } from "../src/core/sync.ts";
+import { listPendingDeletions, listToSync, readSyncState } from "../src/core/sync.ts";
 
 // ---- alerts ----
 try {
@@ -86,6 +86,13 @@ void (async () => {
         );
         // issue #12：未推提交数要可见——否则"断网期攒的提交推不出去"会一直伪装成"同步正常"
         console.log(`sync.unsyncedCommits: ${state.unsyncedCommits ?? 0}`);
+        // issue #21：待传播的删除要可见——"远端还有、本地已删"就是删除没收敛的直接证据
+        const pendingDeleted = state.lastRemoteSha ? listPendingDeletions({ rev: state.lastRemoteSha }) : [];
+        const preview = pendingDeleted.slice(0, 5).join(", ");
+        console.log(
+          `sync.pendingDeletions: ${pendingDeleted.length}` +
+            (preview === "" ? "" : `（${preview}${pendingDeleted.length > 5 ? " …" : ""}）`),
+        );
       } else {
         console.log("sync.status: 未取到（尚未发生过 push/pull）");
       }

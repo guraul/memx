@@ -147,6 +147,43 @@ export function listToSync(): SyncFileEntry[] {
   }));
 }
 
+/** 同步范围内的 repo 路径判定（删除传播专用，比 walkMirror 更严）。
+ *  walkMirror 决定"拷什么"，这里决定"敢删什么"——删除不可逆，判据必须更窄：
+ *  - 只认 USER.md / MEMORY.md / `projects/<slug>/.mem/**` 下的 `.md`
+ *  - 任意一段以 `.` 开头（`.trash/`、隐藏文件、隐藏目录）一律排除
+ *  - 文件名含 `.bak.` 排除（备份不进镜像，也绝不能被删除传播带走）
+ *  后果可控：宁可漏传播一个删除，也不碰软删件/备份/同步范围外的文件。 */
+export function isSyncRepoPath(repoPath: string): boolean {
+  if (repoPath === "USER.md" || repoPath === "MEMORY.md") return true;
+  if (!repoPath.endsWith(".md") || repoPath.includes(".bak.")) return false;
+  const parts = repoPath.split("/");
+  if (parts.length < 4 || parts[0] !== "projects" || parts[2] !== ".mem") return false;
+  const slug = parts[1]!;
+  if (slug === "" || slug.startsWith(".")) return false;
+  return parts.slice(3).every((seg) => seg !== "" && !seg.startsWith("."));
+}
+
+/** 待传播的删除：`rev` 那棵树里属于同步范围、但本地已不存在的路径（issue #21）。
+ *
+ *  这是 push 侧判断"本地删除"与 pull 侧"孤儿"共用的只读探针：
+ *  - `rev` 解析不到 / workdir 未 clone / git 不可用 → []（fail-safe：绝不凭猜测报/删任何东西）
+ *  - 目录约定与删除安全边界见 {@link isSyncRepoPath}
+ */
+export function listPendingDeletions(opts: { rev: string; workdir?: string; runner?: GitRunner }): string[] {
+  const workdir = opts.workdir ?? syncWorkdir();
+  const runner = opts.runner ?? createNodeGitRunner();
+  if (!existsSync(join(workdir, ".git"))) return [];
+  const r = runner.exec(["git", "ls-tree", "-r", "--name-only", opts.rev], workdir);
+  if (!r.ok) return [];
+  const localPaths = new Set(listToSync().map((f) => f.repoPath));
+  const out: string[] = [];
+  for (const line of r.stdout.split("\n")) {
+    const repoPath = line.trim();
+    if (repoPath !== "" && isSyncRepoPath(repoPath) && !localPaths.has(repoPath)) out.push(repoPath);
+  }
+  return out.sort();
+}
+
 function listFromWorkdir(workdir: string): SyncFileEntry[] {
   return walkMirror(workdir).map((e) => ({
     repoPath: e.repoPath,
@@ -360,7 +397,10 @@ export interface SyncStatus {
   lastPushAt: string | null;
   lastPullAt: string | null;
   lastError: string;
+  /** 待同步文件数 = 本地镜像文件数 + 待传播的删除数（issue #21）。 */
   pendingFiles: number;
+  /** 待传播的删除数：同步基线里还有、本地已不存在（issue #21）。统计口径含删除。 */
+  pendingDeletions: number;
   consecutiveFailures: number;
   /** 未推提交数（issue #12）：>0 = 本地有提交还没出门，push 必须真的执行（不再被 no-change 短路）。 */
   unsyncedCommits: number;
@@ -511,6 +551,68 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     return Number.isSafeInteger(n) ? n : null;
   }
 
+  /** 删除传播的基线版本：优先"上次成功同步的远端 sha"；旧状态没有 sha 但确实同步过 →
+   *  用 workdir HEAD（= 上次镜像到的内容）；从未同步过（首推 / 新机器）→ null。
+   *  为什么首推不传播：新机器本地镜像可能不完整，拿它当"真相"会把远端记忆整体清空。
+   *  代价只是"第一次 push 不传删除"，紧随其后的 pull 会写入 sha，下一轮即生效。 */
+  function deletionBaselineRev(): string | null {
+    if (lastRemoteSha !== null) return lastRemoteSha;
+    if (lastPushAt !== null || lastPullAt !== null) return "HEAD";
+    return null;
+  }
+
+  /** push 前把"基线里还有、本地已删"的同步文件从 workdir 删掉，随后 `git add -A` 就会把删除
+   *  写进提交（issue #21）。三道闸：本地镜像为空不删 / 基线未知不删 / 只删基线里存在且在
+   *  同步范围内的路径——"本地新增但还没拉过"的文件永远不在基线里，绝不被误判成删除。 */
+  function pruneDeletedFromWorkdir(files: SyncFileEntry[]): number {
+    if (files.length === 0) return 0;
+    const rev = deletionBaselineRev();
+    if (rev === null) return 0;
+    let pruned = 0;
+    for (const repoPath of listPendingDeletions({ rev, workdir, runner })) {
+      const dest = join(workdir, repoPath);
+      if (!existsSync(dest)) continue;
+      try {
+        unlinkSync(dest);
+        pruned++;
+      } catch {
+        // 删不掉就保留差异，下次 push 再试——不假装传播成功
+      }
+    }
+    return pruned;
+  }
+
+  /** 远端删除优先（issue #21）：基线里还有、现在 `origin/<branch>` 里没有的文件 → 删本地副本。
+   *  与 push 侧共用同一套"范围 + 基线"判据，只认**明确的远端删除**（git diff --diff-filter=D），
+   *  本地新增未推的文件不会出现在 diff 里，因此不会被误删。
+   *  基线未知（首次 pull / 旧状态文件）→ 不删：宁可少收敛一轮，也不拿不完整信息动本地记忆。
+   *  删除前一律先备份 `.bak.<ts>`——本地可能改过而远端已删，安全网不能少。 */
+  function propagateRemoteDeletions(): { deleted: number; backedUp: number } {
+    if (lastRemoteSha === null) return { deleted: 0, backedUp: 0 };
+    const diff = runner.exec(
+      ["git", "diff", "--name-only", "--diff-filter=D", lastRemoteSha, `origin/${config.branch}`],
+      workdir,
+    );
+    if (!diff.ok) return { deleted: 0, backedUp: 0 };
+    let deleted = 0;
+    let backedUp = 0;
+    for (const line of diff.stdout.split("\n")) {
+      const repoPath = line.trim();
+      if (repoPath === "" || !isSyncRepoPath(repoPath)) continue;
+      const local = join(homedir(), ".opencode", repoPath);
+      if (!existsSync(local)) continue;
+      try {
+        backupBeforeOverwrite(local);
+        backedUp++;
+        unlinkSync(local);
+        deleted++;
+      } catch {
+        // 删不掉（权限/占用）→ 本地副本保留，下次 pull 再收敛，不静默丢内容
+      }
+    }
+    return { deleted, backedUp };
+  }
+
   async function push(): Promise<SyncResult> {
     if (!active) return { ok: false, kind: "error", message: "sync 未启用（enabled=false 或 machineName 为空）" };
     try {
@@ -549,6 +651,8 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       mkdirSync(dirname(dest), { recursive: true });
       copyFileSync(f.localPath, dest);
     }
+    // 本地已删、远端仍有的同步文件：从镜像里删掉，让下面的 add -A 把删除写进提交（issue #21）
+    const pruned = pruneDeletedFromWorkdir(files);
 
     const status = runner.exec(["git", "status", "--porcelain"], workdir);
     const noFileDiff = status.ok && status.stdout.trim() === "";
@@ -609,8 +713,12 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     consecutiveFailures = 0;
     // push 成功 = 本地提交已全部出门（含这次顺带补推的积压）→ 归零，别让状态面板继续报旧数
     unsyncedCommits = 0;
+    // 远端 tip 此刻 == 本次镜像结果：记下来供 pull 的删除基线与前置短路使用。
+    // 不记的话，下一次 pull 的 diff 基线还停在 push 之前，可能把"push 后又本地重建"的文件当成远端删除。
+    lastRemoteSha = readOriginSha() ?? lastRemoteSha;
     save();
-    return { ok: true, kind: "pushed", message };
+    const prunedNote = pruned > 0 ? `；传播删除 ${pruned} 个` : "";
+    return { ok: true, kind: "pushed", message: `${message}${prunedNote}` };
   }
 
   async function pull(pullOpts?: { force?: boolean }): Promise<SyncResult> {
@@ -658,6 +766,9 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
 
     let copied = 0;
     let backedUp = 0;
+    // 远端删除先于回拷：先把"远端已删"的本地副本删掉（带 .bak），再按远端镜像回拷新增/修改。
+    const removed = propagateRemoteDeletions();
+    backedUp += removed.backedUp;
     for (const f of listFromWorkdir(workdir)) {
       const src = join(workdir, f.repoPath);
       mkdirSync(dirname(f.localPath), { recursive: true });
@@ -688,18 +799,24 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
     // 顺手刷一次未推提交数（rebase 之后本地积压可能变化；取不到就保持旧值，不拿 null 覆盖）
     unsyncedCommits = countUnsyncedCommits() ?? unsyncedCommits;
     save();
+    const deletedNote = removed.deleted > 0 ? `，移除 ${removed.deleted} 个远端已删文件` : "";
     const backupNote = backedUp > 0 ? `（${backedUp} 个本地差异件已备份为 .bak.<时间戳>）` : "";
-    return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件${backupNote}` };
+    return { ok: true, kind: "pulled", message: `已拉取 ${copied} 个文件${deletedNote}${backupNote}` };
   }
 
-  /** 只读状态：pendingFiles 现算（只遍历本地镜像），unsyncedCommits 用最近一次观测值
-   *  （不在状态查询里 spawn git——doctor/status 的高频调用不该被网络化的 workdir 拖住）。 */
+  /** 只读状态：pendingFiles 现算（本地镜像 + 待传播删除），unsyncedCommits 用最近一次观测值。
+   *  pendingDeletions 需要 `git ls-tree` 读基线树——纯本地、不联网；workdir 不在时为 0。
+   *  （不在状态查询里跑 fetch/push 那类网络动作：doctor/status 的高频调用不该被远端拖住。） */
   function status(): SyncStatus {
+    const localFiles = listToSync();
+    const rev = deletionBaselineRev();
+    const pendingDeletions = rev === null ? 0 : listPendingDeletions({ rev, workdir, runner }).length;
     return {
       lastPushAt,
       lastPullAt,
       lastError,
-      pendingFiles: listToSync().length,
+      pendingFiles: localFiles.length + pendingDeletions,
+      pendingDeletions,
       consecutiveFailures,
       unsyncedCommits,
     };
