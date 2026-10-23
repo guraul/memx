@@ -6,9 +6,9 @@
 //      缓存不失效的前提，所以这里绝不放时间/计数/随机。
 //   ② 工具：`ctx.tools.register` 注册 `memory_write`，写入口与 opencode 完全同一份
 //      （core 的 `writeProjectMemory`），回执 `[memx] 已记住：<name>`。
-//   ③ 轮末补记：`session/event` 过滤 `turn/end` → 本轮已有工具写入则跳过 → 会话级节流
-//      （throttleMinutes，默认 10）→ `ctx.llm.stream` 提炼 → 写盘 → 下次 pre-step 展示
-//      「已记住 N 条」。
+//   ③ 轮末补记：`session/event` 过滤 `turn/end` → `autoRefine === false` 直接跳过 →
+//      本轮已有工具写入则跳过 → 会话级节流（throttleMinutes，默认 10）→ `ctx.llm.stream`
+//      提炼 → 写盘 → 下次 pre-step 展示「已记住 N 条」。
 //   ④ 红线：插件跑在宿主主进程，任何钩子异常都只能进诊断，**绝不能**拖垮会话；
 //      轮末补记是后台任务，绝不 await 阻塞事件分发。
 //
@@ -66,8 +66,44 @@ export interface DshMemxConfig {
   provider?: string;
   /** 提炼用 model；空 = 跟随当前会话。 */
   model?: string;
+  /**
+   * 轮末自动提炼开关；缺省开。
+   * `false` 只关「轮末补记」，**显式 `memory_write` 不受影响**（用户在对话里说"记住"照样写）。
+   */
+  autoRefine?: boolean;
   /** 轮末补记的节流分钟数；缺省读 memx.config.json 的 throttleMinutes（再缺省 10）。 */
   throttleMinutes?: number;
+}
+
+/** 宿主 volatile 字段的运行时形态：值被包成只读引用 cell（cosmokit Volatile）。 */
+interface VolatileCell<T> {
+  get(): T;
+}
+
+/**
+ * 取出 volatile cell 里的值；普通值（直调 apply / 旧配置）原样返回。
+ *
+ * 薄壳包（第二步）用 schemastery 声明四个字段 `.volatile()`，宿主便把它们包成
+ * 引用 cell 传进来——不拆开的话 `typeof config.provider === "string"` 全是 false，
+ * 表现为「设置里选了提炼模型却不生效」「关了自动提炼还照写」。
+ */
+function unwrapCell<T>(value: T | VolatileCell<T> | undefined): T | undefined {
+  const cell = value as VolatileCell<T> | undefined;
+  return typeof cell?.get === "function" ? cell.get() : (value as T | undefined);
+}
+
+/** 把 config 归一成普通值快照（缺省值语义保持原样）。调用方每次用前现读，别跨轮次缓存。 */
+function readConfig(raw: DshMemxConfig): DshMemxConfig {
+  const provider = unwrapCell(raw.provider);
+  const model = unwrapCell(raw.model);
+  const autoRefine = unwrapCell(raw.autoRefine);
+  const throttleMinutes = unwrapCell(raw.throttleMinutes);
+  return {
+    ...(provider !== undefined ? { provider } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(autoRefine !== undefined ? { autoRefine } : {}),
+    ...(throttleMinutes !== undefined ? { throttleMinutes } : {}),
+  };
 }
 
 /**
@@ -94,6 +130,13 @@ export const Config = {
         }
         value[key] = field;
       }
+      const autoRefine = raw.autoRefine;
+      if (autoRefine !== undefined && autoRefine !== null) {
+        if (typeof autoRefine !== "boolean") {
+          return { issues: [{ message: "memx: autoRefine 必须是布尔值", path: ["autoRefine"] }] };
+        }
+        value.autoRefine = autoRefine;
+      }
       const throttle = raw.throttleMinutes;
       if (throttle !== undefined && throttle !== null) {
         if (typeof throttle !== "number" || !Number.isFinite(throttle) || throttle <= 0) {
@@ -104,8 +147,8 @@ export const Config = {
       return { value };
     },
   },
-  /** 设置面热更新时只看这两个字段（等价 schemastery 的 `.volatile()`）。 */
-  volatileKeys: ["provider", "model"] as const,
+  /** 设置面热更新时只看这四个字段（等价 schemastery 的 `.volatile()`）。 */
+  volatileKeys: ["provider", "model", "autoRefine", "throttleMinutes"] as const,
 };
 
 /** 插件级诊断：结构上是流水线诊断的超集，另加 DSH 特有的跳过原因。 */
@@ -115,7 +158,15 @@ export interface DshDiagnostics extends PipelineDiagnostics {
   toolWrites: number;
   notices: number;
   /** 轮末补记的跳过原因计数（便于真机定位"为什么没写"） */
-  skipped: { throttle: number; written: number; empty: number; noModel: number; duplicate: number };
+  skipped: {
+    throttle: number;
+    written: number;
+    empty: number;
+    noModel: number;
+    duplicate: number;
+    /** autoRefine === false（用户关了自动提炼；显式 memory_write 不计这里） */
+    disabled: number;
+  };
 }
 
 interface SessionState {
@@ -143,7 +194,7 @@ function emptyDiagnostics(): DshDiagnostics {
     capturedTurns: 0,
     toolWrites: 0,
     notices: 0,
-    skipped: { throttle: 0, written: 0, empty: 0, noModel: 0, duplicate: 0 },
+    skipped: { throttle: 0, written: 0, empty: 0, noModel: 0, duplicate: 0, disabled: 0 },
   };
 }
 
@@ -446,6 +497,17 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
     state: SessionState,
   ): Promise<void> => {
     try {
+      // 每次轮末现读配置：volatile 字段是**引用 cell**，设置页改完由宿主原位更新
+      // （loader/volatile-update），这里若在 apply 时快照一次，改动就要等重启才生效。
+      const settings = readConfig(config);
+
+      // 用户关掉自动提炼：整段轮末补记跳过。显式 memory_write 在工具里独立处理，
+      // 不经过这里，所以"说记住就记住"照旧。
+      if (settings.autoRefine === false) {
+        diag.skipped.disabled++;
+        return;
+      }
+
       if (turn !== null && state.markedTurn === turn) {
         diag.skipped.duplicate++;
         return;
@@ -471,8 +533,8 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
         coreConfig = { throttleMinutes: DEFAULT_THROTTLE_MINUTES } as MemxConfig;
       }
       const throttleMinutes =
-        typeof config.throttleMinutes === "number" && config.throttleMinutes > 0
-          ? config.throttleMinutes
+        typeof settings.throttleMinutes === "number" && settings.throttleMinutes > 0
+          ? settings.throttleMinutes
           : coreConfig.throttleMinutes > 0
             ? coreConfig.throttleMinutes
             : DEFAULT_THROTTLE_MINUTES;
@@ -484,7 +546,7 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
 
       const agent = ctx.agents?.get(session.id);
       const route =
-        resolveRoute(config.provider, config.model) ??
+        resolveRoute(settings.provider, settings.model) ??
         resolveRoute(agent?.options?.provider, agent?.options?.model);
       if (route === null) {
         // 取不到就不猜（issue 明确：跳过并记一条诊断）
