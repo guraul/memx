@@ -5,7 +5,8 @@ import type { UserMdDoc, UserMdSection, UserMdEntry, StyleProposal } from "../ty
 import { CATEGORY_HEADERS, HEADER_TO_CATEGORY, CATEGORIES, type Category } from "../types.ts";
 import { trimBlankLines, trimTrailingBlankLines } from "./markdown-lines.ts";
 
-const ENTRY_REGEX = /^- (~~)?\[(\d{4}-\d{2}-\d{2})\]\s+(.+?)(~~)?(?:\s+\(Deprecated:.*\))?$/;
+// #9：deprecate 可以没有备注 → `(Deprecated)` 也必须是合法条目尾缀，否则往返解析会把尾缀吃进 text。
+const ENTRY_REGEX = /^- (~~)?\[(\d{4}-\d{2}-\d{2})\]\s+(.+?)(~~)?(?:\s+\(Deprecated(?::.*)?\))?$/;
 
 /** 由 serializeUserMd 每次重建的头部：解析时丢弃，否则每轮往返都会重复堆积 */
 const GENERATED_HEADER = "# User Profile & Style";
@@ -302,14 +303,21 @@ function applyOneProposal(doc: UserMdDoc, proposal: StyleProposal, today: string
     case "deprecate": {
       const located = locateEntry(doc, proposal, warnings);
       if (!located) {
-        warnings.push(`deprecate 未定位到目标 → 未改动: "${proposal.content.slice(0, 40)}"`);
+        // 空 content 时不能用 content 打标签，退回 target_text。
+        const label = proposal.target_text?.trim() || proposal.content.trim();
+        warnings.push(`deprecate 未定位到目标 → 未改动: "${label.slice(0, 40)}"`);
         return;
       }
       const target = located.section.lines[located.index]!;
       if (target.deprecated) return;
+      // #9：弃用只需定位到条目，不依赖 content。content 非空时作为可选备注，
+      // 为空时写裸 `(Deprecated)`（旧实现会写出 "(Deprecated: )"）。
+      const note = proposal.content.trim();
       located.section.lines[located.index] = {
         ...target,
-        raw: `- ~~[${target.date}] ${target.text}~~ (Deprecated: ${proposal.content})`,
+        raw: note
+          ? `- ~~[${target.date}] ${target.text}~~ (Deprecated: ${note})`
+          : `- ~~[${target.date}] ${target.text}~~ (Deprecated)`,
         deprecated: true,
       };
       return;

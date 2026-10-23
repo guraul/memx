@@ -274,6 +274,36 @@ describe("Supersedes and .trash", () => {
     expect(content).not.toContain("**Supersedes:**");
   });
 
+  it("deprecate with empty content still trashes file and removes index entry (#9)", () => {
+    const appendProposal: MemoryProposal = {
+      action: "append",
+      type: "project",
+      name: "stale context",
+      description: "stale project context",
+      content: "This is stale.",
+      why: "stale reason",
+      how_to_apply: "stale scope",
+      target_file: "project_stale.md",
+      reason: "initial",
+    };
+    let index = applyMemoryProposal(appendProposal, "", TEST_SLUG);
+    expect(existsSync(getMemoryFilePath(TEST_SLUG, "project_stale.md"))).toBe(true);
+
+    // deprecate 只按 target_file 定位，content 为空也必须生效
+    const deprecateProposal: MemoryProposal = {
+      action: "deprecate",
+      type: "project",
+      name: "stale context",
+      description: "stale project context",
+      content: "",
+      target_file: "project_stale.md",
+      reason: "superseded",
+    };
+    index = applyMemoryProposal(deprecateProposal, index, TEST_SLUG);
+    expect(index).not.toContain("project_stale.md");
+    expect(existsSync(getMemoryFilePath(TEST_SLUG, "project_stale.md"))).toBe(false);
+  });
+
   it("deprecate moves file to .trash and removes index entry", () => {
     const appendProposal: MemoryProposal = {
       action: "append",

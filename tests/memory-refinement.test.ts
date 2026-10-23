@@ -84,6 +84,80 @@ describe("refineMemory", () => {
     expect(proposals[0]!.content).toBe("valid");
   });
 
+  it("drops only the bad memory proposal in a batch (#9)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        { action: "append" },
+        {
+          action: "append",
+          type: "project",
+          name: "valid",
+          description: "d",
+          content: "valid content",
+          target_file: "valid.md",
+          reason: "r",
+        },
+      ]),
+    );
+    const result = await refineMemory(sampleSignals, llm, "");
+    expect(result.kind).toBe("proposals");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.target_file).toBe("valid.md");
+    if (result.kind === "proposals") {
+      expect(result.dropped).toBe(1);
+      expect(result.warnings![0]).toMatch(/proposal\[0\] dropped/);
+    }
+  });
+
+  it("reports invalid-output when every memory proposal is invalid (#9)", async () => {
+    const llm = createMockLLM(JSON.stringify([{ action: "append" }, { action: "update" }]));
+    const result = await refineMemory(sampleSignals, llm, "");
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") {
+      expect(result.error).toMatch(/schema/);
+      expect(result.error).toMatch(/all 2 proposals invalid/);
+      expect(result.error).toMatch(/proposal\[0\]/);
+    }
+  });
+
+  it("reports invalid-output when the memory payload is not an array (#9)", async () => {
+    const llm = createMockLLM(JSON.stringify({ action: "append" }));
+    const result = await refineMemory(sampleSignals, llm, "");
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") expect(result.error).toMatch(/expected array/);
+  });
+
+  it("keeps a deprecate proposal with empty content (#9: Track 2 locates by target_file)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        {
+          action: "deprecate",
+          type: "project",
+          name: "old",
+          description: "old context",
+          content: "",
+          target_file: "project_old.md",
+          reason: "superseded",
+        },
+        {
+          action: "append",
+          type: "project",
+          name: "new",
+          description: "new context",
+          content: "valid content",
+          target_file: "project_new.md",
+          reason: "new",
+        },
+      ]),
+    );
+    const result = await refineMemory(sampleSignals, llm, "");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(2);
+    expect(proposals[0]!.action).toBe("deprecate");
+    expect(proposals[0]!.content).toBe("");
+  });
+
   it("passes model param to LLM client", async () => {
     let capturedModel: string | undefined;
     const llm: LLMClient = {
