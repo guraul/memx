@@ -97,7 +97,9 @@ export async function refine(
 
   if (result.data.length === 0) return { kind: "adjudicated-empty", reason: "llm-empty" };
 
-  const proposals = result.data.filter((p) => p.content.length > 0);
+  // #9：deprecate 不需要新内容（只按 target 定位），空 content 的废弃提案必须保留；
+  // append/update 的空内容仍丢弃（schema 已拦一道，这里防御式再挡一次）。
+  const proposals = result.data.filter((p) => p.action === "deprecate" || p.content.length > 0);
   if (proposals.length === 0) return { kind: "adjudicated-empty", reason: "all-filtered" };
 
   return { kind: "proposals", proposals };

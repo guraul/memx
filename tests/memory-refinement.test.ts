@@ -84,6 +84,36 @@ describe("refineMemory", () => {
     expect(proposals[0]!.content).toBe("valid");
   });
 
+  it("keeps a deprecate proposal with empty content (#9: Track 2 locates by target_file)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        {
+          action: "deprecate",
+          type: "project",
+          name: "old",
+          description: "old context",
+          content: "",
+          target_file: "project_old.md",
+          reason: "superseded",
+        },
+        {
+          action: "append",
+          type: "project",
+          name: "new",
+          description: "new context",
+          content: "valid content",
+          target_file: "project_new.md",
+          reason: "new",
+        },
+      ]),
+    );
+    const result = await refineMemory(sampleSignals, llm, "");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(2);
+    expect(proposals[0]!.action).toBe("deprecate");
+    expect(proposals[0]!.content).toBe("");
+  });
+
   it("passes model param to LLM client", async () => {
     let capturedModel: string | undefined;
     const llm: LLMClient = {

@@ -75,14 +75,26 @@ export const StyleSignalSchema = z.object({
   source: z.enum(SOURCES),
 });
 
-export const StyleProposalSchema = z.object({
-  action: z.enum(ACTIONS),
-  category: z.enum(CATEGORIES),
-  content: z.string().max(100),
-  target_line: z.number().int().positive().nullish(),
-  target_text: z.string().max(200).nullish(),
-  reason: z.string().max(200),
-});
+export const StyleProposalSchema = z
+  .object({
+    action: z.enum(ACTIONS),
+    category: z.enum(CATEGORIES),
+    /** #9：deprecate 靠 target_text/target_line 定位，content 可省略（仅作可选备注）；
+     *  append/update 仍必须非空（见下方 superRefine）。 */
+    content: z.string().max(100).default(""),
+    target_line: z.number().int().positive().nullish(),
+    target_text: z.string().max(200).nullish(),
+    reason: z.string().max(200),
+  })
+  .superRefine((data, ctx) => {
+    if (data.action !== "deprecate" && data.content.trim().length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${data.action} requires non-empty content`,
+        path: ["content"],
+      });
+    }
+  });
 
 export const StyleProposalArraySchema = z.array(StyleProposalSchema);
 

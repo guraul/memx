@@ -78,35 +78,92 @@ describe("refine", () => {
     expect(result).toEqual({ kind: "adjudicated-empty", reason: "llm-empty" });
   });
 
-  it("adjudicates empty (all-filtered) when every proposal has empty content", async () => {
+  it("rejects an empty-content append at schema level (invalid-output)", async () => {
     const llm = createMockLLM(
       JSON.stringify([{ action: "append", category: "communication", content: "", reason: "empty" }]),
     );
     const result = await refine(sampleSignals, llm, "");
-    expect(result).toEqual({ kind: "adjudicated-empty", reason: "all-filtered" });
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") {
+      expect(result.error).toMatch(/schema/);
+      expect(result.error).toMatch(/append requires non-empty content/);
+    }
   });
 
-  it("filters out empty content proposals", async () => {
+  it("rejects an empty-content update at schema level (invalid-output)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        { action: "update", category: "communication", content: "", target_text: "先给结论", reason: "empty" },
+      ]),
+    );
+    const result = await refine(sampleSignals, llm, "");
+    expect(result.kind).toBe("invalid-output");
+    if (result.kind === "invalid-output") {
+      expect(result.error).toMatch(/update requires non-empty content/);
+    }
+  });
+
+  it("keeps a deprecate proposal whose content is empty (#9)", async () => {
     const llm = createMockLLM(
       JSON.stringify([
         {
-          action: "append",
-          category: "communication",
+          action: "deprecate",
+          category: "toolchain",
           content: "",
-          reason: "empty",
+          target_text: "项目内跑测试一律用 npm",
+          target_line: 6,
+          reason: "被新信号 pnpm 取代",
         },
         {
           action: "append",
           category: "toolchain",
-          content: "使用 pnpm",
-          reason: "valid",
+          content: "项目内跑测试一律用 pnpm",
+          reason: "新信号",
+        },
+      ]),
+    );
+    const result = await refine(sampleSignals, llm, "");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(2);
+    expect(proposals[0]!.action).toBe("deprecate");
+    expect(proposals[0]!.content).toBe("");
+    expect(proposals[0]!.target_text).toBe("项目内跑测试一律用 npm");
+  });
+
+  it("keeps a deprecate proposal whose content field is omitted (#9)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        {
+          action: "deprecate",
+          category: "toolchain",
+          target_text: "项目内跑测试一律用 npm",
+          reason: "被新信号 pnpm 取代",
         },
       ]),
     );
     const result = await refine(sampleSignals, llm, "");
     const proposals = proposalsOf(result);
     expect(proposals).toHaveLength(1);
-    expect(proposals[0]!.content).toBe("使用 pnpm");
+    expect(proposals[0]!.action).toBe("deprecate");
+    expect(proposals[0]!.content).toBe("");
+  });
+
+  it("keeps a deprecate proposal with content (unchanged behavior)", async () => {
+    const llm = createMockLLM(
+      JSON.stringify([
+        {
+          action: "deprecate",
+          category: "toolchain",
+          content: "已改用 pnpm",
+          target_text: "项目内跑测试一律用 npm",
+          reason: "被新信号取代",
+        },
+      ]),
+    );
+    const result = await refine(sampleSignals, llm, "");
+    const proposals = proposalsOf(result);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]!.content).toBe("已改用 pnpm");
   });
 
   it("works with non-empty USER.md content", async () => {

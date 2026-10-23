@@ -151,6 +151,32 @@ describe("applyProposal", () => {
     expect(result).toContain("(Deprecated: 不再适用)");
   });
 
+  it("deprecates an existing entry with empty content (#9: no note needed)", () => {
+    const doc = parseUserMd(SAMPLE);
+    const comm = doc.sections.find((s) => s.category === "communication")!;
+    const target = comm.lines[0]!;
+
+    const proposal: StyleProposal = {
+      action: "deprecate",
+      category: "communication",
+      content: "",
+      target_text: target.text,
+      reason: "被新偏好取代",
+    };
+    const result = applyProposal(proposal, SAMPLE);
+
+    // 旧条目确实被划掉，不是"没报错"
+    expect(result).not.toContain(`- [${target.date}] ${target.text}`);
+    expect(result).toContain(`- ~~[${target.date}] ${target.text}~~ (Deprecated)`);
+    expect(result).not.toContain("(Deprecated: )");
+
+    // 往返解析：尾缀不被吃进 text，条目仍标记 deprecated
+    const after = parseUserMd(result).sections.find((s) => s.category === "communication")!;
+    const marked = after.lines.find((l) => l.date === target.date)!;
+    expect(marked.deprecated).toBe(true);
+    expect(marked.text).toBe(target.text);
+  });
+
   it("updates an existing entry by line number", () => {
     const doc = parseUserMd(SAMPLE);
     const comm = doc.sections.find((s) => s.category === "communication")!;

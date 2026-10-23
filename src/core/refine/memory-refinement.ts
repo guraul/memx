@@ -77,7 +77,9 @@ export async function refineMemory(
 
   if (result.data.length === 0) return { kind: "adjudicated-empty", reason: "llm-empty" };
 
-  const proposals = result.data.filter((p) => p.content.length > 0);
+  // #9：Track 2 的 deprecate 只按 target_file 定位（落盘不读 content），空 content 的废弃提案必须保留；
+  // append/update 的空内容仍丢弃。
+  const proposals = result.data.filter((p) => p.action === "deprecate" || p.content.length > 0);
   if (proposals.length === 0) return { kind: "adjudicated-empty", reason: "all-filtered" };
 
   return { kind: "proposals", proposals };
