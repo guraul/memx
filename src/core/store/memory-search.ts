@@ -1,6 +1,6 @@
 // core · 记忆全文检索（宿主无关，零宿主依赖）
 //
-// 由来：原先只有 `scripts/mem.ts` 的 `cmdSearch` 能跨 `.mem/*.md` 检索（返回 file:line）。
+// 由来：原先只有对外 CRUD 面 CLI 的 `cmdSearch` 能跨 `.mem/*.md` 检索（返回 file:line）。
 // CLI 退役后这段判定逻辑上提到 core，供宿主工具（DSH `memory_search`）直接调用，
 // 检索语义与旧 CLI 逐字对齐：大小写不敏感、按行匹配、行号从 1 起、命中行 trim。
 //

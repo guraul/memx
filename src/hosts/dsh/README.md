@@ -81,7 +81,7 @@ dsh plugin --profile web add <包名或绝对路径>
 `slug` 缺省都用当前会话 cwd 推导（与注入同一规则，`deriveSlug`）；`memory_search` 在推导不出
 slug 时退化成全库检索（只读，最坏多给几条），`forget` 则直接失败（不给"猜项目删记忆"的机会）。
 
-检索逻辑在 core `src/core/store/memory-search.ts`（原 `scripts/mem.ts` 的 `cmdSearch` 上提，
+检索逻辑在 core `src/core/store/memory-search.ts`（原 mem CLI 的 `cmdSearch` 上提，
 CLI 已退役），因此宿主自己不需要任何 markdown 解析。
 
 ## 与 opencode 宿主的对照

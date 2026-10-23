@@ -37,9 +37,9 @@
 | pull（定时） | 每 `intervalMinutes` | `setInterval(() => void sync?.pull(), …)`（走前置短路路径） |
 | push | **Track 2 提炼写盘成功后** | index.ts:435 `void sync?.push()` |
 | push | **`memory_write` 工具成功后** | index.ts:758 `void sync?.push()` |
-| push | **`forget`（工具 / `pnpm mem forget`）成功后** | issue #21：不立刻推，下一轮 pull 会把刚删的文件拉回 |
+| push | **`forget` 工具成功后** | issue #21：不立刻推，下一轮 pull 会把刚删的文件拉回 |
 
-三个 push 都是 `void` 异步（CLI 侧 await 后只加一行提示）——**绝不阻塞写盘 / 工具返回**。
+三个 push 都是 `void` 异步（绝不阻塞写盘 / 工具返回）。
 
 ## push 流程
 

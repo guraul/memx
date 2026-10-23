@@ -106,13 +106,12 @@ sqlite3 ~/.local/share/opencode/opencode.db \
 | 谁写入 | 写到哪 | 谁读取 |
 |--------|--------|--------|
 | 后台提炼（refine/refineMemory） | USER.md / MEMORY.md + .mem | 下一 step 的 context hook 注入 |
-| memory_write 工具 | 同上（同一条写路、同一把锁） | 同上 |
-| 对外 CRUD 面 CLI（`scripts/mem.ts`，DSH/外部客户端，#13） | 同上（同一写入口 + 同一把锁，`--dry-run` 可预览） | 同上 |
+| memory_write / forget 工具（opencode + DSH） | 同上（同一写入口 + 同一把锁） | 同上 |
 | forget / deprecate | 移入 .trash + 索引改条目 | 注入的索引随之更新 |
 | health auto-fix | MEMORY.md 索引（同锁内） | 同上 |
 | 报警（`recordAlert`） | `memx-alerts.json`（事实源）+ kv `diag.alerts`（镜像）+ MEMORY.md 首行面包屑 | doctor / `memx_status` / **模型**（面包屑随索引被注入） |
 | 云同步 push | `memx-sync-repo/` → 远端 Git 仓（USER.md / MEMORY.md / `.mem/**`） | 其他机器的 pull；状态被 doctor 读取 |
 | 云同步 pull | 本地记忆文件（远端优先；本地差异先存 `.bak.<ts>`） | 下一 step 的 context hook 注入 |
-| 主 AI（❗非 memx 行为） | 可能自行写 AGENTS.md 等文件 | 宿主指令组装——**这是所有权缺口，协议 v1.1.0 规则 9 是软约束** |
+| 主 AI（❗非 memx 行为） | 可能自行写 AGENTS.md 等文件 | 宿主指令组装——**这是所有权缺口，协议 v1.2.0 规则 9 是软约束** |
 
 **多宿主并发**：文件锁（mtime TTL + 锁内重读）已覆盖"两个进程同时读改写同一文件"；未来 DSH 壳将共享 `~/.opencode/` 数据目录（2026-10-13 拍板，见 DSH-ADAPT.md）。

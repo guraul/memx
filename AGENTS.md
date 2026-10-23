@@ -53,17 +53,17 @@ OpenCode V2 双轨记忆插件（Track 1 用户风格 + Track 2 项目记忆）�
     - ① **issue / PR 一旦关闭，必须立刻清理对应 worktree + 本地分支**：`git worktree remove --force <path>` → `git branch -D <branch>`（squash 合并后提交**不是** main 祖先，故用 `-D`）→ `git worktree prune` → `git worktree list` 确认只剩主工作区。
     - ② **本仓的任务分支必须落在仓库外的 worktree 容器** `/Users/gubin/workspace/memx-worktrees/`，**绝不** checkout 在主仓 —— 本机 opencode **从主仓加载本插件源码**（`~/.config/opencode/plugins/memx.ts` → `src/hosts/opencode/index`），主仓切到未合并分支会让**插件加载到未合并代码**（已真实发生过一次）。
     - ③ 建 worktree 一律**绝对路径 + 从主仓根执行**（在子目录里跑 `git worktree add .worktrees/X` 会嵌进错误的 worktree）；`scripts/pipeline/new-task.sh` 依赖 HTTPS fetch、在本机可能挂 → 先 `git fetch`（SSH）再手工 `git worktree add`。
-17. **对外记忆 I/O 只走 `scripts/mem.ts`（#13 / agent-mobile#62 路径 A）**：DSH 与其它外部客户端**读写本仓记忆一律经 `pnpm mem …`** —— 读 `list` / `search` / `get` / `status`；写 `write`（stdin 传 `MemoryProposal[]`）/ `forget`（软删进 `.trash`）；**写前先 `--dry-run`**。
-    - **禁止直写 `~/.opencode/**` 的 markdown**：会绕过 `withFileLock` + 索引更新 + `.bak`，留下"**不在索引里的孤儿**"（2026-10-17 实测 `status` 报 `orphanFiles=3`：文件在磁盘、注入链看不到）与格式分叉。
-    - 语义（规格如此，勿当 bug）：`list` 列**所有** slug 小节；`status` 报**全局**计数 + 健康摘要（含 `deadLinks`/`orphanFiles`/`indexLines`）；退出码 `0` 成功 / `1` 用法错误 / `2` 业务错误。
-    - 命令面与示例见 `docs/knowledge-base/OPERATIONS.md §3.1`；实现 = PR #14（`4f32fbd`）。
+17. **读写记忆只走宿主工具（`memory_write` / `memory_search` / `forget`）或提炼单写者（#24 起 CLI 退役）**：DSH 与 opencode 两边都经宿主工具调 core——写 `writeProjectMemory`、检索 `searchMemories`、软删 `forgetMemory` + `writeMemoryIndex`（**同一写入口 + 同一把锁**）。原对外 CRUD 面 CLI（`mem` 脚本）已于 2026-10-23 删除（检索逻辑上提到 `src/core/store/memory-search.ts`）。
+    - **禁止直写 `~/.opencode/**` 的 markdown**：会绕过 `withFileLock` + 索引更新 + `.bak`，留下"**不在索引里的孤儿**"（2026-10-17 实测（当时的 `status` 子命令）报 `orphanFiles=3`：文件在磁盘、注入链看不到）与格式分叉。
+    - 读单条记忆就直接只读 `~/.opencode/projects/<slug>/.mem/<file>.md`；需要全文检索用 `memory_search`（大小写不敏感、返回 `file:line`）。
+    - 语义（规格如此，勿当 bug）：`memory_search` 缺省只查当前项目（不传 slug 才全库）；`forget` 是软删（文件进 `.mem/.trash/` + 移除索引条目），回执 `[memx] 已遗忘 N 条：…` / `[memx] 未匹配：<kw>`。
+    - 实现：`src/hosts/dsh/index.ts`（宿主工具）+ `src/core/store/memory-search.ts`（检索）；说明见 `docs/knowledge-base/OPERATIONS.md §3.1`（已退役说明）与 `src/hosts/dsh/README.md`「工具」。
 
 ## 常用命令（详情见 OPERATIONS.md）
 
 ```bash
-pnpm test            # vitest run（基线 25 文件 / 366 用例）
+pnpm test            # vitest run（基线 26 文件 / 396 用例）
 pnpm run typecheck   # tsc --noEmit
-pnpm mem <slug|list|search|get|status|write|forget> [...]  # 对外 CRUD 面（#13）：只经 core 既有函数，退出码 0/1/2
 pnpm run doctor      # 只读状态面板：alerts / memory files / opencode diag / sync（含 sync.unsyncedCommits）
 pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永不 push）
 pnpm sync:op -- status|pull|push|both [--machine=<name>]

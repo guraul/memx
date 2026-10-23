@@ -1,4 +1,4 @@
-// core 记忆检索（原 `scripts/mem.ts` 的 `cmdSearch` 上提）单测。
+// core 记忆检索（原 mem CLI 的 `cmdSearch` 上提）单测。
 //
 // 隔离：句柄指向本文件自己的临时 HOME（规则 14：每文件独立 tmp home），绝不碰真实 ~/.opencode。
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vitest";

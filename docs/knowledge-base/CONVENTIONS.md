@@ -31,7 +31,7 @@
 | 17 | **健康日志不再写进 MEMORY.md** | HTML 注释会被下一次序列化吃掉（历史 bug）。`runHealthMaintenance` 只回传 logs → `diag.health` / alerts。**唯一例外**：阶段 4 的**一行自替换报警面包屑**（`<!-- memx: … -->`，仅 warn/critical 时存在，每次写盘先删旧行再插）走 preamble——别把"日志流"和"面包屑"混为一谈 |
 | 18 | **合法空数组 ≠ 坏输出** | 前者必须清缓冲结案（否则同批信号每轮重烧 LLM）；坏输出保留重试，连续 3 次丢弃 + 报警 |
 | 19 | **context hook 两分支顺序固定** | 子会话先判（整体替换 + temperature 0.2，注入绝不参与——漏进去污染提炼输入且是 403 高危）；其余会话只 append 绝不替换（hook 触发时 `event.system` 已含 agent.system + AGENTS.md 合并正文）。hook 内不 await、异常退化为不注入。**写坏 `event.system` 的表现是"模型静默变笨"而非报错** |
-| 20 | **⚠️ 所有权缺口（仍未硬防）** | 2026-10-12 实测：模型把测试对话里的偏好自行写进全局 `~/.config/opencode/AGENTS.md`（10→26 行，人工回滚）。协议 v1.1.0 规则 9（"Never write memory into any file yourself"）只是系统提示词软约束。硬防要等宿主只读/白名单能力。参照 Aider 把 conventions 文件标只读 |
+| 20 | **⚠️ 所有权缺口（仍未硬防）** | 2026-10-12 实测：模型把测试对话里的偏好自行写进全局 `~/.config/opencode/AGENTS.md`（10→26 行，人工回滚）。协议 v1.2.0 规则 9（"Never write memory into any file yourself"）只是系统提示词软约束。硬防要等宿主只读/白名单能力。参照 Aider 把 conventions 文件标只读 |
 
 ## 3. 工程约定
 

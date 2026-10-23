@@ -6,7 +6,7 @@
 //      缓存不失效的前提，所以这里绝不放时间/计数/随机。
 //   ② 工具：`ctx.tools.register` 注册 `memory_write` / `memory_search` / `forget`，写入口与
 //      opencode 完全同一份（core 的 `writeProjectMemory` / `forgetMemory` + 索引写盘），
-//      检索走 core `searchMemories`（原 `scripts/mem.ts` 的 cmdSearch 上提）。
+//      检索走 core `searchMemories`（原 mem CLI 的 cmdSearch 上提）。
 //   ③ 轮末补记：`session/event` 过滤 `turn/end` → `autoRefine === false` 直接跳过 →
 //      本轮已有工具写入则跳过 → 会话级节流（throttleMinutes，默认 10）→ `ctx.llm.stream`
 //      提炼 → 写盘 → 下次 pre-step 展示「已记住 N 条」。
@@ -472,7 +472,7 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
   }
 
   // ── ②b 工具：memory_search / forget（#24）──────────────────────────────────
-  // 与 opencode 宿主同一份 core：检索走 `searchMemories`（原 `scripts/mem.ts` 的 cmdSearch
+  // 与 opencode 宿主同一份 core：检索走 `searchMemories`（原 mem CLI 的 cmdSearch
   // 上提到 core），遗忘走 `withFileLock` + `forgetMemory` + `writeMemoryIndex`。
   // 两者都是"模型可调"的只读/受控写入口，任何异常只能变成 `[memx] … 失败：…` 回执。
   const MEMORY_SEARCH_MAX_HITS = 20;

@@ -16,7 +16,7 @@
 
 ## 信号格式
 
-Track 1（由协议 v1.1.0 约束，真源 `src/core/protocol-template.ts`）：
+Track 1（由协议 v1.2.0 约束，真源 `src/core/protocol-template.ts`）：
 
 ```
 <!-- STYLE_SIGNAL: {"category":"communication|toolchain|architecture|pitfall","content":"...","evidence":"...","confidence":"...","source":"..."} -->
