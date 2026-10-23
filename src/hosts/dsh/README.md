@@ -12,7 +12,7 @@ DSH（DeepSeek Harness）侧的记忆插件壳。目标是让 DSH 与 OpenCode �
 
 | 文件 | 职责 |
 |------|------|
-| `index.ts` | 插件入口：`name` / `inject` / `Config` / `apply`。注册注入段、`memory_write` 工具、`session/event` 轮末补记 |
+| `index.ts` | 插件入口：`name` / `inject` / `Config` / `apply`。注册注入段、`memory_write` / `memory_search` / `forget` 三个工具、`session/event` 轮末补记 |
 | `llm.ts` | `ctx.llm.stream` → core 的 `LLMClient`（一次性模型调用，不造子会话）；`resolveRoute` 校验 provider/model |
 | `types.ts` | 零依赖的结构类型（官方 `@deepseek-ai/dsh-*` 声明的最小子集） |
 
@@ -66,6 +66,24 @@ dsh plugin --profile web add <包名或绝对路径>
 # memx.config.json 不用重启（每次提炼重读）
 ```
 
+## 工具
+
+三个工具都是模型可调入口，**写路径与 opencode 完全同一份 core**（`writeProjectMemory` /
+`withFileLock` + `applyMemoryProposals` / `forgetMemory` + `writeMemoryIndex`）。任何异常只
+变成 `[memx] … 失败：<原因>` 回执，绝不抛回宿主。
+
+| 工具 | 参数 | 行为 | 回执 |
+|------|------|------|------|
+| `memory_write` | `text`（必填）/ `type` / `name` / `description` / `why` / `how_to_apply` / `evidence` | 写一条项目记忆（同名同类型视为修订） | `[memx] 已记住：<name>` |
+| `memory_search` | `keyword`（必填）/ `slug` | 跨 `.mem/*.md` 全文检索（大小写不敏感），返回 `slug/file:line — 命中行`，最多 20 条 | `[memx] 未匹配：<keyword>`（无命中） |
+| `forget` | `keyword`（必填）/ `slug` | 软删：文件移入 `.mem/.trash` + 移除 MEMORY.md 条目（锁内 `forgetMemory`） | `[memx] 已遗忘 N 条：<files>` / `[memx] 未匹配：<keyword>` |
+
+`slug` 缺省都用当前会话 cwd 推导（与注入同一规则，`deriveSlug`）；`memory_search` 在推导不出
+slug 时退化成全库检索（只读，最坏多给几条），`forget` 则直接失败（不给"猜项目删记忆"的机会）。
+
+检索逻辑在 core `src/core/store/memory-search.ts`（原 mem CLI 的 `cmdSearch` 上提，
+CLI 已退役），因此宿主自己不需要任何 markdown 解析。
+
 ## 与 opencode 宿主的对照
 
 | 维度 | `src/hosts/opencode/` | `src/hosts/dsh/` |
@@ -99,7 +117,9 @@ dsh plugin --profile web add <包名或绝对路径>
 1. **注入**：每个会话第一次装配时求值一次 `buildInjectionParts(readInjectionSourcesForSlug(...))`，
    之后同一 `agent` 对象拿到同一串字节。注入正文里**不含时间/计数/随机**——否则每轮字节漂移
    会让宿主缓存全失效。
-2. **工具**：`memory_write` 的参数与 opencode 那版逐字段对齐；成功回执 `[memx] 已记住：<name>`。
+2. **工具**：`memory_write` 的参数与 opencode 那版逐字段对齐；`memory_search` / `forget` 与
+   opencode 同走 core（检索 `searchMemories`、遗忘 `forgetMemory` + 写索引）。成功回执
+   `[memx] 已记住：<name>` / `[memx] 已遗忘 N 条：…`。
 3. **轮末补记**：`turn/end` → `autoRefine === false` 直接跳过 → 同 turn 幂等 → 本轮有工具写入则跳过
    → `captureMemorySignals` 无信号则跳过 → 会话级节流（`throttleMinutes`）→ 解析路由 →
    `pipeline.refineMemory(true)`。整个过程 `queueMicrotask` 起步，**不 await 阻塞事件分发**。

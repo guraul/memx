@@ -4,8 +4,9 @@
 //   ① 注入：`ctx.systemPrompt.section` 注册一段「协议 + Track 1 画像 + 当前项目小节」。
 //      **每个会话只求值一次**（WeakMap by agent），保证整段会话字节恒定——恒定字节是
 //      缓存不失效的前提，所以这里绝不放时间/计数/随机。
-//   ② 工具：`ctx.tools.register` 注册 `memory_write`，写入口与 opencode 完全同一份
-//      （core 的 `writeProjectMemory`），回执 `[memx] 已记住：<name>`。
+//   ② 工具：`ctx.tools.register` 注册 `memory_write` / `memory_search` / `forget`，写入口与
+//      opencode 完全同一份（core 的 `writeProjectMemory` / `forgetMemory` + 索引写盘），
+//      检索走 core `searchMemories`（原 mem CLI 的 cmdSearch 上提）。
 //   ③ 轮末补记：`session/event` 过滤 `turn/end` → `autoRefine === false` 直接跳过 →
 //      本轮已有工具写入则跳过 → 会话级节流（throttleMinutes，默认 10）→ `ctx.llm.stream`
 //      提炼 → 写盘 → 下次 pre-step 展示「已记住 N 条」。
@@ -28,6 +29,9 @@ import { SessionPipeline } from "../../core/pipeline/session.ts";
 import type { PipelineDiagnostics, PipelineHost } from "../../core/pipeline/session.ts";
 import { captureMemorySignals } from "../../core/signals/memory-capture.ts";
 import { writeProjectMemory, applyBreadcrumbLine } from "../../core/memory-write.ts";
+import { forgetMemory, readMemoryIndex, writeMemoryIndex } from "../../core/store/memory-md.ts";
+import { memoryIndexLockPath, withFileLock } from "../../core/store/lock.ts";
+import { searchMemories } from "../../core/store/memory-search.ts";
 import { createFileAlertStore, formatBreadcrumb } from "../../core/alerts.ts";
 import { createDshLLMClient, resolveRoute } from "./llm.ts";
 import type { DshModelRoute } from "./llm.ts";
@@ -460,6 +464,129 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
         } catch (err) {
           recordFailure(err);
           return { ok: false, name: "", message: `[memx] memory_write 失败：${String(err)}` };
+        }
+      },
+    });
+  } catch (err) {
+    recordFailure(err);
+  }
+
+  // ── ②b 工具：memory_search / forget（#24）──────────────────────────────────
+  // 与 opencode 宿主同一份 core：检索走 `searchMemories`（原 mem CLI 的 cmdSearch
+  // 上提到 core），遗忘走 `withFileLock` + `forgetMemory` + `writeMemoryIndex`。
+  // 两者都是"模型可调"的只读/受控写入口，任何异常只能变成 `[memx] … 失败：…` 回执。
+  const MEMORY_SEARCH_MAX_HITS = 20;
+  const MEMORY_HIT_TEXT_MAX = 160;
+
+  const truncateHit = (text: string): string =>
+    text.length <= MEMORY_HIT_TEXT_MAX ? text : text.slice(0, MEMORY_HIT_TEXT_MAX - 1) + "…";
+
+  /** slug 缺省 = 当前会话 cwd 推导（与注入同一规则）；`memory_search` 推导失败时退化成全库检索。 */
+  const slugArgOrSession = (explicit: string | undefined, agent: DshAgent | undefined): string => {
+    const trimmed = explicit?.trim();
+    if (trimmed !== undefined && trimmed !== "") return trimmed;
+    return slugFor(agent);
+  };
+
+  const TOOL_OUTPUT = {
+    schema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        message: { type: "string" },
+      },
+      required: ["ok", "message"],
+    },
+    render(_args: unknown, value: unknown) {
+      const text = (value as { message?: unknown } | undefined)?.message;
+      return [{ type: "text", text: typeof text === "string" ? text : "[memx] 无输出" }];
+    },
+  };
+
+  const MEMORY_SEARCH_DESCRIPTION =
+    "检索记忆库（跨 .mem/*.md 全文、大小写不敏感），返回 file:line 与命中行。用户问“之前记过什么 / 有没有记过 X”时先查再答；缺省只查当前项目，可用 slug 指定别的项目。";
+
+  try {
+    ctx.tools.register({
+      name: "memory_search",
+      description: MEMORY_SEARCH_DESCRIPTION,
+      parameters: {
+        type: "object",
+        properties: {
+          keyword: { type: "string", description: "检索关键词（大小写不敏感；匹配标题 / hook / 正文任意一行）" },
+          slug: { type: "string", description: "限定项目 slug；缺省用当前会话工作目录推导（与注入同一规则）" },
+        },
+        required: ["keyword"],
+      },
+      output: TOOL_OUTPUT,
+      async execute(args, exec) {
+        const input = (args ?? {}) as { keyword?: string; slug?: string };
+        try {
+          const keyword = input.keyword ?? "";
+          const slug = slugArgOrSession(input.slug, exec?.agent);
+          // slug 推导不出来时不做"猜项目"：全库检索（只读，最坏是多给几条）
+          const hits = searchMemories(keyword, slug === "" ? undefined : slug);
+          if (hits.length === 0) {
+            return { ok: true, message: `[memx] 未匹配：${keyword}` };
+          }
+          const shown = hits.slice(0, MEMORY_SEARCH_MAX_HITS);
+          const lines = shown.map((hit) => `${hit.slug}/${hit.file}:${hit.line} — ${truncateHit(hit.text)}`);
+          if (hits.length > shown.length) lines.push(`… 另有 ${hits.length - shown.length} 处未显示`);
+          return { ok: true, message: lines.join("\n") };
+        } catch (err) {
+          recordFailure(err);
+          return { ok: false, message: `[memx] memory_search 失败：${String(err)}` };
+        }
+      },
+    });
+  } catch (err) {
+    recordFailure(err);
+  }
+
+  const FORGET_DESCRIPTION =
+    '忘记匹配关键词的项目记忆（软删：文件移入 .mem/.trash 并从 MEMORY.md 索引移除）。用户说“忘掉 X / 删掉那条记忆”时调用；关键词按标题 / hook / 文件名匹配。';
+
+  try {
+    ctx.tools.register({
+      name: "forget",
+      description: FORGET_DESCRIPTION,
+      parameters: {
+        type: "object",
+        properties: {
+          keyword: { type: "string", description: "匹配记忆标题 / hook / 文件名的关键词" },
+          slug: { type: "string", description: "限定项目 slug；缺省用当前会话工作目录推导（与注入同一规则）" },
+        },
+        required: ["keyword"],
+      },
+      output: TOOL_OUTPUT,
+      async execute(args, exec) {
+        const input = (args ?? {}) as { keyword?: string; slug?: string };
+        try {
+          const keyword = (input.keyword ?? "").trim();
+          if (keyword === "") {
+            return { ok: false, message: "[memx] forget 失败：keyword 不能为空" };
+          }
+          const slug = slugArgOrSession(input.slug, exec?.agent);
+          if (slug === "") {
+            return { ok: false, message: "[memx] forget 失败：取不到会话工作目录" };
+          }
+          // 与 memory_write 同一把锁：读索引 → 遗忘 → 写索引，三步都在锁内，
+          // 避免与提炼/其它宿主实例的 read-modify-write 互相覆盖。
+          const removed = await withFileLock(memoryIndexLockPath(), () => {
+            const existing = readMemoryIndex();
+            const result = forgetMemory(keyword, existing, slug);
+            if (result.removed.length > 0) {
+              writeMemoryIndex(applyBreadcrumbLine(result.newIndex, formatBreadcrumb(alertStore)));
+            }
+            return result.removed;
+          });
+          if (removed.length === 0) {
+            return { ok: false, message: `[memx] 未匹配：${keyword}` };
+          }
+          return { ok: true, message: `[memx] 已遗忘 ${removed.length} 条：${removed.join(", ")}` };
+        } catch (err) {
+          recordFailure(err);
+          return { ok: false, message: `[memx] forget 失败：${String(err)}` };
         }
       },
     });

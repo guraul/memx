@@ -37,7 +37,7 @@ OpenCode V2 双轨记忆插件：主 AI 在回复里用 HTML 注释打信号标�
 | 多机云同步（Git 镜像 + PII 闸门 + dry-run） | core | `src/core/sync.ts` |
 | system prompt 注入装配（三块、200 行/25KB 上限、agent 闸门） | core | `src/core/injection.ts` + `pipeline/injection-source.ts` |
 | context hook 判定（子会话整体替换 vs 其余 append） | hosts | `src/hosts/opencode/context-hook.ts` |
-| 信号协议唯一真源（v1.1.0） | core | `src/core/protocol-template.ts` |
+| 信号协议唯一真源（v1.2.0） | core | `src/core/protocol-template.ts` |
 | 配置加载（memx.config.json + Zod 默认值） | core | `src/core/config.ts` |
 | 提炼节流（内存态，默认 10 分钟） | core | `src/core/llm/throttle.ts` |
 | 4 个工具：reflect / memory_write / forget / memx_status | hosts | `src/hosts/opencode/index.ts`（`ctx.tool.transform`） |
@@ -70,7 +70,7 @@ memx/
 │   │   ├── types.ts              # Track 1：分类/来源/置信度/动作枚举、Signal/Proposal、USER.md 文档模型、Zod
 │   │   ├── memory-types.ts       # Track 2：MEMORY_TYPES、Signal/Proposal Zod、deriveSlug()
 │   │   ├── config.ts             # memx.config.json 加载（含 sync 段）+ 默认值
-│   │   ├── protocol-template.ts  # 信号协议唯一真源（PROTOCOL_VERSION=1.1.0）
+│   │   ├── protocol-template.ts  # 信号协议唯一真源（PROTOCOL_VERSION=1.2.0）
 │   │   ├── injection.ts          # 注入装配纯函数（顺序/上限/截断提示/闸门真值表）
 │   │   ├── pipeline/             # 宿主无关流水线（#17）：session.ts + injection-source.ts
 │   │   ├── alerts.ts             # 报警账本（文件单一事实源 + 面包屑/面板格式化）

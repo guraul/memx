@@ -72,25 +72,23 @@ pnpm sync:op pii     # 只读 PII 自查：命中明细 file / 行号 / 规则�
 pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
 ```
 
-## 3.1 对外 CRUD 面（`scripts/mem.ts`，issue #13 / agent-mobile#62 路径 A 切片 1）
+## 3.1 对外 CRUD 面（已退役，2026-10-23 / #24）
 
-DSH 与外部工具当客户端、经 bash 直接调用的**只读+受控写**入口。命令面：
+原对外 CRUD 面 CLI（`mem` 脚本，`slug|list|search|get|status|write|forget` 子命令）已删除。外部客户端
+不再经 bash 调 CLI，改由**宿主工具**走同一份 core：
 
-```bash
-pnpm mem slug [--dir <path>]                # 按宿主同款规则推导 slug（deriveSlug）
-pnpm mem list [--json]                      # 列索引里的 slug 小节与条目
-pnpm mem search <kw> [--slug <s>] [--json]  # 跨 .mem/*.md 检索（标题/hook/正文，给行号）
-pnpm mem get <slug> <filename> [--json]     # 打印单条记忆
-pnpm mem status [--json]                    # 计数 + 健康摘要
-pnpm mem write --slug <s> [--dry-run] [--json]   # stdin 读 JSON（MemoryProposal[]）→ 锁内 applyMemoryProposals + 写索引
-pnpm mem forget <keyword> --slug <s> [--dry-run] [--json]  # 软删（进 .trash）+ 移除索引条目
-```
+| 需求 | 现在的入口 |
+|------|------------|
+| 读：检索 / 列条目 / 看健康 | 宿主工具 `memory_search`（DSH）/ opencode 侧 `memx_status` |
+| 写一条记忆 | 宿主工具 `memory_write`（与提炼共用 `withFileLock` + `applyMemoryProposals`） |
+| 软删 | 宿主工具 `forget`（锁内 `forgetMemory` + `writeMemoryIndex`，文件进 `.mem/.trash/`） |
+| 单条详情 | 直接读 `~/.opencode/projects/<slug>/.mem/<file>.md`（只读） |
 
-- `--slug` 与 `--dir` 二选一（`--dir` 走 `deriveSlug`）；`slug`/`list`/`status` 之外缺这两者报用法错误。
-- 退出码：`0` 成功 / `1` 用法错误 / `2` 业务错误（slug 不存在、未匹配、载荷非法）。
-- **与提炼单写者的关系**：提炼（refine/refineMemory）仍是**唯一写者**、路径不变；CLI 与 `memory_write` 工具**共用同一写入口**（`withFileLock` + `applyMemoryProposals` / `forgetMemory` + `writeMemoryIndex`），不另写解析、不直写 markdown——避免两个写者 + 格式分叉。
-- 写盘副作用：`writeMemoryIndex` 覆盖前自动生成 `MEMORY.md.bak.<ts>`（留 5 份）；`forget`/`deprecate` 把文件移入 `.mem/.trash/`（软删可恢复）。
-- 集成测试 `tests/mem-cli.test.ts`：每用例独立 `HOME=<tmp>`（绝不碰真实 `~/.opencode`），child_process 真跑 CLI。
+检索逻辑保留在 core `src/core/store/memory-search.ts`（`searchMemories(keyword, slug?)`），
+所以删 CLI **没有**丢掉"跨 `.mem/*.md` 找 file:line"的能力。
+
+- 写盘副作用不变：`writeMemoryIndex` 覆盖前自动生成 `MEMORY.md.bak.<ts>`（留 5 份）；`forget`/`deprecate` 把文件移入 `.mem/.trash/`（软删可恢复）。
+- 宿主工具的 slug 缺省按会话 cwd 用 `deriveSlug` 推导（与注入一致）。
 
 - ⚠️ **必须 `pnpm run doctor`**，别用 `pnpm doctor`——pnpm 有同名内建命令，会静默跑成 pnpm 自检而不是 memx 面板。
 - CLI 走 `node --experimental-strip-types` 直载 `.ts`：**相对 import 必须带 `.ts` 扩展名**（缺了 tsc/vitest 都发现不了，运行时才 `ERR_MODULE_NOT_FOUND`）；`tests/scripts-smoke.test.ts` 真跑脚本兜这条，所以**加了 CLI 就要让它进冒烟测试**。
