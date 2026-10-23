@@ -523,3 +523,81 @@ describe("memory_write 工具", () => {
     expect(value.message).toContain("memory_write 失败");
   });
 });
+
+describe("memory_search / forget 工具（#24）", () => {
+  /** 先用 memory_write 造一条真实记忆（文件 + 索引都落盘），再让被测工具去动它。 */
+  async function seedMemory(h: Harness): Promise<void> {
+    const write = h.tools.find((t) => t.name === "memory_write")!;
+    const value = (await write.execute(
+      { text: "BFF CORS 只放行 9928 三个 origin", name: "CORS 白名单" },
+      { agent: h.agent },
+    )) as { ok: boolean };
+    expect(value.ok).toBe(true);
+  }
+
+  it("memory_search：命中返回 slug/file:line 与命中行，slug 缺省按会话 cwd", async () => {
+    const h = makeHarness();
+    apply(h.ctx, {});
+    await seedMemory(h);
+
+    const tool = h.tools.find((t) => t.name === "memory_search")!;
+    const parameters = tool.parameters as { required?: string[] };
+    expect(parameters.required).toEqual(["keyword"]);
+
+    const value = (await tool.execute({ keyword: "bff cors" }, { agent: h.agent })) as {
+      ok: boolean;
+      message: string;
+    };
+    expect(value.ok).toBe(true);
+    expect(value.message).toMatch(new RegExp(`${PROJ_SLUG}/[^:]+:\\d+ — `));
+    expect(value.message).toContain("BFF CORS 只放行 9928 三个 origin");
+    // 紧凑文本直接走 render
+    expect(tool.output.render({}, value)).toEqual([{ type: "text", text: value.message }]);
+  });
+
+  it("memory_search：slug 显式指定别的项目 → 不串项目（未匹配回执）", async () => {
+    const h = makeHarness();
+    apply(h.ctx, {});
+    await seedMemory(h);
+
+    const tool = h.tools.find((t) => t.name === "memory_search")!;
+    const value = (await tool.execute({ keyword: "bff cors", slug: OTHER_SLUG }, { agent: h.agent })) as {
+      ok: boolean;
+      message: string;
+    };
+    expect(value.message).toBe("[memx] 未匹配：bff cors");
+  });
+
+  it("forget：软删进 .mem/.trash 并从索引移除，回执「已遗忘 N 条」", async () => {
+    const h = makeHarness();
+    apply(h.ctx, {});
+    await seedMemory(h);
+    const memDir = join(DIR, "projects", PROJ_SLUG, ".mem");
+    const filenames = readdirSync(memDir).filter((f) => f.endsWith(".md"));
+    expect(filenames).toHaveLength(1);
+
+    const tool = h.tools.find((t) => t.name === "forget")!;
+    const value = (await tool.execute({ keyword: "CORS 白名单" }, { agent: h.agent })) as {
+      ok: boolean;
+      message: string;
+    };
+    expect(value.ok).toBe(true);
+    expect(value.message).toBe(`[memx] 已遗忘 1 条：${filenames[0]}`);
+    // 文件进 .trash（软删可恢复），原路径消失
+    expect(readdirSync(memDir).filter((f) => f.endsWith(".md"))).toHaveLength(0);
+    expect(readdirSync(join(memDir, ".trash")).some((f) => f.startsWith(filenames[0]!))).toBe(true);
+    // 索引条目被移除，别的项目小节不受影响
+    const index = readFileSync(join(DIR, "MEMORY.md"), "utf-8");
+    expect(index).not.toContain("CORS 白名单");
+    expect(index).toContain(`## ${OTHER_SLUG}`);
+  });
+
+  it("forget：keyword 为空 → 失败回执，不抛", async () => {
+    const h = makeHarness();
+    apply(h.ctx, {});
+    const tool = h.tools.find((t) => t.name === "forget")!;
+    const value = (await tool.execute({ keyword: "  " }, { agent: h.agent })) as { ok: boolean; message: string };
+    expect(value.ok).toBe(false);
+    expect(value.message).toContain("forget 失败");
+  });
+});
