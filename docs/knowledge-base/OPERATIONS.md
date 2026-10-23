@@ -123,6 +123,7 @@ pnpm mem forget <keyword> --slug <s> [--dry-run] [--json]  # 软删（进 .trash
 | MEMORY.md 首行有 `<!-- memx: ⚠️ … -->` | 有 warn/critical 报警未销账——`pnpm run doctor` 看明细，修好后 `pnpm alerts:clear --code=X` |
 | 同步没动静 | `doctor` 的 sync 段：`enabled` / `machineName` 是否都非空；改过配置是否忘了重启宿主 |
 | 同步一直失败刷屏 | `memx-sync-state.json` 的 `lastError` / `consecutiveFailures`；报警已按同 code+message 去重 |
+| forget 掉的文件又被拉回来 / `mem status` 报 `orphanFiles` 不降 | `doctor` 看 `sync.pendingDeletions`（远端还有、本地已删）：>0 说明删除还没推出去，跑 `pnpm sync:op -- push` 收敛；issue #21 起 `forget` 成功后会自动推 |
 | push 被拒（PII） | `pnpm sync:op pii`（或 `pnpm sync:dry-run`）看命中的 file/行号/规则名；**不要**为了推上去而删规则，先确认是真密钥（清理记忆内容）还是词形误报（调规则 + 补正反例测试） |
 | push 返回 `no-change` 但本地有提交没推出去 | `doctor` 的 `sync.unsyncedCommits`；issue #12 后 `no-change` 只在"无文件差异**且**无未推提交"时成立，>0 会照常 push |
 | pull 后本地改动没了 | 找 `<file>.bak.<ts>`（pull 覆盖前自动备份，每文件留 5 份） |

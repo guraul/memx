@@ -1,6 +1,6 @@
 # modules/sync.md — 多机云同步
 
-> 最后更新: 2026-10-17 · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）
+> 最后更新: 2026-10-23 · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）/ #21（删除传播）
 
 ## 职责
 
@@ -37,8 +37,9 @@
 | pull（定时） | 每 `intervalMinutes` | `setInterval(() => void sync?.pull(), …)`（走前置短路路径） |
 | push | **Track 2 提炼写盘成功后** | index.ts:435 `void sync?.push()` |
 | push | **`memory_write` 工具成功后** | index.ts:758 `void sync?.push()` |
+| push | **`forget`（工具 / `pnpm mem forget`）成功后** | issue #21：不立刻推，下一轮 pull 会把刚删的文件拉回 |
 
-两个 push 都是 `void` 异步——**绝不阻塞写盘**。
+三个 push 都是 `void` 异步（CLI 侧 await 后只加一行提示）——**绝不阻塞写盘 / 工具返回**。
 
 ## push 流程
 
@@ -47,15 +48,19 @@
    命中 → 拒推 + SYNC_PII_BLOCKED critical（只报行号+规则名，绝不回显内容）
 2. withFileLock(~/.opencode/.memx-sync.lock, ttl 10min / 等锁 5min)
      copy 到 workdir
+     → 删除传播（issue #21）：基线树里有、本地已删的同步文件 → 从 workdir 删掉
+       （基线 = lastRemoteSha，旧状态无 sha 但同步过 → HEAD；从未同步 → 不删，见下）
      → git status --porcelain（有无文件差异）
      → git rev-list --count @{u}..HEAD（未推提交数，issue #12；取不到 = null → fail-open 不据此短路）
      → 无文件差异 **且** 未推提交 = 0 → kind="no-change" 收工（销 SYNC_ERROR / SYNC_PUSH_FAILED）
-     → 有文件差异：add → commit
+     → 有文件差异：add -A → commit（删除会出现在 numstat，如 `path +0 -3 行`）
      → 有未推提交但无文件差异：不造空提交，直接进入 push（补推）
      → push 被拒（非快进）→ fetch + rebase + 重试一次
      再失败 → SYNC_PUSH_FAILED warn
-3. 写 memx-sync-state.json（含 unsyncedCommits）；成功路径 resolve("SYNC_ERROR") / resolve("SYNC_PUSH_FAILED")
+3. 写 memx-sync-state.json（含 unsyncedCommits / lastRemoteSha）；成功路径 resolve("SYNC_ERROR") / resolve("SYNC_PUSH_FAILED")
 ```
+
+**为什么 push 成功也写 `lastRemoteSha`**（#21）：push 后远端 tip 就是本次镜像结果。不写的话，下一次 pull 的删除基线还停在 push 之前，可能把"push 之后本地又重建"的文件误判成远端删除。写过之后，pull 只认"push 之后别的机器删掉的"。
 
 ## pull 流程
 
@@ -65,7 +70,12 @@
        git ls-remote origin refs/heads/<branch> → sha 与 lastRemoteSha 相同
          → 只刷 lastPullAt（不销账、不动 lastError/consecutiveFailures）→ kind="no-change" 收工
          ⚠️ ls-remote 失败 / 远端变了 / 解析不出 → fail-open，继续下面的完整流程
-  → fetch → 逐文件比对（远端优先）
+  → fetch → rebase
+  → 远端删除（issue #21，先于回拷）
+       git diff --name-only --diff-filter=D <lastRemoteSha>..origin/<branch>
+       → 命中且在同步范围 → 本地副本先存 .bak.<ts> 再 unlink
+       → lastRemoteSha 为 null（首次 / 旧状态）→ 一律不删（保守 fail-safe）
+  → 逐文件比对（远端优先）
        → 本地内容与将写入的不同 → 先存 <file>.bak.<ts>（每文件留最新 5 份）
        → 覆盖
        → rebase 冲突 → rebase --abort + SYNC_CONFLICT critical（留人工）
@@ -82,12 +92,31 @@
 
 排除：`.trash/`（文件名带时间戳，跨机互推必冲突）、`*.bak.*`（备份不进镜像）。
 
+## 删除传播（issue #21）
+
+`forget` 是软删（索引删行 + 文件进 `.trash/`），镜像里对应文件必须**真的从远端消失**，否则下一轮 pull 会把它整条拉回（现场实测连续两天复活 7 条）。规则：
+
+| 方向 | 判据 | 动作 |
+|---|---|---|
+| push | 文件在**基线树**里、且本地已不存在 | 从 workdir 删除 → `git add -A` 把它写进提交 |
+| pull | 文件在 `<lastRemoteSha>` 里、且不在 `origin/<branch>` 里（`git diff --diff-filter=D`） | 本地副本先 `.bak.<ts>` 再 unlink |
+
+**基线（怎么区分"远端删除"与"本地新增未推"）**——这是整条删除传播最关键的一点：
+
+1. push 的基线 = `lastRemoteSha`（上次成功同步的远端 tree）；旧状态文件没有 sha 但 `lastPushAt`/`lastPullAt` 非空 → 用 workdir `HEAD`（= 上次镜像内容）。
+2. **从未同步过（首推 / 新机器）→ 基线为 null，绝不传播删除**：新机器本地镜像可能不完整，拿它当"真相"会把远端记忆整体清空。代价只是"第一次 push 不传删除"，下一次 pull 写入 sha 后即生效。
+3. 只删**基线里存在**的路径：另一台机器新写、本机还没拉过的文件不在基线里 → 永远不会被当成本地删除（这正是"单看文件存在性无法区分"的解法）。
+4. pull 的基线 = `lastRemoteSha`；为 null（首次 pull / 旧状态）→ 一轮不删（保守 fail-safe）。基线已知后只认 **git 明确记录的删除**（`--diff-filter=D`），本地新增未推的文件不出现在 diff 里。
+5. push 成功也会刷新 `lastRemoteSha`（见上），避免"刚推出去的删除"在下一轮 pull 被自己重放。
+
+**范围安全**（`isSyncRepoPath`，删除专用，比 `walkMirror` 更严）：只认 `USER.md` / `MEMORY.md` / `projects/<slug>/.mem/**/*.md`；**`.trash/`、任意点开头的文件或目录、`*.bak.*`、范围外路径一律不动**。删本地副本前先写 `.bak.<ts>`（本地可能改过而远端已删）。
+
 ## 状态与锁
 
 | 路径 | 内容 |
 |------|------|
 | `~/.opencode/memx-sync-repo/` | Git workdir（不存在则 clone，存在则 fetch） |
-| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{hits,files,at}` / `lastRemoteSha`（上次成功 pull 的远端 sha；**旧文件无此字段 = null = 未知 → 走真实 pull**） / `unsyncedCommits`（最近一次观测到的未推提交数；**旧文件无此字段 = 0**，issue #12） |
+| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{hits,files,at}` / `lastRemoteSha`（上次成功 pull **或 push** 后的远端 sha；删除传播的基线 + 前置短路都用它；**旧文件无此字段 = null = 未知 → 走真实 pull、本轮不传播删除**，issue #21） / `unsyncedCommits`（最近一次观测到的未推提交数；**旧文件无此字段 = 0**，issue #12） |
 | `~/.opencode/.memx-sync.lock` | 串行闸门（`withFileLock`，ttl 10 分钟 / 等锁上限 5 分钟） |
 
 ## PII 脱敏闸门（`scanSensitive`）
@@ -110,6 +139,7 @@
 3. **身份兜底**：commit 前探 `git config user.email`，没有就用 `-c user.name=memx-sync -c user.email=memx@localhost` 现造（prod 没配过 git 身份）；有真身份不覆盖。**rebase（pull 路径 + push 被拒后的重试路径）无条件带同一身份**——否则无身份环境下重放提交缺 committer 会直接失败，被误判成内容冲突（`SYNC_CONFLICT` 误报，见 issue #7）。
 4. **报警去重**：同 code+message 与上一条完全相同的记录跳过（离线机器定时拉每 30 分钟失败一次，不去重会刷满 200 条账本）。
 5. **远端地址**（`remoteUrl`）：`owner/name` → `git@github.com:<owner>/<name>.git`；写成完整 URL / 绝对路径（`git@…` / `ssh://` / `https://` / `file:` / `/path`）则原样使用——后者供本机自测。
+6. **删除传播宁可少删，不可误删**（issue #21）：push 只删"基线里有 + 本地没有"；pull 只删"git 明确记录远端已删"；两者都过 `isSyncRepoPath` 白名单（`.trash/`、点开头、`.bak.`、范围外一律不动）。基线未知时**一律不传播删除**——这是防止新机器/旧状态误清空远端的关键。
 
 ## 手工通道（`pnpm sync:op`）
 
@@ -138,7 +168,7 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 
 | 限制 | 说明 |
 |------|------|
-| 删除不传播 | 本地删掉的文件会留在仓里；远端删掉的会在下次 pull 时被本地版本推回 |
+| 删除传播依赖基线 | 首次 push（从未同步过）与旧状态文件的首次 pull 各有一轮不传播删除（保守 fail-safe）；基线写入后收敛。见「删除传播」 |
 | 不做逐行合并 | 同一文件两台机器都改 → 靠 git rebase，冲突即 abort 留人工 |
 | pull 不持记忆文件锁 | 与提炼写盘并发时最后写者胜，靠覆盖前 `.bak.` 备份兜底（同步操作彼此之间由 `.memx-sync.lock` 串行） |
 
@@ -150,8 +180,9 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 4. **`no-change` 必须同时满足"无文件差异 + 无未推提交"**（issue #12）：只看 `git status --porcelain` 会把断网期攒下的提交静默滞留；`rev-list` 取不到数时 fail-open（宁可多 push 一次，不可藏积压）。
 5. 新增可自愈的失败码时，在成功分支补 `alerts.resolve(code)`，否则账本永远挂着旧账。
 6. 镜像范围改动要同步 `walkMirror` 与测试（`.trash/`、`.bak.` 的排除是有原因的，别顺手放开）。
-7. 真实 git 端到端测试用本地 bare 仓，**不要**改成联网远端（CI 无凭据）。
+7. **删除传播的安全边界不许放宽**（issue #21）：`isSyncRepoPath` 的白名单、`listPendingDeletions` 的基线判据、pull 的 `--diff-filter=D` 三者缺一不可；任何"本地没有就删远端 / 远端没有就删本地"的朴素写法都会误删"本地新增未推"的记忆（现场教训：7 条 forget 被 pull 连续复活两天）。
+8. 真实 git 端到端测试用本地 bare 仓，**不要**改成联网远端（CI 无凭据）。
 
 ## 测试
 
-`tests/sync.test.ts`（假 runner 编排 + 真实 git 端到端 + PII/备份/锁/重试/前置短路）+ `tests/scripts-smoke.test.ts`（CLI 真跑）。每文件独立 tmp home。
+`tests/sync.test.ts`（假 runner 编排 + 真实 git 端到端 + PII/备份/锁/重试/前置短路 + issue #21 两条删除传播路径）+ `tests/scripts-smoke.test.ts`（CLI 真跑）。每文件独立 tmp home。

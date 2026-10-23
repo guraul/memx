@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import {
@@ -9,6 +9,8 @@ import {
   remoteUrl,
   scanSensitive,
   listToSync,
+  listPendingDeletions,
+  isSyncRepoPath,
   buildDryRunReport,
   syncLockPath,
   type GitRunner,
@@ -1073,10 +1075,12 @@ describe("短路：真实 git 端到端（本地 bare 仓，不打桩）", () =>
       statePath,
     });
 
-    // 先把远端造出来（空 bare 仓 fetch 不到 main），push 与 pull 都是完整流程
+    // 先把远端造出来（空 bare 仓 fetch 不到 main），push 与 pull 都是完整流程。
+    // push 成功后 state 已记下远端 sha，因此这里用 force 模拟插件启动时的"强制真实 pull"，
+    // 才能覆盖"成功 pull 写回 sha → 下一次短路"这条路径（issue #21 起 push 也会记 sha）。
     const pushed = await sync.push();
     expect(pushed.ok).toBe(true);
-    const pulled = await sync.pull();
+    const pulled = await sync.pull({ force: true });
     expect(pulled.ok).toBe(true);
     expect(pulled.kind).toBe("pulled");
     const remoteSha = git([`--git-dir=${remote}`, "rev-parse", "main"]).trim();
@@ -1267,5 +1271,292 @@ describe("非快进重试必须带 git 身份（回归：rebase 缺 committer �
       expect(git([`--git-dir=${remote}`, "show", "main:USER.md"])).toBe("A v2\n");
       expect(git([`--git-dir=${remote}`, "show", "main:MEMORY.md"])).toBe("B memory\n");
     });
+  });
+});
+
+// issue #21：删除传播。两条路径分别覆盖——
+//   push：本地已删、远端（workdir 镜像）仍有 → 从镜像删除并进提交；
+//   pull：远端已删、本地仍有 → 删本地副本（先 .bak），且绝不误伤本地新增未推/软删件/范围外文件。
+describe("issue #21：isSyncRepoPath（删除传播的安全边界）", () => {
+  it("同步范围内的路径才允许传播删除", () => {
+    expect(isSyncRepoPath("USER.md")).toBe(true);
+    expect(isSyncRepoPath("MEMORY.md")).toBe(true);
+    expect(isSyncRepoPath("projects/a/.mem/x.md")).toBe(true);
+    expect(isSyncRepoPath("projects/a/.mem/sub/x.md")).toBe(true);
+  });
+
+  it(".trash / 点开头文件 / .bak / 范围外 / 非标准 slug 一律拒绝", () => {
+    for (const p of [
+      "projects/a/.mem/.trash/x.md",
+      "projects/a/.mem/.hidden.md",
+      "projects/a/.mem/sub/.hidden/x.md",
+      "projects/a/.mem/x.md.bak.20260101",
+      "projects/a/notes.md",
+      "docs/x.md",
+      "projects/a/b/.mem/x.md",
+      ".trash/USER.md",
+      "USER.txt",
+    ]) {
+      expect(isSyncRepoPath(p), p).toBe(false);
+    }
+  });
+
+  it("listPendingDeletions 只列基线里、本地已缺失的同步文件", () => {
+    const workdir = join(HOME, "workdir-pending-deletions");
+    rmSync(workdir, { recursive: true, force: true });
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    writeMemoryFile("USER.md", "u\n");
+    writeMemoryFile("projects/pd/.mem/keep.md", "keep\n");
+    const runner = new FakeRunner((cmd) =>
+      cmd.join(" ").includes("ls-tree")
+        ? {
+            ok: true,
+            stdout: [
+              "USER.md",
+              "projects/pd/.mem/keep.md",
+              "projects/pd/.mem/gone.md",
+              "projects/pd/.mem/.trash/x.md",
+              "docs/out-of-scope.md",
+            ].join("\n"),
+            stderr: "",
+          }
+        : { ok: true, stdout: "", stderr: "" },
+    );
+    expect(listPendingDeletions({ rev: SHA_A, workdir, runner })).toEqual(["projects/pd/.mem/gone.md"]);
+  });
+});
+
+describe("issue #21 push：本地删除传播到远端", () => {
+  it("基线里存在、本地已删 → 从 workdir 删除并进提交；新增未拉的文件不误删", async () => {
+    const workdir = join(HOME, "workdir-del-push");
+    rmSync(workdir, { recursive: true, force: true });
+    mkdirSync(join(workdir, ".git"), { recursive: true });
+    mkdirSync(join(workdir, "projects", "delpush", ".mem"), { recursive: true });
+    writeFileSync(join(workdir, "projects", "delpush", ".mem", "keep.md"), "keep\n", "utf-8");
+    writeFileSync(join(workdir, "projects", "delpush", ".mem", "gone.md"), "gone\n", "utf-8");
+    // 另一台机器新写、本机还没拉过的文件：不在基线树里 → 绝不能当成本地删除
+    writeFileSync(join(workdir, "projects", "delpush", ".mem", "remote-only.md"), "new\n", "utf-8");
+
+    writeMemoryFile("projects/delpush/.mem/keep.md", "keep\n");
+    const statePath = writeStateFile("del-push", { ...okState(SHA_A), lastPushAt: null });
+
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("ls-tree")) {
+        // SHA_A（基线）里有 keep + gone；SHA_B（push 后的新远端）里只剩 keep
+        return j.includes(SHA_A)
+          ? { ok: true, stdout: "MEMORY.md\nprojects/delpush/.mem/keep.md\nprojects/delpush/.mem/gone.md\n", stderr: "" }
+          : { ok: true, stdout: "MEMORY.md\nprojects/delpush/.mem/keep.md\n", stderr: "" };
+      }
+      if (j.includes("status --porcelain")) {
+        return { ok: true, stdout: " D projects/delpush/.mem/gone.md\n", stderr: "" };
+      }
+      if (j.includes("diff --cached --numstat")) {
+        return { ok: true, stdout: "0\t3\tprojects/delpush/.mem/gone.md\n", stderr: "" };
+      }
+      if (j.includes("rev-parse origin/main")) return { ok: true, stdout: `${SHA_B}\n`, stderr: "" };
+      if (j.includes("rev-list --count")) return { ok: true, stdout: "0\n", stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts: makeAlerts("del-push"),
+      runner,
+      workdir,
+      statePath,
+    });
+
+    // 统计口径：待传播删除 1 个，pendingFiles = 本地文件数 + 1
+    const before = sync.status();
+    expect(before.pendingDeletions).toBe(1);
+    expect(before.pendingFiles).toBe(listToSync().length + 1);
+
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pushed");
+    expect(existsSync(join(workdir, "projects", "delpush", ".mem", "gone.md"))).toBe(false);
+    expect(existsSync(join(workdir, "projects", "delpush", ".mem", "keep.md"))).toBe(true);
+    // 本地新增未推的同名场景（远端有、基线无、本地无）必须原样保留
+    expect(existsSync(join(workdir, "projects", "delpush", ".mem", "remote-only.md"))).toBe(true);
+    expect(runner.called("add -A")).toBe(true);
+    const commit = runner.calls.find((c) => c.join(" ").includes("commit -m"));
+    expect(commit?.join(" ")).toContain("projects/delpush/.mem/gone.md");
+    expect(commit?.join(" ")).toContain("-3");
+    expect(result.message).toContain("传播删除 1 个");
+    // push 成功记下新远端 sha（下次 pull 的删除基线），不再把刚推的删除当远端删除
+    expect(readSyncState(statePath)?.lastRemoteSha).toBe(SHA_B);
+    expect(sync.status().pendingDeletions).toBe(0);
+  });
+
+  it("从未同步过（无 lastRemoteSha 且无历史）→ 不传删除：新机器不会用不完整本地镜像清空远端", async () => {
+    const workdir = join(HOME, "workdir-del-push-fresh");
+    rmSync(workdir, { recursive: true, force: true });
+    mkdirSync(join(workdir, "projects", "delfresh", ".mem"), { recursive: true });
+    writeFileSync(join(workdir, "projects", "delfresh", ".mem", "gone.md"), "gone\n", "utf-8");
+    writeMemoryFile("projects/delfresh/.mem/keep.md", "keep\n");
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("status --porcelain")) return { ok: true, stdout: "", stderr: "" };
+      if (j.includes("rev-list --count")) return { ok: true, stdout: "0\n", stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "del-push-fresh", workdir);
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(existsSync(join(workdir, "projects", "delfresh", ".mem", "gone.md"))).toBe(true);
+    expect(runner.called("ls-tree")).toBe(false);
+  });
+});
+
+describe("issue #21 pull：尊重远端删除", () => {
+  it("远端已删 + 本地仍有 → 删本地副本并备份 .bak；软删件/点开头/范围外/本地新增一律不动", async () => {
+    const workdir = join(HOME, "workdir-del-pull");
+    rmSync(workdir, { recursive: true, force: true });
+    mkdirSync(join(workdir, "projects", "delpull", ".mem"), { recursive: true });
+    writeFileSync(join(workdir, "projects", "delpull", ".mem", "keep.md"), "remote keep\n", "utf-8");
+    writeFileSync(join(workdir, "projects", "delpull", ".mem", "new.md"), "remote new\n", "utf-8");
+
+    writeMemoryFile("projects/delpull/.mem/keep.md", "local keep\n");
+    writeMemoryFile("projects/delpull/.mem/gone.md", "local gone v1\n");
+    writeMemoryFile("projects/delpull/.mem/new.md", "remote new\n");
+    writeMemoryFile("projects/delpull/.mem/.trash/gone.md.123", "trashed\n");
+    writeMemoryFile("projects/delpull/.mem/.hidden.md", "hidden\n");
+    writeMemoryFile("projects/delpull/notes.txt", "out of scope\n");
+
+    writeStateFile("del-pull", { ...okState(SHA_A), lastPushAt: null });
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("ls-remote")) return { ok: true, stdout: `${SHA_B}\trefs/heads/main\n`, stderr: "" };
+      if (j.includes("diff --name-only")) {
+        return {
+          ok: true,
+          stdout: [
+            "projects/delpull/.mem/gone.md",
+            "projects/delpull/.mem/.trash/gone.md.123",
+            "projects/delpull/.mem/.hidden.md",
+            "projects/delpull/notes.txt",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      if (j.includes("rev-parse origin/main")) return { ok: true, stdout: `${SHA_B}\n`, stderr: "" };
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "del-pull", workdir);
+
+    const result = await sync.pull();
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pulled");
+    expect(result.message).toContain("移除 1 个远端已删文件");
+    // 远端已删 → 本地副本消失，但先留了 .bak
+    expect(existsSync(join(OPENCODE, "projects/delpull/.mem/gone.md"))).toBe(false);
+    const baks = readdirSync(join(OPENCODE, "projects/delpull/.mem")).filter((f) => f.startsWith("gone.md.bak."));
+    expect(baks).toHaveLength(1);
+    expect(readFileSync(join(OPENCODE, "projects/delpull/.mem", baks[0]!), "utf-8")).toBe("local gone v1\n");
+    // 安全网：软删件 / 点开头 / 范围外 / 本地新增（不在远端删除清单里）都不受影响
+    expect(existsSync(join(OPENCODE, "projects/delpull/.mem/.trash/gone.md.123"))).toBe(true);
+    expect(existsSync(join(OPENCODE, "projects/delpull/.mem/.hidden.md"))).toBe(true);
+    expect(existsSync(join(OPENCODE, "projects/delpull/notes.txt"))).toBe(true);
+    if (baks.length > 0) expect(baks[0]!.startsWith(".hidden")).toBe(false);
+    // 正常远端内容照旧回拷 + 覆盖前备份
+    expect(readFileSync(join(OPENCODE, "projects/delpull/.mem/keep.md"), "utf-8")).toBe("remote keep\n");
+    expect(readFileSync(join(OPENCODE, "projects/delpull/.mem/new.md"), "utf-8")).toBe("remote new\n");
+  });
+
+  it("基线未知（旧状态文件无 lastRemoteSha）→ 不删本地任何文件（保守 fail-safe）", async () => {
+    const workdir = join(HOME, "workdir-del-pull-nobase");
+    rmSync(workdir, { recursive: true, force: true });
+    mkdirSync(join(workdir, "projects", "delnobase", ".mem"), { recursive: true });
+    writeFileSync(join(workdir, "projects", "delnobase", ".mem", "keep.md"), "remote\n", "utf-8");
+    writeMemoryFile("projects/delnobase/.mem/gone.md", "local\n");
+    writeStateFile("del-pull-nobase", {
+      lastPushAt: null,
+      lastPullAt: "2026-01-01T00:00:00.000Z",
+      lastError: "",
+      consecutiveFailures: 0,
+      lastPiiScan: null,
+    });
+    const runner = new FakeRunner((cmd) => {
+      const j = cmd.join(" ");
+      if (j.includes("diff --name-only")) {
+        return { ok: true, stdout: "projects/delnobase/.mem/gone.md\n", stderr: "" };
+      }
+      return { ok: true, stdout: "", stderr: "" };
+    });
+    const sync = makeSync(runner, "del-pull-nobase", workdir);
+    const result = await sync.pull();
+    expect(result.ok).toBe(true);
+    expect(existsSync(join(OPENCODE, "projects/delnobase/.mem/gone.md"))).toBe(true);
+    expect(runner.called("diff --name-only")).toBe(false);
+    expect(result.message).not.toContain("移除");
+  });
+});
+
+describe("issue #21 真实 git 端到端：push 传播删除 + pull 尊重删除", () => {
+  const hasGit = spawnSync("git", ["--version"]).status === 0;
+
+  it.skipIf(!hasGit)("A 删文件 push → 远端消失；B 删另一文件 push → A pull 后本地消失且留 .bak", async () => {
+    const remote = join(HOME, "delete-origin.git");
+    rmSync(remote, { recursive: true, force: true });
+    const git = (args: string[], cwd?: string): string => {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")} 失败：${r.stderr}`);
+      return r.stdout ?? "";
+    };
+    git(["init", "--bare", remote]);
+    git([`--git-dir=${remote}`, "symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    const slug = "dele2e";
+    writeMemoryFile(`projects/${slug}/.mem/a.md`, "a\n");
+    writeMemoryFile(`projects/${slug}/.mem/b.md`, "b\n");
+    const workdir = join(HOME, "workdir-delete-e2e");
+    rmSync(workdir, { recursive: true, force: true });
+    const statePath = join(HOME, "state-delete-e2e.json");
+    const sync = createSync({
+      config: { ...SYNC_CONFIG, repo: remote },
+      alerts: makeAlerts("delete-e2e"),
+      runner: createNodeGitRunner(),
+      workdir,
+      statePath,
+    });
+
+    const pushed = await sync.push();
+    expect(pushed.ok).toBe(true);
+    expect(git([`--git-dir=${remote}`, "show", `main:projects/${slug}/.mem/b.md`])).toBe("b\n");
+
+    // A 本地删除 b.md → push 必须把删除写进远端提交
+    rmSync(join(OPENCODE, `projects/${slug}/.mem/b.md`));
+    const pruned = await sync.push();
+    expect(pruned.ok).toBe(true);
+    expect(pruned.kind).toBe("pushed");
+    expect(pruned.message).toContain("传播删除 1 个");
+    expect(spawnSync("git", [`--git-dir=${remote}`, "cat-file", "-e", `main:projects/${slug}/.mem/b.md`]).status).not.toBe(0);
+    expect(git([`--git-dir=${remote}`, "show", `main:projects/${slug}/.mem/a.md`])).toBe("a\n");
+    expect(git(["status", "--porcelain"], workdir).trim()).toBe("");
+
+    // B 机器删除 a.md 并推回
+    const other = join(HOME, "delete-other-machine");
+    rmSync(other, { recursive: true, force: true });
+    git(["clone", remote, other]);
+    rmSync(join(other, `projects/${slug}/.mem/a.md`));
+    git(["add", "-A"], other);
+    git(["-c", "user.name=B", "-c", "user.email=b@localhost", "commit", "-m", "B deletes a"], other);
+    git(["push", "origin", "main"], other);
+
+    // A pull：尊重远端删除（删本地 a.md，先备份）
+    const pulled = await sync.pull();
+    expect(pulled.ok).toBe(true);
+    expect(pulled.kind).toBe("pulled");
+    expect(pulled.message).toContain("移除 1 个远端已删文件");
+    expect(existsSync(join(OPENCODE, `projects/${slug}/.mem/a.md`))).toBe(false);
+    const baks = readdirSync(join(OPENCODE, `projects/${slug}/.mem`)).filter((f) => f.startsWith("a.md.bak."));
+    expect(baks).toHaveLength(1);
+    expect(readFileSync(join(OPENCODE, `projects/${slug}/.mem`, baks[0]!), "utf-8")).toBe("a\n");
+    expect(git([`--git-dir=${remote}`, "ls-tree", "-r", "--name-only", "main"]).includes(`projects/${slug}/.mem/a.md`)).toBe(false);
+
+    // 收敛后再 push = no-change（删除不会被反复重放）
+    const again = await sync.push();
+    expect(again.kind).toBe("no-change");
+    expect(readSyncState(statePath)?.lastRemoteSha).toBe(git([`--git-dir=${remote}`, "rev-parse", "main"]).trim());
   });
 });
