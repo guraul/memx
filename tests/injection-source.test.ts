@@ -12,9 +12,12 @@ import {
   readInjectionSources,
 } from "../src/core/pipeline/injection-source.ts";
 
-const HOME = "/tmp/opencode-memx-test-home-inject";
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-test-home-inject-${process.pid}`);
+const HOME = TEST_HOME;
+
 
 // 测试隔离：把 homedir 指向临时目录，绝不触碰真实 ~/.opencode
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return { ...actual, homedir: () => HOME };

@@ -13,34 +13,36 @@ import {
 } from "../src/core/store/memory-md.ts";
 import type { MemoryProposal } from "../src/core/memory-types.ts";
 
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-test-home-md-${process.pid}`);
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-test-home-md" };
+  return { ...actual, homedir: () => TEST_HOME };
 });
 
 const TEST_SLUG = "root-project-test";
 
 beforeAll(() => {
-  mkdirSync("/tmp/opencode-memx-test-home-md/.opencode", { recursive: true });
-  mkdirSync(`/tmp/opencode-memx-test-home-md/.opencode/projects/${TEST_SLUG}/.mem`, { recursive: true });
+  mkdirSync(`${TEST_HOME}/.opencode`, { recursive: true });
+  mkdirSync(`${TEST_HOME}/.opencode/projects/${TEST_SLUG}/.mem`, { recursive: true });
 });
 
 afterAll(() => {
-  rmSync("/tmp/opencode-memx-test-home-md", { recursive: true, force: true });
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 describe("path resolution", () => {
   it("getMemoryIndexPath returns ~/.opencode/MEMORY.md", () => {
-    expect(getMemoryIndexPath()).toBe("/tmp/opencode-memx-test-home-md/.opencode/MEMORY.md");
+    expect(getMemoryIndexPath()).toBe(`${TEST_HOME}/.opencode/MEMORY.md`);
   });
 
   it("getMemoryDir returns ~/.opencode/projects/<slug>/.mem", () => {
-    expect(getMemoryDir(TEST_SLUG)).toBe("/tmp/opencode-memx-test-home-md/.opencode/projects/root-project-test/.mem");
+    expect(getMemoryDir(TEST_SLUG)).toBe(`${TEST_HOME}/.opencode/projects/root-project-test/.mem`);
   });
 
   it("getMemoryFilePath joins dir + filename", () => {
     expect(getMemoryFilePath(TEST_SLUG, "project_auth.md")).toBe(
-      "/tmp/opencode-memx-test-home-md/.opencode/projects/root-project-test/.mem/project_auth.md",
+      `${TEST_HOME}/.opencode/projects/root-project-test/.mem/project_auth.md`,
     );
   });
 });
@@ -334,7 +336,7 @@ describe("Supersedes and .trash", () => {
     expect(index).not.toContain("project_old.md");
     expect(existsSync(getMemoryFilePath(TEST_SLUG, "project_old.md"))).toBe(false);
 
-    const trashDir = `/tmp/opencode-memx-test-home-md/.opencode/projects/${TEST_SLUG}/.mem/.trash`;
+    const trashDir = `${TEST_HOME}/.opencode/projects/${TEST_SLUG}/.mem/.trash`;
     const trashedFiles = readdirSync(trashDir);
     expect(trashedFiles.some((f) => f.startsWith("project_old.md."))).toBe(true);
   });

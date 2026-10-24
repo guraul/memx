@@ -9,7 +9,10 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vites
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 
-const HOME = "/tmp/opencode-memx-test-home-dsh";
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-test-home-dsh-${process.pid}`);
+
+const HOME = TEST_HOME;
+
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
@@ -146,6 +149,20 @@ function emitTurn(h: Harness, turn: number, assistant: string): void {
 }
 
 const settle = (ms = 120): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * 轮询等待条件成立（替代固定 sleep）：并发/满载下轮末补记可能晚于 120ms 完成。
+ * 默认 3s 超时，失败信息带条件文本，便于定位是"没发生"还是"太慢"。
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor timeout: 条件在 3s 内未成立");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 
 beforeAll(() => {
   mkdirSync(DIR, { recursive: true });
@@ -295,7 +312,7 @@ describe("轮末补记", () => {
     apply(h.ctx, {});
 
     emitTurn(h, 1, `好的${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 1);
 
     expect(h.calls.length).toBe(1);
     expect(h.calls[0]!.provider).toBe("p");
@@ -307,7 +324,7 @@ describe("轮末补记", () => {
     apply(h.ctx, {});
 
     emitTurn(h, 1, `第一轮${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 1);
     expect(h.calls.length).toBe(1);
 
     emitTurn(h, 2, `第二轮${SIGNAL}`);
@@ -322,7 +339,7 @@ describe("轮末补记", () => {
     emitTurn(h, 1, `第一轮${SIGNAL}`);
     await settle();
     emitTurn(h, 2, `第二轮${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 2);
 
     expect(h.calls.length).toBe(2);
   });
@@ -391,7 +408,7 @@ describe("轮末补记", () => {
     apply(h.ctx, { autoRefine: true });
 
     emitTurn(h, 1, `信号${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 1);
 
     expect(h.calls.length).toBe(1);
   });
@@ -446,14 +463,14 @@ describe("轮末补记", () => {
     );
 
     emitTurn(h, 1, `第一轮${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 1);
     expect(h.calls.length).toBe(1);
     expect(h.calls[0]!.provider).toBe("cfg-p1");
 
     // 模拟宿主 loader/volatile-update：cell 里的值原位变了
     provider = "cfg-p2";
     emitTurn(h, 2, `第二轮${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 2);
     expect(h.calls.length).toBe(2);
     expect(h.calls[1]!.provider).toBe("cfg-p2");
 
@@ -469,7 +486,7 @@ describe("轮末补记", () => {
     apply(h.ctx, { provider: "cfg-p", model: "cfg-m" });
 
     emitTurn(h, 1, `信号${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 1);
 
     expect(h.calls.length).toBe(1);
     expect(h.calls[0]!.provider).toBe("cfg-p");

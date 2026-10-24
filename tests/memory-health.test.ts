@@ -4,19 +4,21 @@ import { runHealthCheck, autoFix, formatHealthLog, rebuildIndex, runHealthMainte
 import { applyMemoryProposal } from "../src/core/store/memory-md.ts";
 import type { MemoryProposal } from "../src/core/memory-types.ts";
 
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-test-home-health-${process.pid}`);
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-test-home" };
+  return { ...actual, homedir: () => TEST_HOME };
 });
 
 const TEST_SLUG = "root-project-test";
 
 beforeAll(() => {
-  mkdirSync(`/tmp/opencode-memx-test-home/.opencode/projects/${TEST_SLUG}/.mem`, { recursive: true });
+  mkdirSync(`${TEST_HOME}/.opencode/projects/${TEST_SLUG}/.mem`, { recursive: true });
 });
 
 afterAll(() => {
-  rmSync("/tmp/opencode-memx-test-home", { recursive: true, force: true });
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 function makeProposal(targetFile: string, name: string, desc: string): MemoryProposal {
@@ -134,7 +136,7 @@ describe("P0-5 runHealthMaintenance：健康日志绝不写回 MEMORY.md", () =>
   const MAINT_SLUG = "root-project-maint";
 
   beforeAll(() => {
-    mkdirSync(`/tmp/opencode-memx-test-home/.opencode/projects/${MAINT_SLUG}/.mem`, { recursive: true });
+    mkdirSync(`${TEST_HOME}/.opencode/projects/${MAINT_SLUG}/.mem`, { recursive: true });
   });
 
   it("死链被修掉，但返回的 index 里没有 auto-fix HTML 注释", () => {
@@ -159,7 +161,7 @@ describe("P0-5 runHealthMaintenance：健康日志绝不写回 MEMORY.md", () =>
   it("仅有 escalated（索引膨胀）时不动文件，只回传日志", () => {
     // 独立 slug：上一个用例写下的孤儿文件不能让这里的 orphanFiles 非空
     const MAINT2_SLUG = "root-project-maint2";
-    mkdirSync(`/tmp/opencode-memx-test-home/.opencode/projects/${MAINT2_SLUG}/.mem`, { recursive: true });
+    mkdirSync(`${TEST_HOME}/.opencode/projects/${MAINT2_SLUG}/.mem`, { recursive: true });
     const keep = makeProposal("project_keep_maint.md", "keep", "keep context");
     applyMemoryProposal(keep, "", MAINT2_SLUG);
     // 200 条指向同一个真实文件：无死链、无孤儿，只有"行数超阈值"这一条 escalated

@@ -7,20 +7,22 @@ import {
 } from "../src/core/alerts.ts";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-alerts-test-home-${process.pid}`);
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-alerts-test-home" };
+  return { ...actual, homedir: () => TEST_HOME };
 });
 
 beforeAll(() => {
-  mkdirSync("/tmp/opencode-memx-alerts-test-home/.opencode", { recursive: true });
+  mkdirSync(`${TEST_HOME}/.opencode`, { recursive: true });
 });
 
 afterAll(() => {
-  rmSync("/tmp/opencode-memx-alerts-test-home", { recursive: true, force: true });
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
-const STORE_PATH = "/tmp/opencode-memx-alerts-test-home/.opencode/memx-alerts.json";
+const STORE_PATH = `${TEST_HOME}/.opencode/memx-alerts.json`;
 
 describe("createFileAlertStore", () => {
   let store: AlertStore;
@@ -64,7 +66,7 @@ describe("createFileAlertStore", () => {
   });
 
   it("文件路径不存在时自动建目录", () => {
-    const deepPath = "/tmp/opencode-memx-alerts-test-home/.opencode/deep/nested/alerts.json";
+    const deepPath = `${TEST_HOME}/.opencode/deep/nested/alerts.json`;
     const s = createFileAlertStore({ path: deepPath });
     s.append({ level: "info", code: "Y", message: "deep", ts: "2026-01-01T00:00:00Z" });
     expect(existsSync(deepPath)).toBe(true);

@@ -8,19 +8,21 @@ import {
 } from "../src/core/memory-write.ts";
 import { readMemoryIndex, readMemoryFile, getMemoryFilePath } from "../src/core/store/memory-md.ts";
 
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-memwrite-home-${process.pid}`);
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-memwrite-home" };
+  return { ...actual, homedir: () => TEST_HOME };
 });
 
 const SLUG = "workspace-demo";
 
 beforeAll(() => {
-  mkdirSync(`/tmp/opencode-memx-memwrite-home/.opencode/projects/${SLUG}/.mem`, { recursive: true });
+  mkdirSync(`${TEST_HOME}/.opencode/projects/${SLUG}/.mem`, { recursive: true });
 });
 
 afterAll(() => {
-  rmSync("/tmp/opencode-memx-memwrite-home", { recursive: true, force: true });
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 describe("memory_write · 文件命名", () => {
@@ -133,7 +135,7 @@ describe("memory_write · 校验与锁", () => {
 
   it("写完不残留锁文件（锁只包 read-modify-write）", async () => {
     await writeProjectMemory(SLUG, { text: "锁必须释放", name: "lock-check" });
-    const lockPath = "/tmp/opencode-memx-memwrite-home/.opencode/.MEMORY.md.lock";
+    const lockPath = `${TEST_HOME}/.opencode/.MEMORY.md.lock`;
     expect(existsSync(lockPath)).toBe(false);
   });
 

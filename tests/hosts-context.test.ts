@@ -7,17 +7,19 @@ import { mkdirSync, rmSync } from "fs";
 import { toMessages, extractLastTurn, extractTurns, findMessageIndex, planCapture } from "../src/hosts/opencode/context-shape.ts";
 
 // 测试隔离：把 homedir 指向临时目录，绝不触碰真实 ~/.opencode
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-ctx-test-home-${process.pid}`);
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-ctx-test-home" };
+  return { ...actual, homedir: () => TEST_HOME };
 });
 
 beforeAll(() => {
-  mkdirSync("/tmp/opencode-memx-ctx-test-home/.opencode", { recursive: true });
+  mkdirSync(`${TEST_HOME}/.opencode`, { recursive: true });
 });
 
 afterAll(() => {
-  rmSync("/tmp/opencode-memx-ctx-test-home", { recursive: true, force: true });
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 /** 真实 v2 SessionMessageUser 形状（扁平 text） */

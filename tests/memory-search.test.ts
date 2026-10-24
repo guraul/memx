@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from "vites
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 
-const HOME = "/tmp/memx-test-home-memory-search";
+const HOME = `/tmp/memx-test-home-memory-search-${process.pid}`;
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();

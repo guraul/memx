@@ -19,12 +19,14 @@ import { withFileLock } from "../src/core/store/lock.ts";
 import { createFileAlertStore, type AlertStore } from "../src/core/alerts.ts";
 import { MemxConfigSchema } from "../src/core/config.ts";
 
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-sync-test-home-${process.pid}`);
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-sync-test-home" };
+  return { ...actual, homedir: () => TEST_HOME };
 });
 
-const HOME = "/tmp/opencode-memx-sync-test-home";
+const HOME = TEST_HOME;
 const OPENCODE = join(HOME, ".opencode");
 
 beforeAll(() => {

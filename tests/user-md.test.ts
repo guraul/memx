@@ -11,17 +11,19 @@ import {
 import { existsSync, unlinkSync, mkdirSync, rmSync } from "fs";
 import type { StyleProposal } from "../src/core/types.ts";
 
+const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-test-home-user-${process.pid}`);
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, homedir: () => "/tmp/opencode-memx-test-home" };
+  return { ...actual, homedir: () => TEST_HOME };
 });
 
 beforeAll(() => {
-  mkdirSync("/tmp/opencode-memx-test-home/.opencode", { recursive: true });
+  mkdirSync(`${TEST_HOME}/.opencode`, { recursive: true });
 });
 
 afterAll(() => {
-  rmSync("/tmp/opencode-memx-test-home", { recursive: true, force: true });
+  rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 const SAMPLE = `# User Profile & Style
