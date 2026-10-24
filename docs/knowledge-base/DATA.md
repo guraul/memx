@@ -59,6 +59,8 @@
 name: auth rewrite
 description: auth middleware rewrite driven by compliance
 type: project
+created: 2026-07-20
+updated: 2026-07-29
 ---
 Rewriting auth middleware for compliance.
 
@@ -67,6 +69,8 @@ Rewriting auth middleware for compliance.
 ```
 
 四类 type：`project`（进行中的工作）/ `reference`（外部资源指针）/ `feedback`（协作指导，强制 Why+How）/ `user`（用户背景）。
+
+`created` / `updated` 是 UTC 日期（`YYYY-MM-DD`），由写盘层生成——**不进 `MemoryProposalSchema`**（LLM 不产时间戳）：新卡两者同日；update 在移走旧卡前读旧 frontmatter，`created` 原样保留、`updated` 刷新为今天。**老卡没有 `created:` 就保持缺失**，doctor 显示「未知龄期」——不伪造、也不用文件 mtime 兜底（update 会重置 mtime，sync pull 的 `copyFileSync` 也会重置）。
 
 ### slug 规则（`core/memory-types.ts` 的 `deriveSlug`）
 

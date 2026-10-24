@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { mkdirSync, rmSync, existsSync, readdirSync } from "fs";
+import { mkdirSync, rmSync, existsSync, readdirSync, readFileSync, writeFileSync, chmodSync } from "fs";
 import {
   getMemoryIndexPath,
   getMemoryDir,
@@ -9,6 +9,7 @@ import {
   writeMemoryFile,
   readMemoryFile,
   applyMemoryProposal,
+  applyMemoryProposals,
 } from "../src/core/store/memory-md.ts";
 import type { MemoryProposal } from "../src/core/memory-types.ts";
 
@@ -337,4 +338,170 @@ describe("Supersedes and .trash", () => {
     const trashedFiles = readdirSync(trashDir);
     expect(trashedFiles.some((f) => f.startsWith("project_old.md."))).toBe(true);
   });
+});
+
+// ---- 写卡三件套 + created/updated（tmp → 旧卡进 .trash → rename 到位）----
+
+const TODAY = new Date().toISOString().slice(0, 10);
+
+function memoryProposal(
+  filename: string,
+  action: "append" | "update" | "deprecate",
+  content: string,
+): MemoryProposal {
+  return {
+    action,
+    type: "project",
+    name: filename.replace(/\.md$/, ""),
+    description: `desc of ${filename}`,
+    content,
+    why: "test reason",
+    how_to_apply: "test guidance",
+    target_file: filename,
+    reason: "test",
+  };
+}
+
+function trashDirPath(): string {
+  return `${getMemoryDir(TEST_SLUG)}/.trash`;
+}
+
+function trashEntriesFor(filename: string): string[] {
+  const dir = trashDirPath();
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((f) => f.startsWith(`${filename}.`));
+}
+
+function trashFileCount(): number {
+  const dir = trashDirPath();
+  return existsSync(dir) ? readdirSync(dir).length : 0;
+}
+
+function tmpLeftovers(): string[] {
+  return readdirSync(getMemoryDir(TEST_SLUG)).filter((f) => f.includes(".tmp."));
+}
+
+describe("writeMemoryFile 写卡三件套", () => {
+  it("update 把更新前原卡按字节原样移入 .trash", () => {
+    const file = "project_atomic.md";
+    const path = getMemoryFilePath(TEST_SLUG, file);
+    writeMemoryFile(TEST_SLUG, memoryProposal(file, "append", "version one"));
+    const before = readFileSync(path);
+
+    writeMemoryFile(TEST_SLUG, memoryProposal(file, "update", "version two"));
+
+    expect(readFileSync(path, "utf-8")).toContain("version two");
+    const trashed = trashEntriesFor(file);
+    expect(trashed).toHaveLength(1);
+    expect(readFileSync(`${trashDirPath()}/${trashed[0]!}`).equals(before)).toBe(true);
+  });
+
+  it("update 保留 created、把 updated 刷成今天", () => {
+    const file = "project_aged.md";
+    const path = getMemoryFilePath(TEST_SLUG, file);
+    writeFileSync(
+      path,
+      "---\nname: aged\ndescription: aged card\ntype: project\ncreated: 2020-01-01\nupdated: 2020-01-01\n---\n\nold body\n",
+      "utf-8",
+    );
+
+    writeMemoryFile(TEST_SLUG, memoryProposal(file, "update", "new body"));
+
+    const content = readFileSync(path, "utf-8");
+    expect(content).toMatch(/^created: 2020-01-01$/m);
+    expect(content).toMatch(new RegExp(`^updated: ${TODAY}$`, "m"));
+    expect(content).toContain("new body");
+  });
+
+  it("append 新卡同时写 created 与 updated（同日），且不产生 .trash", () => {
+    const file = "project_brand_new.md";
+    const path = getMemoryFilePath(TEST_SLUG, file);
+    const before = trashFileCount();
+
+    writeMemoryFile(TEST_SLUG, memoryProposal(file, "append", "fresh body"));
+
+    const content = readFileSync(path, "utf-8");
+    expect(content).toMatch(new RegExp(`^created: ${TODAY}$`, "m"));
+    expect(content).toMatch(new RegExp(`^updated: ${TODAY}$`, "m"));
+    expect(trashFileCount()).toBe(before);
+  });
+
+  it("老卡无 created：update 后仍无 created（不伪造），只有 updated", () => {
+    const file = "project_legacy.md";
+    const path = getMemoryFilePath(TEST_SLUG, file);
+    writeFileSync(
+      path,
+      "---\nname: legacy\ndescription: legacy card\ntype: project\n---\n\nlegacy body\n",
+      "utf-8",
+    );
+
+    writeMemoryFile(TEST_SLUG, memoryProposal(file, "update", "legacy body v2"));
+
+    const content = readFileSync(path, "utf-8");
+    expect(content).not.toMatch(/^created:/m);
+    expect(content).toMatch(new RegExp(`^updated: ${TODAY}$`, "m"));
+    expect(content).toContain("legacy body v2");
+  });
+
+  it("正常写卡不残留 .tmp. 文件", () => {
+    writeMemoryFile(TEST_SLUG, memoryProposal("project_no_tmp.md", "append", "no tmp"));
+    writeMemoryFile(TEST_SLUG, memoryProposal("project_no_tmp.md", "update", "no tmp v2"));
+    expect(tmpLeftovers()).toEqual([]);
+  });
+});
+
+describe("deprecate 不再用提案内容覆盖原卡", () => {
+  it("deprecate 后 .trash 内容等于原卡字节（而非提案内容）", () => {
+    const file = "project_deprecate.md";
+    const path = getMemoryFilePath(TEST_SLUG, file);
+    writeMemoryFile(TEST_SLUG, memoryProposal(file, "append", "ORIGINAL BODY"));
+    const before = readFileSync(path);
+    let index = `## ${TEST_SLUG}\n- [x](~/.opencode/projects/${TEST_SLUG}/.mem/${file}) - desc\n`;
+
+    index = applyMemoryProposal(memoryProposal(file, "deprecate", "PROPOSAL BODY"), index, TEST_SLUG);
+
+    expect(index).not.toContain(file);
+    expect(existsSync(path)).toBe(false);
+    const trashed = trashEntriesFor(file);
+    expect(trashed).toHaveLength(1);
+    const trashedContent = readFileSync(`${trashDirPath()}/${trashed[0]!}`);
+    expect(trashedContent.equals(before)).toBe(true);
+    expect(trashedContent.toString("utf-8")).toContain("ORIGINAL BODY");
+    expect(trashedContent.toString("utf-8")).not.toContain("PROPOSAL BODY");
+  });
+
+  it("deprecate 目标不存在时保留 warning 且不动索引之外的东西", () => {
+    const index = `## ${TEST_SLUG}\n- [ghost](~/.opencode/projects/${TEST_SLUG}/.mem/project_ghost_dep.md) - ghost\n`;
+    const result = applyMemoryProposals(
+      [memoryProposal("project_ghost_dep.md", "deprecate", "")],
+      index,
+      TEST_SLUG,
+    );
+    expect(result.content).not.toContain("project_ghost_dep.md");
+    expect(result.warnings).toContain("deprecate 目标文件不存在: project_ghost_dep.md");
+  });
+});
+
+describe("tmp 写入失败时老卡不受损", () => {
+  it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+    "写 tmp 抛错后最终文件保持原内容，且无 tmp 残留",
+    () => {
+      const slug = "root-project-perm-test";
+      const file = "project_perm.md";
+      const path = getMemoryFilePath(slug, file);
+      writeMemoryFile(slug, memoryProposal(file, "append", "keep me intact"));
+      const before = readFileSync(path);
+      const dir = getMemoryDir(slug);
+
+      chmodSync(dir, 0o500);
+      try {
+        expect(() => writeMemoryFile(slug, memoryProposal(file, "update", "must not land"))).toThrow();
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+
+      expect(readFileSync(path).equals(before)).toBe(true);
+      expect(readdirSync(dir).filter((f) => f.includes(".tmp."))).toEqual([]);
+    },
+  );
 });

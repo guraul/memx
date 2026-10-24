@@ -151,20 +151,44 @@ export function serializeMemoryIndex(doc: MemoryIndexDoc): string {
   return result.join("\n");
 }
 
+const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---/;
+
+/** 读卡片 frontmatter 里的 `created:`（只认 frontmatter 块内的行）。 */
+function readCreatedDate(content: string): string | null {
+  const block = content.match(FRONTMATTER_RE)?.[1];
+  if (!block) return null;
+  return block.match(/^created:\s*(\S+)\s*$/m)?.[1] ?? null;
+}
+
+/** 把现有卡片原样移入 `.trash/<file>.<ts>`；文件不存在返回 false（软删语义，不物理删除）。 */
+function moveMemoryFileToTrash(slug: string, filename: string, stamp: number): boolean {
+  const targetPath = getMemoryFilePath(slug, filename);
+  if (!existsSync(targetPath)) return false;
+  const trashDir = getTrashDir(slug);
+  if (!existsSync(trashDir)) mkdirSync(trashDir, { recursive: true });
+  renameSync(targetPath, join(trashDir, `${filename}.${stamp}`));
+  return true;
+}
+
 export function writeMemoryFile(slug: string, proposal: MemoryProposal): void {
   const dir = getMemoryDir(slug);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   const filePath = getMemoryFilePath(slug, proposal.target_file);
+  const today = new Date().toISOString().slice(0, 10);
+  // 旧卡必须在被移走**之前**读：created 原样保留，缺失则不伪造（doctor 显示「未知龄期」）。
+  // 禁止用 mtime 兜底：update 会重置 mtime，sync pull 的 copyFileSync 也会重置。
+  const previous = existsSync(filePath) ? readFileSync(filePath, "utf-8") : null;
+  const created = previous == null ? today : readCreatedDate(previous);
+
   const lines: string[] = [
     "---",
     `name: ${proposal.name}`,
     `description: ${proposal.description}`,
     `type: ${proposal.type}`,
-    "---",
-    "",
-    proposal.content,
   ];
+  if (created != null) lines.push(`created: ${created}`);
+  lines.push(`updated: ${today}`, "---", "", proposal.content);
 
   if (proposal.why != null) {
     lines.push("", `**Why:** ${proposal.why}`);
@@ -173,15 +197,29 @@ export function writeMemoryFile(slug: string, proposal: MemoryProposal): void {
     lines.push(`**How to apply:** ${proposal.how_to_apply}`);
   }
   if (proposal.supersedes != null) {
-    const today = new Date().toISOString().split("T")[0] ?? "";
     lines.push("", `**Supersedes:** ${proposal.supersedes} (reversed on ${today})`);
   }
   if (proposal.merges != null) {
-    const today = new Date().toISOString().split("T")[0] ?? "";
     lines.push("", `**Merges:** ${proposal.merges} (merged on ${today})`);
   }
 
-  writeFileSync(filePath, lines.join("\n") + "\n", "utf-8");
+  // 三件套顺序不可换：① tmp 写完整 → ② 旧卡进 .trash → ③ tmp rename 到位。
+  // 任何崩溃点都至少留一份完整内容（①②之间：旧卡在盘 + 新卡在 tmp；②③之间：旧卡在 trash + 新卡在 tmp）。
+  // tmp 名不以 .md 结尾 → sync / memory_search / 健康检查（都按 endsWith(".md") 收文件）天然排除。
+  const stamp = Date.now();
+  const tmpPath = `${filePath}.tmp.${stamp}`;
+  try {
+    writeFileSync(tmpPath, lines.join("\n") + "\n", "utf-8");
+    moveMemoryFileToTrash(slug, proposal.target_file, stamp);
+    renameSync(tmpPath, filePath);
+  } catch (error) {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      /* 清理失败不掩盖原始异常 */
+    }
+    throw error;
+  }
 }
 
 export function readMemoryFile(slug: string, filename: string): string {
@@ -201,9 +239,24 @@ function applyOneMemoryProposal(
   slug: string,
   warnings: string[],
 ): void {
+  const filePath = `~/.opencode/projects/${slug}/.mem/${proposal.target_file}`;
+
+  // deprecate 是软删：只把**原文件原样**挪进 .trash，绝不写提案内容。
+  // （旧实现先 writeMemoryFile 把所有 action 一并覆盖，等于用提案内容毁掉原卡再丢弃。）
+  if (proposal.action === "deprecate") {
+    if (!moveMemoryFileToTrash(slug, proposal.target_file, Date.now())) {
+      warnings.push(`deprecate 目标文件不存在: ${proposal.target_file}`);
+    }
+    const before = section.entries.length;
+    section.entries = section.entries.filter((e) => e.filePath !== filePath);
+    if (section.entries.length === before) {
+      warnings.push(`deprecate 索引无此条目: ${proposal.target_file}`);
+    }
+    return;
+  }
+
   writeMemoryFile(slug, proposal);
 
-  const filePath = `~/.opencode/projects/${slug}/.mem/${proposal.target_file}`;
   const entry: MemoryIndexEntry = {
     title: proposal.name,
     filePath,
@@ -226,23 +279,6 @@ function applyOneMemoryProposal(
       } else {
         section.entries.push(entry);
         warnings.push(`update 索引无此条目 → 登记为新条目: ${proposal.target_file}`);
-      }
-      break;
-    }
-    case "deprecate": {
-      const targetPath = getMemoryFilePath(slug, proposal.target_file);
-      if (existsSync(targetPath)) {
-        const trashDir = getTrashDir(slug);
-        if (!existsSync(trashDir)) mkdirSync(trashDir, { recursive: true });
-        const trashPath = join(trashDir, `${proposal.target_file}.${Date.now()}`);
-        renameSync(targetPath, trashPath);
-      } else {
-        warnings.push(`deprecate 目标文件不存在: ${proposal.target_file}`);
-      }
-      const before = section.entries.length;
-      section.entries = section.entries.filter((e) => e.filePath !== filePath);
-      if (section.entries.length === before) {
-        warnings.push(`deprecate 索引无此条目: ${proposal.target_file}`);
       }
       break;
     }
