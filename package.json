@@ -1,7 +1,7 @@
 {
   "name": "memx",
   "version": "0.1.0",
-  "description": "Dual-track memory plugin for OpenCode — user style + project memory across sessions",
+  "description": "Dual-track memory plugin for OpenCode and DSH — user style + project memory across sessions",
   "type": "module",
   "main": "src/hosts/opencode/index.ts",
   "scripts": {
