@@ -8,7 +8,7 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 
 | 类别 | 消费方 | 入口 |
 |------|--------|------|
-| 宿主工具（模型可调） | 主 AI | OpenCode 4 个（`ctx.tool.transform`）/ DSH 3 个（`ctx.tools.register`） |
+| 宿主工具（模型可调） | 主 AI | OpenCode 5 个（`ctx.tool.transform`）/ DSH 3 个（`ctx.tools.register`） |
 | CLI 命令（人可跑） | 用户 / 运维 | `scripts/*.ts`，经 `package.json` scripts 暴露 |
 | 配置文件 | 用户手写 | `~/.opencode/memx.config.json`（两宿主共读）+ DSH cordis 配置 |
 
@@ -22,11 +22,13 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 |------|------|------------------------------|----------|
 | `reflect` | 无 | `"<style 回执> \| <memory 回执>"` / `[memx] 失败: <原因>` | `captureFromSession` → `pipeline.refineStyle(true)` → `pipeline.refineMemory(true)` |
 | `memory_write` | `text`（必填）`type` `name` `description` `why` `how_to_apply` `evidence` | `✅ 已记住（<type> · 新增\|更新）：<name>` + 文件路径行（warnings 时追加 `⚠️ …`）/ `[memx] memory_write 失败：<原因>` | `core/memory-write.ts` → `writeProjectMemory` |
+| `memory_search` | `keyword`（必填）`slug`（可选，缺省按当前目录派生；派生不出 → 全库） | `slug/file:line — <命中行>`（最多 20 条，超出追加 `… 另有 N 处未显示`）/ `[memx] 未匹配：<kw>` / `[memx] memory_search 失败：<原因>` | `core/store/memory-search.ts` → `searchMemories` |
 | `forget` | `keyword`（必填；**无 slug**，用当前会话目录） | `[memx] forgot N memories: <files>` / `[memx] forget: no memories matched "<kw>"` / `[memx] forget: keyword is required` / `[memx] forget failed: <原因>` | `core/store/memory-md.ts` → `forgetMemory` + `writeMemoryIndex` |
 | `memx_status` | 无 | `[memx] 诊断` 多行固定字段：version / captured / refinements / written / failures / lastError / invalidStreak / `inject.*` / updatedAt / `capture.cursor` / warnings / health / alerts / toolWrites；失败 `[memx] status failed: <原因>` | index.ts（读 kv `diag:<slug>` + `AlertStore`） |
 
 要点：
-- `memory_write` 声明 `options: { codemode: false }`（默认 codemode 会把调用包成 `execute` 工具，App 的回执 chip 按工具名认不出）。
+- `memory_write` / `memory_search` 声明 `options: { codemode: false }`（默认 codemode 会把调用包成 `execute` 工具，App 的回执 chip 按工具名认不出）。
+- `memory_search` 与 DSH 版**共用 core `searchMemories`**，回执文案逐字一致（`slug/file:line — 命中行` / `[memx] 未匹配：<kw>` / `[memx] memory_search 失败：<原因>`）。
 - 工具结果在 **`state.content: [{type:"text",text}]`**，不是 `state.output`。
 - `forget` / `memory_write` 成功后 `void sync?.push()`（不 await）。
 - `memx_status` 的 alerts 段读账本文件；其余字段只是 kv 快照，完整真相查 kv（见 [DATA.md](DATA.md) §4）。

@@ -17,7 +17,7 @@
 | 改注入内容 / 上限 / agent 闸门 / DSH 按项目节注入 | `docs/knowledge-base/modules/injection.md` |
 | 改报警账本 / 面包屑 / 销账 / doctor 面板 | `docs/knowledge-base/modules/alerts.md` |
 | 改多机云同步 / PII 闸门 / 删除传播 / 手工通道 / dry-run | `docs/knowledge-base/modules/sync.md` |
-| 改 OpenCode 壳（事件循环 / 4 个工具 / 诊断 / 同步接线） | `docs/knowledge-base/modules/host-opencode.md` |
+| 改 OpenCode 壳（事件循环 / 5 个工具 / 诊断 / 同步接线） | `docs/knowledge-base/modules/host-opencode.md` |
 | 改 DSH 壳（注入段 / 3 个工具 / 轮末补记 / 会话级节流） | `docs/knowledge-base/modules/host-dsh.md` |
 | 记忆文件格式、落盘路径、诊断查询 | `docs/knowledge-base/DATA.md` |
 | 安装、配置项、CLI 命令、测试、调试 | `docs/knowledge-base/OPERATIONS.md` |

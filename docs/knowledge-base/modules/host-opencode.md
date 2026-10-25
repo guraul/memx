@@ -4,13 +4,13 @@
 
 ## 职责
 
-memx 与 OpenCode v2 的唯一接缝：事件订阅、捕获编排、4 个工具注册、结构化诊断、子会话 LLM 适配、报警装配与云同步接线。**流水线本身（缓冲/节流/提炼/写盘/报警）已上提到 `core/pipeline/session.ts`**（#17 第一步 A），本壳只剩接线。**只 default 导出一个 Plugin**；所有 hook try-catch，错误绝不抛回宿主。
+memx 与 OpenCode v2 的唯一接缝：事件订阅、捕获编排、5 个工具注册、结构化诊断、子会话 LLM 适配、报警装配与云同步接线。**流水线本身（缓冲/节流/提炼/写盘/报警）已上提到 `core/pipeline/session.ts`**（#17 第一步 A），本壳只剩接线。**只 default 导出一个 Plugin**；所有 hook try-catch，错误绝不抛回宿主。
 
 ## 关键文件
 
 | 文件 | 职责 |
 |------|------|
-| `src/hosts/opencode/index.ts` | `Plugin.define({id:"memx", setup})`（695 行，原 883 行）：事件循环、游标管理、诊断写盘、报警装配（`recordAlert` / `applyAlertBreadcrumb`）、同步接线（`createSync` + 定时拉 + 三个 push 触发点）、4 工具、flushAll、dispose、`PipelineHost` 装配 |
+| `src/hosts/opencode/index.ts` | `Plugin.define({id:"memx", setup})`（695 行，原 883 行）：事件循环、游标管理、诊断写盘、报警装配（`recordAlert` / `applyAlertBreadcrumb`）、同步接线（`createSync` + 定时拉 + 三个 push 触发点）、5 工具、flushAll、dispose、`PipelineHost` 装配 |
 | `src/core/pipeline/session.ts` | 宿主无关流水线 `SessionPipeline`（`refineStyle` / `refineMemory` / `flushAll`）+ `PipelineHost` 窄口——两宿主共用 |
 | `src/hosts/opencode/context-hook.ts` | `session.hook("context")` 判定与装配（纯逻辑，抽出只为可测） |
 | `src/hosts/opencode/session-llm.ts` | `createSessionLLMClient`：子会话五步法 + `toModelRef` |
@@ -34,12 +34,13 @@ Track 2 写盘成功（onMemoryWritten）/ memory_write / forget 成功后 → v
 
 `SessionPipeline.inFlight` 互斥 + `markRun()` 在 LLM 调用**前**置位，防"事件重叠 → 子会话风暴 / 重复写入"。节流是 in-memory（`lastRunAt`），**重启宿主即重置**。
 
-## 4 个工具（`ctx.tool.transform`）
+## 5 个工具（`ctx.tool.transform`）
 
 | 工具 | 入口 | 说明 |
 |------|------|------|
 | `reflect` | index.ts | 手动触发两轨提炼；`force=true` 绕节流 |
 | `memory_write` | `core/memory-write.ts` | 显式写入（出口①）；**声明 `options: { codemode: false }`**——默认 codemode 会把调用包成 `execute` 工具（参数在 `state.input.code`、结果在 `state.content`），App 按工具名渲染的回执 chip 认不出；直调后 `part.tool` 才是 `memory_write`。成功后触发 `void sync.push()` |
+| `memory_search` | `core/store/memory-search.ts` `searchMemories` | 与 DSH 宿主**共用 core**（#29），回执逐字一致：`slug/file:line — 命中行`（最多 20 条，超出追加 `… 另有 N 处未显示`）/ `[memx] 未匹配：<kw>` / `[memx] memory_search 失败：<原因>`。`slug` 缺省 = `currentSlug`（与注入同一 `deriveSlug`）；派生失败（空 cwd → `""`）**退化为全库**，不报错。同样声明 `options: { codemode: false }`；只读，不推 sync |
 | `forget` | `core/store/memory-md.ts` `forgetMemory` | 软删匹配记忆到 `.trash/`（**无 slug 参数**，用当前会话目录）；成功后 `void sync.push()`（issue #21：不推会被下一轮 pull 拉回） |
 | `memx_status` | index.ts | 固定字段回执（captured/refinements/written/failures/lastError/updatedAt + inject.* + alerts 段）；**alerts 以 AlertStore 为准**（不是 kv 镜像），其余字段**不是真相**，见下 |
 
@@ -86,4 +87,4 @@ v2 工具结果形状（2026-10-12 真机实测）：结果在 **`state.content:
 
 ## 测试
 
-`context-hook.test.ts`（hook 两分支与退化）/ `session-llm.test.ts`（子会话 LLMClient 适配）/ `hosts-context.test.ts`（`context-shape` 的 `toMessages` / `planCapture`）/ `alerts.test.ts` / `sync.test.ts` / `scripts-smoke.test.ts`。`@opencode/plugin` 不真实加载；**入口 `index.ts` 本身没有插件级测试**（工具回执只在 DSH 侧由 `hosts-dsh.test.ts` 覆盖）。
+`context-hook.test.ts`（hook 两分支与退化）/ `session-llm.test.ts`（子会话 LLMClient 适配）/ `hosts-context.test.ts`（`context-shape` 的 `toMessages` / `planCapture`）/ `hosts-opencode.search.test.ts`（#29：入口 `index.ts` 的插件级测试——最小 ctx stub 直调 `setup()`，覆盖 `memory_search` 的命中 / 空结果 / core 抛错三类回执 + 20 条上限 + 空 cwd 退化全库）/ `alerts.test.ts` / `sync.test.ts` / `scripts-smoke.test.ts`。`@opencode/plugin` 不真实加载；其余工具回执仍只在 DSH 侧由 `hosts-dsh.test.ts` 覆盖。

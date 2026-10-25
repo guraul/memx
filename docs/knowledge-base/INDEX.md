@@ -218,7 +218,7 @@ dsh/index.ts ──→ dsh/llm.ts ──→ core/refine/refinement.ts（仅 LLMC
 | [modules/injection.md](modules/injection.md) | 改注入内容、上限、agent 闸门、DSH 按项目节注入 |
 | [modules/alerts.md](modules/alerts.md) | 改报警账本、面包屑、销账、doctor 面板 |
 | [modules/sync.md](modules/sync.md) | 改多机云同步、PII 闸门、删除传播、手工通道、dry-run |
-| [modules/host-opencode.md](modules/host-opencode.md) | 改 OpenCode 壳：事件循环、4 个工具、子会话 LLM、诊断、同步接线 |
+| [modules/host-opencode.md](modules/host-opencode.md) | 改 OpenCode 壳：事件循环、5 个工具、子会话 LLM、诊断、同步接线 |
 | [modules/host-dsh.md](modules/host-dsh.md) | 改 DSH 壳：注入段、3 个工具、轮末补记、会话级节流 |
 | [DATA.md](DATA.md) | 记忆文件格式、全部落盘路径、诊断查询 |
 | [OPERATIONS.md](OPERATIONS.md) | 安装、配置项、CLI 命令、测试、调试 |

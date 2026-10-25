@@ -1,6 +1,6 @@
 // memx · opencode v2 插件壳（阶段 2，handoff-20261011 附录 A 施工图）
 // 职责：事件订阅（session.idle/deleted）→ 信号捕获 → core 提炼 → 写盘；
-//       工具注册（reflect/forget/memx_status，经 ctx.tool.transform）；
+//       工具注册（reflect/memory_write/memory_search/forget/memx_status，经 ctx.tool.transform）；
 //       storage 结构化诊断（v2 无 app.log，#4 拍板）；
 //       子会话提炼的 context hook 全局注册一次 + 活跃集合过滤（handoff 硬坑 7）。
 // 红线：本文件只 export default 插件；所有 hook try-catch，错误绝不抛回宿主。
@@ -11,6 +11,7 @@ import { createSessionLLMClient } from "./session-llm.ts";
 import { loadMemxConfig } from "../../core/config.ts";
 import type { MemxConfig } from "../../core/config.ts";
 import { readMemoryIndex, writeMemoryIndex, forgetMemory } from "../../core/store/memory-md.ts";
+import { searchMemories } from "../../core/store/memory-search.ts";
 import { deriveSlug, MEMORY_TYPES } from "../../core/memory-types.ts";
 import { writeProjectMemory, applyBreadcrumbLine } from "../../core/memory-write.ts";
 import { createSync } from "../../core/sync.ts";
@@ -27,6 +28,19 @@ import type { ContextHookEvent } from "./context-hook.ts";
  *  不能互相 import，故放 context-shape.ts） */
 import { toMessages, planCapture } from "./context-shape.ts";
 import { createFileAlertStore, formatBreadcrumb } from "../../core/alerts.ts";
+
+/** `memory_search` 单次最多展示的命中条数（与 DSH 宿主同一常量）。 */
+const MEMORY_SEARCH_MAX_HITS = 20;
+/** 单条命中行的截断长度（与 DSH 宿主同一常量）。 */
+const MEMORY_HIT_TEXT_MAX = 160;
+
+const MEMORY_SEARCH_DESCRIPTION =
+  "检索记忆库（跨 .mem/*.md 全文、大小写不敏感），返回 file:line 与命中行。用户问“之前记过什么 / 有没有记过 X”时先查再答；缺省只查当前项目，可用 slug 指定别的项目。";
+
+/** 命中行按字符数截断（与 DSH 宿主逐字一致）。 */
+function truncateHit(text: string): string {
+  return text.length <= MEMORY_HIT_TEXT_MAX ? text : text.slice(0, MEMORY_HIT_TEXT_MAX - 1) + "…";
+}
 
 export default Plugin.define({
   id: "memx",
@@ -482,7 +496,7 @@ export default Plugin.define({
         // hook registration must never crash setup
       });
 
-    // 工具注册（阶段 2）：reflect / forget / memx_status（handoff §4 阶段 2）
+    // 工具注册（阶段 2）：reflect / memory_write / memory_search / forget / memx_status（handoff §4 阶段 2）
     await ctx.tool.transform((editor) => {
       editor.add({
         name: "reflect",
@@ -573,6 +587,44 @@ export default Plugin.define({
             };
           } catch (err) {
             return { content: `[memx] memory_write 失败：${String(err)}` };
+          }
+        },
+      });
+
+      // #29：与 DSH 宿主共用 core `searchMemories`，回执文案逐字对齐（两宿主同一套话术）。
+      // 缺省 slug = 当前目录派生（与注入/写入同一个 `currentSlug`）；派生失败（空 cwd → ""）
+      // 退化为全库检索——只读操作，最坏是多给几条；报错会让"之前记过什么"彻底无从查起。
+      editor.add({
+        name: "memory_search",
+        description: MEMORY_SEARCH_DESCRIPTION,
+        input: {
+          type: "object",
+          properties: {
+            keyword: { type: "string", description: "检索关键词（大小写不敏感；匹配标题 / hook / 正文任意一行）" },
+            slug: { type: "string", description: "限定项目 slug；缺省用当前会话工作目录推导（与注入同一规则）" },
+          },
+          required: ["keyword"],
+        },
+        // 与 memory_write 同理：不声明时 v2 codemode 会把调用包成 `execute` 工具，
+        // App 按工具名渲染的回执 chip 就认不出 memory_search（part.tool 变成 "execute"）。
+        options: { codemode: false },
+        async execute(args) {
+          const input = (args ?? {}) as { keyword?: string; slug?: string };
+          try {
+            const keyword = input.keyword ?? "";
+            const explicit = input.slug?.trim();
+            const slug = explicit !== undefined && explicit !== "" ? explicit : currentSlug;
+            // slug 推导不出来时不做"猜项目"：全库检索（与 DSH 宿主同一退化策略）
+            const hits = searchMemories(keyword, slug === "" ? undefined : slug);
+            if (hits.length === 0) {
+              return { content: `[memx] 未匹配：${keyword}` };
+            }
+            const shown = hits.slice(0, MEMORY_SEARCH_MAX_HITS);
+            const lines = shown.map((hit) => `${hit.slug}/${hit.file}:${hit.line} — ${truncateHit(hit.text)}`);
+            if (hits.length > shown.length) lines.push(`… 另有 ${hits.length - shown.length} 处未显示`);
+            return { content: lines.join("\n") };
+          } catch (err) {
+            return { content: `[memx] memory_search 失败：${String(err)}` };
           }
         },
       });
