@@ -98,6 +98,25 @@ describe("parseMemoryIndex / serializeMemoryIndex", () => {
     expect(first.match(/health log/g)).toHaveLength(1);
   });
 
+  it("空节头（## / ## ）认领为 root，并与已有 ## root 合并成一节（#36 存量兼容）", () => {
+    // 生产现场形状：空节头在末尾，下面挂着 `projects//.mem/…` 的孤儿指针
+    const legacy = "## demo\n- [a](~/.opencode/projects/demo/.mem/a.md) - a\n\n## \n- [orphan](~/.opencode/projects//.mem/x.md) - orphan hook\n";
+    const doc = parseMemoryIndex(legacy);
+    expect(doc.sections.map((s) => s.slug)).toEqual(["demo", "root"]); // 不再挂到 demo 节
+    expect(doc.sections[1]!.entries.map((e) => e.title)).toEqual(["orphan"]);
+    const out = serializeMemoryIndex(doc);
+    expect(out).toContain("## root");
+    expect(out).not.toContain("## \n");
+
+    // 已经有真正的 ## root 时，空节头的条目并入同一节（否则序列化出两个 ## root，注入只读第一个）
+    const both = parseMemoryIndex(
+      "## root\n- [old](~/.opencode/projects/root/.mem/old.md) - old\n\n## \n- [orphan](~/.opencode/projects//.mem/x.md) - hook\n",
+    );
+    expect(both.sections).toHaveLength(1);
+    expect(both.sections[0]!.entries.map((e) => e.title)).toEqual(["old", "orphan"]);
+    expect(serializeMemoryIndex(both).match(/^## root$/gm)).toHaveLength(1);
+  });
+
   it("serializes sections back to markdown", () => {
     const doc = {
       preamble: [],

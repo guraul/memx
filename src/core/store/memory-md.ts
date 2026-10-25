@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readdir
 import { join, basename } from "path";
 import { homedir } from "os";
 import type { MemoryProposal } from "../memory-types.ts";
+import { ROOT_SLUG } from "../memory-types.ts";
 import { trimBlankLines, trimTrailingBlankLines } from "./markdown-lines.ts";
 
 export interface MemoryIndexSection {
@@ -19,6 +20,9 @@ export interface MemoryIndexEntry {
 }
 
 const INDEX_ENTRY_RE = /^- \[(.+?)\]\((.+?)\) - (.+)$/;
+/** 小节头：`## <slug>`；`##` / `## `（空节头）也匹配，交给 parse 认领到 ROOT_SLUG。
+ *  比 `/^## (.+)$/` 收紧：`### x` 仍不算小节头（第二个字符是 `#`，可选组吃不下）。 */
+const SECTION_HEADER_RE = /^##(?:\s+(.*))?$/;
 
 export interface MemoryIndexDoc {
   /** 首个 ## 小节之前的全部原文行（原样保留） */
@@ -89,6 +93,10 @@ function cleanupOldBackups(maxKeep = 5): void {
 /**
  * 解析 MEMORY.md 索引。受管集合 = `## <slug>` 小节 + 其中的 `- [t](p) - hook` 指针；
  * 其余一切（health 日志注释、用户手写说明、首个 ## 之前的散文）原样带走，写回不丢。
+ *
+ * **空节头**（`## ` / `##`，issue #36 的存量产物）**不降级成 extras，认领到 `ROOT_SLUG` 节**：
+ * 降级会让它下面的指针行挂到 `current ?? lastManaged` —— 也就是**上一个无关项目的小节**，
+ * 于是"任何项目都读不到"的记忆反而被注入到另一个项目的会话里（#37 现场实测）。
  */
 export function parseMemoryIndex(content: string): MemoryIndexDoc {
   if (!content.trim()) return { preamble: [], sections: [] };
@@ -100,15 +108,16 @@ export function parseMemoryIndex(content: string): MemoryIndexDoc {
   let lastManaged: MemoryIndexSection | null = null;
 
   for (const line of lines) {
-    const headerMatch = line.match(/^## (.+)$/);
+    const headerMatch = line.match(SECTION_HEADER_RE);
     if (headerMatch) {
-      const slug = headerMatch[1]!.trim();
-      if (slug) {
-        current = { slug, entries: [] };
-        sections.push(current);
-        lastManaged = current;
-        continue;
-      }
+      const slug = (headerMatch[1] ?? "").trim() || ROOT_SLUG;
+      // 同 slug 的第二个节头合并进已有的那节：空节头被认领成 root 后必然与真正的 `## root`
+      // 相遇，不合并就会序列化出两个 `## root`，注入/health 只读第一个，另一个的条目等于丢了。
+      const existing = sections.find((s) => s.slug === slug);
+      current = existing ?? { slug, entries: [] };
+      if (!existing) sections.push(current);
+      lastManaged = current;
+      continue;
     }
 
     const entryMatch = current ? line.match(INDEX_ENTRY_RE) : null;

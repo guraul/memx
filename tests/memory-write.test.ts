@@ -7,6 +7,7 @@ import {
   slugifyMemoryName,
 } from "../src/core/memory-write.ts";
 import { readMemoryIndex, readMemoryFile, getMemoryFilePath } from "../src/core/store/memory-md.ts";
+import { deriveSlug } from "../src/core/memory-types.ts";
 
 const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-memwrite-home-${process.pid}`);
 
@@ -148,5 +149,46 @@ describe("memory_write · 校验与锁", () => {
     const index = readMemoryIndex();
     expect(index).toContain("reference_concurrent_a.md");
     expect(index).toContain("reference_concurrent_b.md");
+  });
+});
+
+describe("memory_write · cwd=/ → root（#36 / #37）", () => {
+  it("根目录写入落 projects/root/.mem，索引登记到 ## root；同 name 再写不增条目", async () => {
+    const slug = deriveSlug("/");
+    expect(slug).toBe("root");
+
+    const first = await writeProjectMemory(slug, {
+      text: "伴侣页 cwd 是 /，记一下必须能落地",
+      type: "project",
+      name: "root-cwd-write",
+      why: "根目录会话没有项目归属",
+      how_to_apply: "cwd=/ 的记忆去 projects/root/.mem 找",
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.action).toBe("append");
+    // 不再落进 projects/.mem（空 slug 目录）
+    expect(first.filePath).toBe(`${TEST_HOME}/.opencode/projects/root/.mem/project_root_cwd_write.md`);
+    expect(existsSync(first.filePath)).toBe(true);
+    expect(existsSync(`${TEST_HOME}/.opencode/projects/.mem`)).toBe(false);
+
+    const index = readMemoryIndex();
+    expect(index).toContain("## root");
+    expect(index).not.toContain("projects//.mem");
+
+    // 修订语义：同 name 再写一次 → update 原地替换，索引里仍只有 1 条（#37 验收）
+    const second = await writeProjectMemory(slug, {
+      text: "伴侣页 cwd 是 /，记一下必须能落地（修订）",
+      type: "project",
+      name: "root-cwd-write",
+      why: "根目录会话没有项目归属",
+      how_to_apply: "cwd=/ 的记忆去 projects/root/.mem 找",
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.action).toBe("update");
+    expect(readMemoryIndex().match(/project_root_cwd_write\.md/g)).toHaveLength(1);
+    // 旧实现在这里会吐「update 索引无此条目 → 登记为新条目」（空 slug 节永远找不到）
+    expect(second.warnings).toEqual([]);
   });
 });

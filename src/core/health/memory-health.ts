@@ -42,6 +42,49 @@ export interface AutoFixLog {
   reason: string;
 }
 
+/** `~/.opencode/projects/.mem/`（空 slug 遗留目录）的存量现状 */
+export interface LegacySlugDirReport {
+  dir: string;
+  /** 仍留在其中的卡片数（不含 `.trash`、不含非 `.md`） */
+  files: number;
+}
+
+/** 索引里同一 filePath 被登记多次 */
+export interface DuplicateEntryReport {
+  filePath: string;
+  count: number;
+}
+
+/**
+ * #36 存量诊断（**只读，不搬迁**）：`projects/.mem/` 是 cwd=`/` 写出空 slug 时代的产物。
+ * 卡片本身仍可读（索引指针 `projects//.mem/…` 在 POSIX 上等价于 `projects/.mem/…`），
+ * 但新写入已归到 `projects/root/.mem/`，所以这里只报告、由人决定要不要手工搬。
+ */
+export function findLegacyEmptySlugDir(): LegacySlugDirReport | null {
+  const dir = join(homedir(), ".opencode", "projects", ".mem");
+  if (!existsSync(dir)) return null;
+  const files = readdirSync(dir, { withFileTypes: true })
+    .filter((f) => f.isFile() && f.name.endsWith(".md")).length;
+  return files === 0 ? null : { dir, files };
+}
+
+/**
+ * #37 存量诊断（**只报不改**）：同一次写入被登记两次的时代留下的重复指针。
+ * 清理是破坏性操作（要决定留哪条、hook 取哪个），不在 doctor/health 里自动做。
+ * 跨节也算重复：空节头的指针曾被挂进上一个无关项目节，这种"同一文件两节各一条"正是它的指纹。
+ */
+export function findDuplicateEntries(indexContent: string): DuplicateEntryReport[] {
+  const counts = new Map<string, number>();
+  for (const section of parseMemoryIndex(indexContent).sections) {
+    for (const entry of section.entries) {
+      counts.set(entry.filePath, (counts.get(entry.filePath) ?? 0) + 1);
+    }
+  }
+  return [...counts]
+    .filter(([, count]) => count > 1)
+    .map(([filePath, count]) => ({ filePath, count }));
+}
+
 export function runHealthCheck(indexContent: string, slug: string): HealthReport {
   const report: HealthReport = {
     deadLinks: [],
