@@ -9,6 +9,7 @@ import { spawnSync } from "node:child_process";
 
 import { createFileAlertStore, formatAlertsPanel } from "../src/core/alerts.ts";
 import { loadMemxConfig } from "../src/core/config.ts";
+import { findDuplicateEntries, findLegacyEmptySlugDir } from "../src/core/health/memory-health.ts";
 import { listPendingDeletions, listToSync, readSyncState } from "../src/core/sync.ts";
 
 // ---- alerts ----
@@ -45,6 +46,20 @@ try {
       ).length;
       console.log(`projects/${entry.name}: ${files} files`);
     }
+  }
+
+  // 存量提示（#36 / #37）：只说事实与建议，不动文件——搬迁与去重都需要人确认。
+  const legacy = findLegacyEmptySlugDir();
+  if (legacy) {
+    console.log(
+      `memx 提示: ${legacy.dir} 仍有 ${legacy.files} 张卡片（空 slug 遗留；新写入已归到 projects/root/，本面板只提示、不搬迁）`,
+    );
+  }
+  const duplicates = findDuplicateEntries(memoryMdLines.join("\n"));
+  if (duplicates.length > 0) {
+    console.log(
+      `memx 提示: MEMORY.md 有 ${duplicates.length} 个文件被重复登记（历史重复，#37 产物；只提示不清洗，确认后手工删多余行）`,
+    );
   }
 } catch {
   console.log("memory files: 未取到");

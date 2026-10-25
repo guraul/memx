@@ -75,7 +75,18 @@ Rewriting auth middleware for compliance.
 
 ### slug 规则（`core/memory-types.ts` 的 `deriveSlug`）
 
-目录路径去首尾 `/`、`/` → `-`。`/root/project/foo` → `root-project-foo`。**工作目录路径避免空格/中文/特殊字符**，否则 slug 难看且难排查。
+目录路径去首尾 `/`、`/` → `-`。`/root/project/foo` → `root-project-foo`。
+
+**空结果分两种，必须区分（#36 / #37）**：
+
+| 入参 | 返回 | 含义 |
+|------|------|------|
+| `/`、`///` | `root` | 根目录会话（伴侣页 cwd 就是 `/`）→ 落 `projects/root/.mem/`，索引有 `## root` 节；**不拒写**（拒写会让"记一下"直接失效） |
+| `""`、全空白 | `""` | 宿主取不到工作目录 = **未知**。DSH 壳拿空串当哨兵（`memory_write` 直接失败、`memory_search` 检索全库），不能被吞成 `root` |
+
+归一只有这一处：cards 目录、索引节、注入、health、search 全部经 `deriveSlug` 派生。索引侧另有存量兼容：`## ` / `##`（空节头）在 `parseMemoryIndex` 里认领到 `root` 并与已有 `## root` 合并（详见 [modules/store.md](modules/store.md)）。
+
+**工作目录路径避免空格/中文/特殊字符**，否则 slug 难看且难排查。
 
 ## 3. 常见查询场景
 

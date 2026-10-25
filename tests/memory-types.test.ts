@@ -13,6 +13,14 @@ describe("deriveSlug", () => {
   it("handles trailing slash", () => {
     expect(deriveSlug("/root/project/foo/")).toBe("root-project-foo");
   });
+
+  it("#36 根目录 → root，但取不到目录（空/全空白）仍是空串", () => {
+    expect(deriveSlug("/")).toBe("root");
+    expect(deriveSlug("///")).toBe("root");
+    // DSH 拿空串当"未知"哨兵（memory_write 失败 / memory_search 全库），不能被吞成 root
+    expect(deriveSlug("")).toBe("");
+    expect(deriveSlug("   ")).toBe("");
+  });
 });
 
 describe("MemorySignalSchema", () => {

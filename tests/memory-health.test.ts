@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { mkdirSync, rmSync } from "fs";
-import { runHealthCheck, autoFix, formatHealthLog, rebuildIndex, runHealthMaintenance } from "../src/core/health/memory-health.ts";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
+import {
+  findDuplicateEntries,
+  findLegacyEmptySlugDir,
+  runHealthCheck,
+  autoFix,
+  formatHealthLog,
+  rebuildIndex,
+  runHealthMaintenance,
+} from "../src/core/health/memory-health.ts";
 import { applyMemoryProposal } from "../src/core/store/memory-md.ts";
 import type { MemoryProposal } from "../src/core/memory-types.ts";
 
@@ -239,5 +247,51 @@ describe("rebuildIndex", () => {
     applyMemoryProposal(p, "", TEST_SLUG);
     const rebuilt = rebuildIndex(TEST_SLUG);
     expect(rebuilt).not.toContain(".trash");
+  });
+});
+
+describe("存量兼容 · 空 slug 遗留（#36 / #37）", () => {
+  it("projects/.mem 遗留卡片：指针归到 ## root、health 不报死链/孤儿，重复只提示不清洗", () => {
+    mkdirSync(`${TEST_HOME}/.opencode/projects/.mem`, { recursive: true });
+    writeFileSync(
+      `${TEST_HOME}/.opencode/projects/.mem/project_legacy.md`,
+      "---\nname: legacy\ndescription: legacy desc\ntype: project\n---\n\nbody\n",
+    );
+
+    // 生产现场形状：空节头 + 挂在它下面的孤儿指针（路径里是 projects//.mem）
+    const index = [
+      `## ${TEST_SLUG}`,
+      `- [other](~/.opencode/projects/${TEST_SLUG}/.mem/project_other.md) - other`,
+      "",
+      "## ",
+      "- [legacy](~/.opencode/projects//.mem/project_legacy.md) - legacy desc",
+      "",
+    ].join("\n");
+
+    // 空节头认领成 root 后按 root 查：旧指针仍解析得到（POSIX 上 projects//.mem 就是 projects/.mem）
+    const report = runHealthCheck(index, "root");
+    expect(report.deadLinks).toHaveLength(0);
+    expect(report.orphanFiles).toHaveLength(0);
+    expect(report.indexLineCount).toBe(2);
+
+    // doctor 侧只报事实，不动盘
+    expect(findLegacyEmptySlugDir()).toEqual({
+      dir: `${TEST_HOME}/.opencode/projects/.mem`,
+      files: 1,
+    });
+
+    // 同一文件被登记在两节（空节指针曾被挂进上一个无关项目节）→ 只给建议，不清理
+    const duplicated = [
+      `## ${TEST_SLUG}`,
+      "- [legacy](~/.opencode/projects//.mem/project_legacy.md) - legacy desc",
+      "",
+      "## ",
+      "- [legacy](~/.opencode/projects//.mem/project_legacy.md) - legacy desc",
+      "",
+    ].join("\n");
+    expect(findDuplicateEntries(duplicated)).toEqual([
+      { filePath: "~/.opencode/projects//.mem/project_legacy.md", count: 2 },
+    ]);
+    expect(findDuplicateEntries(index)).toHaveLength(0);
   });
 });
