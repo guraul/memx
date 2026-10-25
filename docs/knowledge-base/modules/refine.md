@@ -1,6 +1,6 @@
 # modules/refine.md — LLM 批量提炼
 
-> 最后更新: 2026-10-13 · commit `1bb53cc` · 2026-10-15 复核：内容未变（`fe26fa1`，仅 import 扩展名统一）
+> 最后更新: 2026-10-25 · commit `c232168`
 
 ## 职责
 
@@ -15,7 +15,9 @@
 | `src/core/refine/memory-refinement.ts` | Track 2 提炼（复用 LLMClient） |
 | `src/core/refine/memory-prompts.ts` | Track 2 system 提示词（四类记忆、description 是唯一"何时读"钩子、相对日期转绝对、冲突 deprecate+append 带 supersedes、合并带 merges） |
 | `src/core/refine/refine-outcome.ts` | `RefineOutcome` 三态 + `INVALID_OUTPUT_STREAK_LIMIT = 3` |
+| `src/core/pipeline/session.ts` | 三态的消费者：落盘 / 清缓冲结案 / 保留重试 + 连击报警 |
 | `src/hosts/opencode/session-llm.ts` | OpenCode 侧 LLMClient 实现（子会话五步法） |
+| `src/hosts/dsh/llm.ts` | DSH 侧 LLMClient 实现（`ctx.llm.stream` 一次性调用） |
 
 ## 三态契约（P0-2，`refine-outcome.ts`）
 
@@ -29,9 +31,11 @@
 
 提取细节：`extractJson` 先剥 markdown 围栏再 `JSON.parse`；解析后强制 `Schema.safeParse`。子会话空回复时**先看 `finish` / `error` / `rawFinish`**，故障全藏在那三个字段里，别只看 content parts。
 
-## LLM 调用（OpenCode 侧，`session-llm.ts`）
+## LLM 调用（两侧实现）
 
-`createSessionLLMClient(ctx, systemText)` → `session.create({title, model: toModelRef(...)})` → `session.prompt({sessionID, text})` → `session.wait` → `session.context` 取 assistant 全文 → finally `session.remove`。提炼 system 靠 context hook 的 `event.system` **整体替换**注入（`childSessions` map 登记）。
+**OpenCode（`session-llm.ts`）**：`createSessionLLMClient(ctx, systemText)` → `session.create({title, model: toModelRef(...)})` → `session.prompt({sessionID, text})` → `session.wait` → `session.context` 取 assistant 全文 → finally `session.remove`。提炼 system 靠 context hook 的 `event.system` **整体替换**注入（`childSessions` map 登记）。
+
+**DSH（`dsh/llm.ts`）**：`createDshLLMClient(ctx.llm, route)` 返回 `LLMClient`；一次 `ctx.llm.stream({provider, model, system, messages, temperature, maxTokens})`，合并 `text-delta`（优先）或 `block-end` 整块文本。不造子会话，因此没有注入/自激/`event.tools` 三个坑。
 
 宿主契约陷阱（实机打出来的，改这块前先读 CONVENTIONS.md §1）：
 
@@ -47,8 +51,14 @@
 
 ## 对外接口
 
-- `refine(client, signals, existingDoc)` / `refineMemory(client, signals, existingIndex)` → `RefineOutcome`
-- `LLMClient`：`{ complete(input: {system, user, temperature?, maxTokens?}): Promise<string> }`（以 refinement.ts 实际定义为准）
+- `refine(signals, llm, existingContent?, model?)` / `refineMemory(signals, llm, existingIndex?, model?)` → `RefineOutcome`
+- `LLMClient`：`{ chat({ system, messages, temperature?, maxTokens?, model? }): Promise<string> }`（定义在 `refinement.ts`；`messages` 是 `{role, content}[]`，role 为字符串）
+- 调用方是 `SessionPipeline`（两宿主共用），不是宿主壳——宿主只提供 `createLLM`。
+
+## 依赖关系
+
+- 依赖：`core/types.ts` / `core/memory-types.ts`、各自 prompts、`store/user-md.ts`（读现有画像快照）、`store/memory-md.ts`（读索引快照）、`refine-outcome.ts`。
+- 被依赖：`core/pipeline/session.ts`（唯一调用方）；`LLMClient` 由 `hosts/opencode/session-llm.ts` 与 `hosts/dsh/llm.ts` 各自实现。
 
 ## 修改注意事项与红线
 
@@ -59,4 +69,4 @@
 
 ## 测试
 
-`tests/refinement.test.ts` / `memory-refinement.test.ts` / `refine-outcome.test.ts`——LLM 全部 mock，覆盖三态与连续坏输出上限。
+`tests/refinement.test.ts` / `memory-refinement.test.ts`——LLM 全部 mock，覆盖三态与连续坏输出上限（三态本身在 `tests/hosts-context.test.ts` 里按流水线行为断言）。

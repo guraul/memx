@@ -1,17 +1,19 @@
 # modules/alerts.md — 报警账本
 
-> 最后更新: 2026-10-15 · commit `fe26fa1`
+> 最后更新: 2026-10-25 · commit `c232168`
 
 ## 职责
 
-全插件报警的**单一事实源**：把散落在提炼、捕获、健康检查、同步各处的异常收敛成一个可查、可销账、可清理的账本文件，并向三个读侧（MEMORY.md 面包屑 / doctor 面板 / `memx_status`）供数。
+全插件报警的**单一事实源**：把散落在提炼、捕获、健康检查、同步各处的异常收敛成一个可查、可销账、可清理的账本文件，并向读侧（MEMORY.md 面包屑 / doctor 面板 / `memx_status` / DSH 写盘）供数。**两宿主共用同一份账本**。
 
 ## 关键文件
 
 | 文件 | 职责 |
 |------|------|
 | `src/core/alerts.ts` | `createFileAlertStore`（账本读写）+ `formatBreadcrumb` / `formatAlertsPanel`（两个纯格式化器） |
-| `src/hosts/opencode/index.ts` | `recordAlert()`（写账本 + kv 镜像）、`applyAlertBreadcrumb()`（写 MEMORY.md 前套面包屑） |
+| `src/core/pipeline/session.ts` | 流水线内的 `recordAlert` 调用（三态连击 `REFINEMENT_FAILURE_STREAK`、健康 `HEALTH_ESCALATED`） |
+| `src/hosts/opencode/index.ts` | `recordAlert()`（写账本 + kv 镜像）、`applyAlertBreadcrumb()`（写 MEMORY.md 前套面包屑）、`CAPTURE_CURSOR_LOST` |
+| `src/hosts/dsh/index.ts` | `createFileAlertStore()` + `recordAlert`（只写账本，无 kv 镜像）+ 面包屑 |
 | `scripts/alerts.ts` | 手工清理 CLI（`pnpm alerts:clear [--code=X] [--dry-run]`） |
 | `scripts/doctor.ts` | 面板第一段（`formatAlertsPanel`） |
 
@@ -32,13 +34,14 @@
 | `clear()` | 清空全部并持久化 |
 | `resolve(code)` | **删掉该 code 的全部事件**并持久化，返回删除条数（瞬时故障恢复后销账用） |
 
-## 三个读侧
+## 读侧
 
 | 读侧 | 实现 | 说明 |
 |------|------|------|
-| MEMORY.md 首行面包屑 | `formatBreadcrumb(store)` | 仅 warn/critical 时返回 `<!-- memx: ⚠️ N warn / M critical — run \`pnpm run doctor\` -->`；无问题时返回空串 |
-| doctor 面板 | `formatAlertsPanel(store)` | counts 一行 + 最近 10 条（`ts code message`） |
-| `memx_status` 的 alerts 段 | 读 store | **以 store 为准**，不是 kv 的 `diag.alerts` 镜像 |
+| MEMORY.md 首行面包屑 | `formatBreadcrumb(store)` | 仅 warn/critical 时返回 `<!-- memx: ⚠️ N warn / M critical — run \`pnpm run doctor\` -->`；无问题时返回空串。两宿主写索引时都会套 |
+| doctor 面板 | `formatAlertsPanel(store)` | counts 一行 + 最近 10 条（`ts code message`）；**仅 OpenCode**（DSH 无 doctor） |
+| `memx_status` 的 alerts 段 | 读 store | **以 store 为准**，不是 kv 的 `diag.alerts` 镜像；**仅 OpenCode** |
+| DSH 侧 | 无面板 | 账本仍写同一份文件，只能直接读 JSON 或看面包屑 |
 
 ## 面包屑的写入方式（`applyBreadcrumbLine`）
 
@@ -58,16 +61,21 @@
 
 | code | 来源 | 级别 |
 |------|------|------|
-| `CAPTURE_CURSOR_LOST` | 捕获游标锚点丢失（预期降级） | warn |
-| `INVALID_OUTPUT_DROPPED` | 连续 3 次坏输出后丢弃缓冲 | critical |
-| 健康类（死链/孤儿/escalate） | `runHealthMaintenance` 上报 | warn/critical |
+| `CAPTURE_CURSOR_LOST` | 捕获游标锚点丢失（预期降级，仅 OpenCode） | warn |
+| `REFINEMENT_FAILURE_STREAK` | 某轨连续 3 次坏输出后丢弃缓冲（`core/pipeline/session.ts`，两宿主共用） | critical |
+| `HEALTH_ESCALATED` | 健康检查升级人工（`MEMORY.md 有 N 项需要人工处理`） | warn |
 | `SYNC_ERROR` / `SYNC_PUSH_FAILED` | 同步失败（成功路径 `resolve` 销账） | warn |
 | `SYNC_CONFLICT` | pull rebase 冲突，留人工 | critical |
 | `SYNC_PII_BLOCKED` | PII 扫描命中，拒推 | critical |
 
+## 依赖关系
+
+- 依赖：无内部依赖（core 叶子，只碰 fs）。
+- 被依赖：`core/pipeline/session.ts`（经 `PipelineHost.recordAlert`）、两个宿主壳、`scripts/doctor.ts` / `scripts/alerts.ts`；`core/memory-write.ts` 只接收格式化好的面包屑字符串，不 import 本模块。
+
 ## 修改注意事项与红线
 
-1. **账本是唯一事实源**：新增报警走 `recordAlert`（宿主壳）或 `AlertStore.append`（core/CLI），不要再往 `diag.alerts` 直接写业务码（那是只写镜像）。
+1. **账本是唯一事实源**：新增报警走 `recordAlert`（宿主壳 / `PipelineHost` 实现）或 `AlertStore.append`（core/CLI），不要再往 `diag.alerts` 直接写业务码（那是只写镜像，且只有 OpenCode 有 kv）。
 2. **`resolve` 是唯一销账手段**：瞬时故障（网络、锁竞争）恢复后必须销账，否则面包屑永远挂着旧账；新增可自愈的报警码时，记得在成功分支补 `resolve`。
 3. **剪龄逻辑在 `load()` 里**（构造时执行一次）——账本文件被外部改小/改坏都在这一步兜住；不要在 `append` 里加剪龄（每次写盘全量过滤是浪费）。
 4. 面板/面包屑文案改动会同时影响 doctor 输出与用户可见的 MEMORY.md 首行——改前想清楚（面包屑是**注入给模型看的**）。

@@ -1,6 +1,6 @@
 # modules/store.md — 写盘层（USER.md / MEMORY.md / .mem）
 
-> 最后更新: 2026-10-15 · commit `fe26fa1`
+> 最后更新: 2026-10-25 · commit `c232168`
 
 ## 职责
 
@@ -12,11 +12,12 @@
 |------|------|
 | `src/core/store/user-md.ts` | USER.md：parse / serialize / `applyProposals`（单遍）/ 内容锚点 / **去重自愈（`normalizeAnchor` + `dedupeUserMd`）** / 备份轮转 / `isOverLimit` |
 | `src/core/store/memory-md.ts` | MEMORY.md 索引 + `.mem/*.md` 写卡 + `.trash/` 软删 + `forgetMemory` / `applyMemoryProposals` |
+| `src/core/store/memory-search.ts` | 全文检索（`searchMemories(keyword, slug?)`）：索引 slug ∪ 磁盘 slug（兜孤儿）、大小写不敏感、返回 `file:line`；**只读、不加锁** |
 | `src/core/store/markdown-lines.ts` | 两序列化器共用的空行边界工具（保 parse↔serialize 幂等） |
 | `src/core/store/lock.ts` | `withFileLock`（wx 独占创建 + mtime TTL 30s + 等锁超时 5s 抛 `FileLockTimeoutError`） |
 | `src/core/memory-write.ts` | `memory_write` 工具的 core 写路（与提炼同一条 `applyMemoryProposals` + 同一把锁）+ **`applyBreadcrumbLine`（MEMORY.md 面包屑的共享实现，两条写路共用）** |
 
-## 文件族与路径（硬编码，全部在 `~/.opencode/`，共 11 处——见 CONVENTIONS.md 红线）
+## 文件族与路径（硬编码，全部在 `~/.opencode/`；core 里 **18 处** `join(homedir(), ".opencode", …)`，未参数化）
 
 ```
 ~/.opencode/
@@ -24,7 +25,7 @@
 ├── USER.md.bak.<ts>                 # 备份轮转，留 5 版
 ├── MEMORY.md                        # Track 2 索引（按 ## <slug> 分节）
 ├── MEMORY.md.bak.<ts>
-├── projects/<slug>/.mem/*.md        # 记忆卡片（frontmatter: name/description/type）
+├── projects/<slug>/.mem/*.md        # 记忆卡片（frontmatter: name/description/type/created/updated）
 ├── projects/<slug>/.mem/.trash/<file>.<ts>   # 软删，可人工找回
 ├── memx-protocol.md                 # 协议（产物；真源 protocol-template.ts）
 ├── memx.config.json                 # 配置
@@ -66,12 +67,23 @@ USER.md 是"慢变量画像"，同一条偏好被反复 append 会让它膨胀�
 
 ## 备份与原子写
 
-- 每次写前备份 `*.bak.<timestamp>`，留 5 版（按文件名排序取最新；⚠️ `autoBackupCount` 配置项暂无消费方，5 是硬编码）。
-- 写盘走 tmp 文件 + rename 原子替换（`*.tmp.<ts>` 不留残骸）。
+- 每次写前备份 `*.bak.<timestamp>`，留 5 版（按文件名排序取最新；⚠️ `autoBackupCount` 配置项暂无消费方，5 是硬编码）。备份只覆盖 `USER.md` / `MEMORY.md` 索引；记忆卡的"旧版本"落在 `.mem/.trash/`。
+- `MEMORY.md` 索引：tmp 写完整 → rename 到位（`*.tmp.<ts>` 不留残骸）。
+- **记忆卡：三件套顺序写**（`writeMemoryFile`）——① tmp 写完整 → ② 旧卡 rename 进 `.trash/<file>.<ts>` → ③ tmp rename 到位。任一崩溃点都至少留一份完整卡片；写失败清 tmp 并原样抛出。tmp 名不以 `.md` 结尾，所以 sync / `memory_search` / 健康检查（都按 `endsWith(".md")` 收文件）天然排除它。
+- **frontmatter 的 `created` / `updated` 由写盘层生成**（UTC 日期 `YYYY-MM-DD`，不进 `MemoryProposalSchema`）：新增取当天；更新时在移走旧卡**之前**读旧 frontmatter，`created` 原样保留、`updated` 刷新；老卡缺 `created` 就保持缺失（不拿 mtime 伪造，doctor 显示「未知龄期」）。`deprecate` 不做写卡，只把原卡按字节原样移入 `.trash/`。
 
 ## 健康检查（与写盘同锁）
 
 Track 2 写盘的同一把锁内跑 `runHealthMaintenance()`：死链（索引指向不存在文件）删指针、孤儿（`.mem/*.md` 不在索引）补指针，单轮 auto-fix 上限 3；索引 ≥200 条 escalate 人工。返回 `{index, logs, report}`，**logs 只落 `diag.health`，绝不追加进 MEMORY.md**（P0-5：HTML 注释会被下一次序列化吃掉，历史 bug）。
+
+## 检索（只读，DSH `memory_search` 用）
+
+`searchMemories(keyword, slug?)`：关键词 trim + 小写；空串返回 `[]`（不把"空串匹配一切"当命中）。slug 集合 = 索引里的 slug **∪** 磁盘上有 `.mem/` 的 slug（后者兜"文件在盘但索引没登记"的孤儿）。逐文件按行匹配、行号从 1 起、命中行 trim。**不写盘、不加锁**——最多看到写者锁内的"上一个版本"。
+
+## 依赖关系
+
+- 依赖：`core/types.ts` / `core/memory-types.ts`、`markdown-lines.ts`、`lock.ts`。
+- 被依赖：`pipeline/session.ts`（写盘）、`memory-write.ts`、`health/memory-health.ts`、`store/memory-search.ts`、两个宿主壳、`scripts/*`。
 
 ## 修改注意事项与红线
 
@@ -81,7 +93,8 @@ Track 2 写盘的同一把锁内跑 `runHealthMaintenance()`：死链（索引�
 4. text >500 字的 memory_write 直接拒绝不截断。
 5. deprecate/forget 是软删（挪 `.trash/`），不物理删除。
 6. `exactOptionalPropertyTypes`：`target_line?: number` 不能显式赋 `undefined`，用 `!= null` 判断。
+7. **记忆卡三件套顺序不可交换**：tmp 写完整 → 旧卡进 `.trash` → rename 到位。换序（先移旧卡再写、或直接覆盖）会在崩溃窗口丢旧卡或留半个新卡；也不要把 tmp 命名成 `*.md`，否则会被 sync / 检索 / 健康检查当成正式卡片收走。
 
 ## 测试
 
-`tests/user-md.test.ts` / `memory-md.test.ts` / `lock.test.ts` / `memory-write.test.ts` / `markdown-lines.test.ts`——覆盖保留语义、单遍应用、锚点四级降级、锁竞争。测试 mock homedir 到独立 tmp home，**绝不碰真实 `~/.opencode`**。
+`tests/user-md.test.ts` / `user-md-anchors.test.ts` / `user-md-dedupe.test.ts` / `memory-md.test.ts` / `memory-search.test.ts` / `lock.test.ts` / `memory-write.test.ts`——覆盖保留语义、单遍应用、锚点四级降级、去重自愈、检索、锁竞争。测试 mock homedir 到独立 tmp home（路径带 `process.pid`，并发跑安全），**绝不碰真实 `~/.opencode`**。

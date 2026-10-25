@@ -23,29 +23,39 @@ lockfile**。所以：
 
 - 结构类型手写在 `types.ts`，字段名与官方 0.2.1-rc.2 声明逐项对应（见下节）；
 - `Config` 是**手写的 standard-schema**（`Config["~standard"].validate`），因为 Cordis 只需要
-  这个入口就能解析配置；真正的 schemastery 留给第二步的薄壳包；
+  这个入口就能解析配置；真正的 schemastery（`.volatile()`，设置页要用）在薄壳包里声明；
 - `createUserMessage` 用**变量 specifier 动态 import** 尝试取宿主自己的构造函数，取不到就
   降级（只记诊断，不手搓消息对象——那是硬造）。
 
-## 加载方式（第二步：薄壳包）
+## 加载方式（薄壳包 `dsh-plugin-memx`，已落地）
 
-本目录是**源码**，不能被 DSH 直接 `plugin add`。第二步会在仓库根加一个薄壳包：
+本目录是**源码**，不能被 DSH 直接 `plugin add`。实际接线在独立仓的薄壳包
+`~/workspace/self-dsh-plugins/dsh-plugin-memx`（未 vendor 进本仓）：
 
 ```jsonc
-// package.json（第二步新增，本步不动）
+// 薄壳包 package.json（已存在）
 {
   "name": "dsh-plugin-memx",
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-api-remotes"] }
+  }
 }
 ```
 
 ```yaml
-# cordis.patch.yml
+# 薄壳包 cordis.patch.yml
 - insert:
     - id: memx
-      name: "<包名或绝对路径>"
+      name: dsh-plugin-memx
       config: { }        # provider / model / autoRefine / throttleMinutes
 ```
+
+薄壳包 `lib/index.js` 用 `registerHooks` + `stripTypeScriptTypes`（**transform** 模式，strip-only
+会因 parameter property 抛 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`）直接加载本目录的
+`index.ts`，再转发 `name` / `inject` / `apply`；`Config` 用薄壳包自己那份 schemastery
+（本层那份 standard-schema 投影不出设置页字段）。它已 link 进 `~/.dsh/profiles/web`，并在
+`cordis.patch.yml` 里有 `- id: memx` 行。
 
 配置字段（四个都是"改了即时生效"的热更字段；薄壳包用 schemastery `.volatile()` 声明，
 宿主因此以**引用 cell** 的形态把它们传进 `apply`，本层**每次轮末现读**（不在 apply 时快照，
@@ -61,9 +71,11 @@ lockfile**。所以：
 安装与生效语义（细节见 `docs/knowledge-base/DSH-ADAPT.md` §3）：
 
 ```bash
-dsh plugin --profile web add <包名或绝对路径>
-# 改动本目录的 .ts 源码后：必须重启 dsh web，没有热更
-# memx.config.json 不用重启（每次提炼重读）
+dsh plugin --profile web add /Users/gubin/workspace/self-dsh-plugins/dsh-plugin-memx
+# 改动本目录的 .ts 源码后：必须重启 dsh web（薄壳包直接加载源码，不用重编）
+# 改薄壳包 src/config.ts / src/client/**：pnpm build 后重启
+# memx.config.json 不用重启（每次提炼重读；但 refinementModel 对 DSH 不生效）
+# ⚠️ 薄壳包 lib/index.js 的 MEMX_ROOT 硬编码本仓路径，搬仓/多 checkout 必须同步改
 ```
 
 ## 工具
@@ -94,8 +106,8 @@ CLI 已退役），因此宿主自己不需要任何 markdown 解析。
 | 写入 | `memory_write` 工具 | 同左，同一份 `writeProjectMemory` |
 | 提炼 | 造子会话（`session.prompt`） | `ctx.llm.stream` 单次调用，不造子会话 |
 | 触发 | 进程级 + 游标增量捕获 | `session/event` 的 `turn/end`，会话级节流 |
-| 防重复 | `refinementInFlight` 闸门 | 会话级 `SessionPipeline.inFlight` + 本轮已有工具写入则跳过 + 同 turn 幂等标记 |
-| 数据目录 | `~/.opencode/`（默认值） | 同一份（`config.ts` 的数据根参数化） |
+| 防重复 | `SessionPipeline.inFlight` 闸门（两宿主共用） | 同左 + 本轮已有工具写入则跳过 + 同 turn 幂等标记 |
+| 数据目录 | `~/.opencode/`（默认值） | 同一份（core 里 `homedir()` 硬编码，两宿主天然共享；**未参数化**） |
 
 ## 与 DSH 0.2.1-rc.2 的 API 对照
 
@@ -140,8 +152,11 @@ CLI 已退役），因此宿主自己不需要任何 markdown 解析。
 - **模型路由取自会话**：`provider`/`model` 未配置时用 `agent.options`；仍取不到就**跳过本轮补记**
   并记诊断（不猜、不回落其它 provider）。
 - **`turn/end` 目前不过滤 `reason`**：aborted/cancelled 的轮次也会进补记判定（有信号才提炼）。
-  待第二步拿到实测载荷后收紧成只认 `completed`。
+  收紧成只认 `completed` 仍是待办（第二步已落地安装，但这条代码未改）。
 - **诊断在内存**：DSH 侧没有 kv 面板，`persist` 是空实现；异常由 `logger.warn` 落到宿主日志。
+  设置页「记忆」只改配置，不显示计数。
+- **薄壳包路径硬编码**：`dsh-plugin-memx/lib/index.js` 的 `MEMX_ROOT` 固定为本仓路径，
+  搬仓 / 多 checkout 必须同步改，否则静默加载旧代码。
 
 ## 测试
 

@@ -1,6 +1,6 @@
 # modules/sync.md — 多机云同步
 
-> 最后更新: 2026-10-23 · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）/ #21（删除传播）
+> 最后更新: 2026-10-25 · commit `c232168` · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）/ #21（删除传播）
 
 ## 职责
 
@@ -10,9 +10,9 @@
 
 | 文件 | 职责 |
 |------|------|
-| `src/core/sync.ts`（717 行） | 全部编排：`GitRunner` / `scanSensitive` / `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
+| `src/core/sync.ts`（834 行） | 全部编排：`GitRunner` / `scanSensitive` / `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
 | `src/core/config.ts` | `MemxSyncConfigSchema`（enabled / repo / branch / machineName / intervalMinutes） |
-| `src/hosts/opencode/index.ts` | 接线：setup 建 sync、启动拉一次、定时拉、两个 push 触发点 |
+| `src/hosts/opencode/index.ts` | 接线：setup 建 sync、启动拉一次、定时拉、三个 push 触发点（提炼写盘 / memory_write / forget） |
 | `scripts/sync-op.ts` | 手工通道（status / pii / pull / push / both，`--machine=<name>` 覆盖） |
 | `scripts/sync-dry-run.ts` | 只读预览（`-- --fetch` 先取远端） |
 | `scripts/doctor.ts` | 面板 sync 段（config / pendingFiles / status / unsyncedCommits / pii） |
@@ -35,11 +35,11 @@
 |------|------|------|
 | pull（启动一次） | setup 时 | `void sync.pull({ force: true })`（**强制真实 pull**：重启后要补齐落下的远端变更） |
 | pull（定时） | 每 `intervalMinutes` | `setInterval(() => void sync?.pull(), …)`（走前置短路路径） |
-| push | **Track 2 提炼写盘成功后** | index.ts:435 `void sync?.push()` |
-| push | **`memory_write` 工具成功后** | index.ts:758 `void sync?.push()` |
-| push | **`forget` 工具成功后** | issue #21：不立刻推，下一轮 pull 会把刚删的文件拉回 |
+| push | **Track 2 提炼写盘成功后** | `onMemoryWritten`（index.ts:252）`void sync?.push()` |
+| push | **`memory_write` 工具成功后** | index.ts:569 `void sync?.push()` |
+| push | **`forget` 工具成功后** | index.ts:601 `void sync?.push()`（issue #21：不立刻推，下一轮 pull 会把刚删的文件拉回） |
 
-三个 push 都是 `void` 异步（绝不阻塞写盘 / 工具返回）。
+三个 push 都是 `void` 异步（绝不阻塞写盘 / 工具返回）。**DSH 壳未接同步**：DSH 写盘不触发 push/pull。
 
 ## push 流程
 
@@ -171,6 +171,11 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 | 删除传播依赖基线 | 首次 push（从未同步过）与旧状态文件的首次 pull 各有一轮不传播删除（保守 fail-safe）；基线写入后收敛。见「删除传播」 |
 | 不做逐行合并 | 同一文件两台机器都改 → 靠 git rebase，冲突即 abort 留人工 |
 | pull 不持记忆文件锁 | 与提炼写盘并发时最后写者胜，靠覆盖前 `.bak.` 备份兜底（同步操作彼此之间由 `.memx-sync.lock` 串行） |
+
+## 依赖关系
+
+- 依赖：`core/config.ts`（类型）、`core/alerts.ts`（接口/类型）、`store/lock.ts`。
+- 被依赖：`hosts/opencode/index.ts`（`createSync` + 定时器 + 三个 push 触发点）、`scripts/sync-op.ts` / `scripts/sync-dry-run.ts` / `scripts/doctor.ts`。**DSH 壳未接同步**。
 
 ## 修改注意事项与红线
 

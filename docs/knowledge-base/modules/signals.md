@@ -1,6 +1,6 @@
 # modules/signals.md — 信号捕获
 
-> 最后更新: 2026-10-13 · commit `1bb53cc` · 2026-10-15 复核：内容未变（`fe26fa1`，仅 import 扩展名统一）
+> 最后更新: 2026-10-25 · commit `c232168`
 
 ## 职责
 
@@ -12,7 +12,8 @@
 |------|------|
 | `src/core/signals/signal-capture.ts` | Track 1：`STYLE_SIGNAL` 解析 + `SignalBuffer`（上限 20、按 evidence 去重、FIFO 淘汰） |
 | `src/core/signals/memory-capture.ts` | Track 2：`MEMORY_SIGNAL` 解析 + `MemorySignalBuffer`（同规格） |
-| `src/hosts/opencode/context-shape.ts` | `planCapture()` 增量决策 + `toMessages()` 消息归一 + `extractTurns()` 轮次切片 |
+| `src/hosts/opencode/context-shape.ts` | `planCapture()` 增量决策 + `toMessages()` 消息归一 + `extractTurns()` 轮次切片（**仅 OpenCode**） |
+| `src/core/pipeline/session.ts` | 缓冲的消费者：`SessionPipeline` 持有 `style` / `memory` 两个 buffer 并驱动提炼 |
 
 ## 信号格式
 
@@ -42,11 +43,19 @@ Track 2：
 
 游标存 `ctx.storage` 的 `cursor:<sessionID>`（键全局，sessionID 全局唯一故不冲突）；`session.deleted` 分支负责删除，不清就是垃圾行。
 
+**DSH 侧没有游标**（DSH 无 `session.deleted` 等价物）：`turn/end` 只对"本轮累积的 assistant 文本"跑 `captureMemorySignals`，不做跨轮增量，也不需要清理。别为了对齐 OpenCode 硬造游标。
+
 ## 对外接口
 
-- `captureSignals(text, buffer)` / `captureMemorySignals(text, buffer)` — 从消息文本解析入缓冲
-- `planCapture` / `toMessages` / `extractTurns` — host 壳调用
-- 缓冲 `.takeAll()` — 提炼取走并清空（invalid-output 时由上层放回）
+- `captureSignals(_userMessage, aiMessage): StyleSignal[]` / `captureMemorySignals(aiMessage): MemorySignal[]` — 从消息文本解析出信号（`captureSignals` 只解析 AI 消息，user 参数保留未用）
+- `planCapture` / `toMessages` / `extractTurns` — OpenCode 宿主壳调用
+- 缓冲 `.pushAll()` / `.getAll()` / `.clear()` / `.length` — `SessionPipeline` 消费（invalid-output 时保留原缓冲）
+- `SessionPipeline.styleCount` / `.memoryCount` — 诊断计数
+
+## 依赖关系
+
+- 依赖：`core/types.ts` / `core/memory-types.ts`（Zod schema）；纯解析，不碰 fs。
+- 被依赖：`core/pipeline/session.ts`（持有两个缓冲并驱动提炼）、`hosts/opencode/index.ts`（游标增量后入缓冲）、`hosts/dsh/index.ts`（`captureMemorySignals` 扫本轮文本）。
 
 ## 修改注意事项与红线
 
@@ -58,4 +67,4 @@ Track 2：
 
 ## 测试
 
-`tests/signal-capture.test.ts` / `memory-capture.test.ts` / `context-shape.test.ts`（游标三态各有用例）。每文件独立 tmp home。
+`tests/signal-capture.test.ts` / `memory-capture.test.ts` / `hosts-context.test.ts`（`context-shape` 的游标三态各有用例）。每文件独立 tmp home。

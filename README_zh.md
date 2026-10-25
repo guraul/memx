@@ -2,7 +2,7 @@
 
 [English](README.md) | **[中文](README_zh.md)**
 
-OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用户偏好（Track 1）和项目背景（Track 2），分别持久化到 `~/.opencode/USER.md` 和 `~/.opencode/projects/<slug>/.mem/*.md`。
+OpenCode V2 双轨记忆插件，仓库内另带一个 DSH（DeepSeek Harness）宿主壳。从对话历史中自动提炼跨会话的用户偏好（Track 1）和项目背景（Track 2），分别持久化到 `~/.opencode/USER.md` 和 `~/.opencode/projects/<slug>/.mem/*.md`。
 
 ## 设计哲学
 
@@ -11,7 +11,7 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
 - **Track 1（User Style）**：跨项目通用的慢变量画像（沟通风格、工具链偏好、技术审美）。单文件 `USER.md`，四分类，200 行压缩。主 AI 通过 `STYLE_SIGNAL` HTML 注释标记信号，子 AI 批量提炼。
 - **Track 2（Project Memory）**：项目绑定的快变量日志（进行中的工作、外部资源、协作指导）。索引 `MEMORY.md` + 独立 `.mem/*.md`（带 frontmatter，feedback/project 强制 Why + How to apply）。主 AI 通过 `MEMORY_SIGNAL` HTML 注释标记信号，子 AI 批量提炼。
 
-两条轨道共享同一触发管道（`session.idle` / `reflect`），但信号缓冲、提炼、写入完全独立。
+两条轨道共享同一套宿主无关流水线（`src/core/pipeline/session.ts`），但信号缓冲、提炼提示词、写入目标完全独立。流水线之上有两个宿主壳：`src/hosts/opencode/`（`install.sh` 安装）与 `src/hosts/dsh/`（由配套薄壳包 `dsh-plugin-memx` 挂进 DSH，见[宿主支持](#宿主支持)）。
 
 ### 开源实现借鉴
 
@@ -52,10 +52,12 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
 
 ## 触发机制
 
+OpenCode 壳（DSH 壳用 `turn/end`，见[宿主支持](#宿主支持)）：
+
 - `session.execution.succeeded`：每回合结束都发（**v2 不再发 `session.idle`**），自动增量捕获信号并提炼（受 `throttleMinutes` 节流）。
-- `session.deleted` / 退出（`dispose`）：强制冲刷缓冲区（并删掉该会话的捕获游标），不拉取会话历史。
+- `session.deleted`：删掉该会话的捕获游标。退出（`dispose`）：强制冲刷缓冲区并落盘诊断。
 - `reflect` 工具：手动触发完整提炼（跳过节流），同时运行 Track 1 和 Track 2。用于事件触发被节流或没发时的兜底。
-- 插件自动跳过自己创建的提炼子会话，不会自我触发；提炼过程互斥串行（`refinementInFlight`），防止并发风暴与重复写入。
+- 插件自动跳过自己创建的提炼子会话，不会自我触发；提炼过程互斥串行（`SessionPipeline.inFlight`，两宿主共用），防止并发风暴与重复写入。
 
 ## 正确性保证（阶段 3 P0 修复）
 
@@ -64,6 +66,52 @@ OpenCode V2 双轨记忆插件。从对话历史中自动提炼跨会话的用�
 - **单遍写盘 + 内容锚点**：一批提案 parse 一次、内存内改完、序列化一次（批内行号不再漂移）。`update`/`deprecate` 靠抄写目标条目原文定位（精确 → 归一 → 唯一包含 → 行号兜底），每次降级/未命中都有告警。
 - **跨进程文件锁**：USER.md / MEMORY.md 的 read-modify-write 走带 mtime TTL 的锁文件（`~/.opencode/.*.lock`），并在锁内**重读**文件；LLM 调用绝不进锁。
 - **健康日志不写进 MEMORY.md**：auto-fix 结果落 `ctx.storage` 诊断/报警，索引保持纯索引。
+
+## 宿主支持
+
+`src/core/` 与宿主无关，每个宿主一个薄壳，放在 `src/hosts/`。两个壳共用同一个数据目录（`~/.opencode/`）、同一把文件锁、同一条写路——同一个项目 slug 在两个宿主里就是同一份记忆。
+
+| | OpenCode v2 | DSH（DeepSeek Harness） |
+| :--- | :--- | :--- |
+| 状态 | ✅ `install.sh` 安装 | ✅ 由配套薄壳包 `dsh-plugin-memx`（独立仓）安装 |
+| 注入 | `context` hook **每个 model step 追加 3 个 `SystemPart`**（协议 → 画像 → 整份 `MEMORY.md`） | 一个 `systemPrompt.section`（`order: 12000`），**每会话只算一次**（协议 + 画像 + **仅当前项目那一节**） |
+| 工具 | `reflect` / `memory_write` / `forget` / `memx_status` | `memory_write` / `memory_search` / `forget` |
+| 提炼 LLM | 造子会话（`session.prompt`） | 一次性 `ctx.llm.stream` 调用（不造子会话） |
+| 自动捕获 | `session.execution.succeeded` + 会话游标 | `turn/end` 事件 + 会话级节流（无游标） |
+| 诊断 | `ctx.storage` kv + `pnpm run doctor` | 内存 `DshDiagnostics` + 宿主日志 `[memx] …`（无诊断面板；「设置 → 记忆」只改配置） |
+| 云同步 | ✅ 已接线（3 个 push 触发点） | ❌ 未接线 |
+| 配置 | `~/.opencode/memx.config.json` | cordis 配置（「设置 → 记忆」或 profile patch） |
+
+### DSH 宿主
+
+DSH 壳对接 Cordis 插件模型：具名导出（`name` / `inject` / `Config` / `apply`）、`ctx.systemPrompt.section`、`ctx.tools.register`、`ctx.llm.stream`。它**不 import 任何 `@deepseek-ai/*` 包**——宿主类型的最小子集手写在 `src/hosts/dsh/types.ts`，所以 memx 不被 DSH 版本绑死。
+
+> **现状：已支持并在使用中。** `src/hosts/dsh/` 不能直接 `dsh plugin add`，所以由一个配套薄壳包 **`dsh-plugin-memx`**（独立仓，未 vendor 进本仓）负责接线：把插件注册进 DSH web profile、声明四个 `.volatile()` 配置字段，并提供 Web 设置页「设置 → 记忆」。它通过 TypeScript transform hook 直接加载本仓的 `src/hosts/dsh/index.ts`——所以改 memx 源码只需重启 `dsh web`，不用重编薄壳包。
+
+把薄壳包装进 DSH profile，然后重启 `dsh web`：
+
+```bash
+dsh plugin --profile web add /path/to/dsh-plugin-memx   # 以 pnpm link 装进 web profile
+```
+
+配置在 **设置 → 记忆**（或 profile 的 `cordis.patch.yml` 里 `id: memx` 那一段）。四个字段每次轮末现读，改完不用重启。⚠️ 薄壳包硬编码了 memx 仓路径（`dsh-plugin-memx/lib/index.js` 的 `MEMX_ROOT`）；搬仓或换 clone 必须同步改这个常量，否则 DSH 会继续加载旧目录。
+
+它做什么：
+
+- **注入**：协议 + 画像 + **当前项目**的 `MEMORY.md` 小节，作为一段 system prompt section 注入。**每会话只求值一次**（字节恒定，宿主缓存不失效）——本会话刚写的记忆要下个会话才可见。
+- **工具**：`memory_write` / `memory_search` / `forget`，与 OpenCode 走同一份 core 写路和同一把文件锁。`memory_search` 是 DSH 独有（跨 `.mem/*.md` 全文检索、大小写不敏感、返回 `slug/file:line`）。
+- **轮末补记**：`turn/end` 后扫描本轮 assistant 文本里的 `MEMORY_SIGNAL`，经 `ctx.llm.stream` 提炼，按会话节流。`autoRefine: false`、本轮已有工具写入、无信号、或解析不出模型路由时都会跳过（**不猜 provider**）。Track 1 风格信号在 DSH 侧不自动捕获，用 `memory_write` 显式写。
+
+配置（cordis 字段，由薄壳包声明为 `.volatile()`；在「设置 → 记忆」或 profile patch 里改；每次轮末现读）：
+
+| 字段 | 默认 | 含义 |
+| :--- | :--- | :--- |
+| `provider` | `""` | 提炼 provider；空 = 跟随当前会话模型 |
+| `model` | `""` | 提炼 model；空 = 跟随当前会话模型 |
+| `autoRefine` | `true` | 轮末补记开关（`false` 不影响显式 `memory_write`） |
+| `throttleMinutes` | `10` | 会话级提炼节流（1–1440） |
+
+已知缺口（有意不做，不是 bug）：`inject.*` 闸门只在 OpenCode 生效；`turn/end` 还没按 `reason` 过滤（中断的轮次也会进补记判定，但有信号才提炼）；云同步未接线；没有 `memx_status` / doctor 面板，诊断只在内存 + 宿主日志（`[memx] …`）。`~/.opencode/memx.config.json` 的 `refinementModel` **对 DSH 不生效**——路由来自上面四个字段或会话模型。
 
 ## 安装
 
@@ -75,11 +123,11 @@ cd memx
 bash install.sh
 ```
 
-脚本会自动克隆到 `~/workspace/memx`（可用 `bash install.sh <路径>` 覆盖），安装 pnpm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并写入 `opencode.json` 的 `instructions` 条目（仅为向前兼容，见下）。完成后重启 OpenCode，`/status` 验证即可。
+脚本会自动克隆到 `~/workspace/memx`（可用 `bash install.sh <路径>` 覆盖），安装 pnpm 依赖，创建插件入口，声明依赖，写出信号协议文件 `~/.opencode/memx-protocol.md`，并写入 `opencode.json` 的 `instructions` 条目（仅为向前兼容，见下）。完成后重启 OpenCode，`/status` 验证即可。**`install.sh` 只装 OpenCode 半边**——DSH 请改用薄壳包 `dsh-plugin-memx`（见[宿主支持](#宿主支持)）。
 
 > **信号协议从 `USER.md` 搬到了独立文件**。协议正文现在只存在于 `src/core/protocol-template.ts`，由 `scripts/sync-protocol.ts` 落盘，由**插件自己的 `context` hook** 注入。**不要**再把协议块手写进 `~/.opencode/USER.md`——那是 memx 每次提炼都会重写的数据文件，协议放里面会被抹掉。
 >
-> **内容到底怎么到模型眼前**：插件注册 `session.hook("context", …)`，把三块内容**追加**到宿主已组装好的 system prompt 后面（`agent.system` + 合并后的 `AGENTS.md` 正文）：`memx-protocol.md`（怎么发信号）→ `USER.md`（Track 1 画像）→ `MEMORY.md`（Track 2 索引）。缺文件静默跳过；三块都缺则整个 hook 什么都不做。提炼用的**子会话永远不被注入**——那一支仍整体替换 system 并锁 temperature 0.2。
+> **内容到底怎么到模型眼前**：OpenCode 壳注册 `session.hook("context", …)`，把三块内容**追加**到宿主已组装好的 system prompt 后面（`agent.system` + 合并后的 `AGENTS.md` 正文）：`memx-protocol.md`（怎么发信号）→ `USER.md`（Track 1 画像）→ `MEMORY.md`（Track 2 索引）。缺文件静默跳过；三块都缺则整个 hook 什么都不做。提炼用的**子会话永远不被注入**——那一支仍整体替换 system 并锁 temperature 0.2。（DSH 壳改成一个 `systemPrompt.section`，见[宿主支持](#宿主支持)。）
 >
 > `opencode.json` 的 `instructions` 数组在 **opencode v2.0.26 上是死字段**：宿主唯一的指令组装插件（`packages/core/src/config/plugin/instruction.ts`）只加载 `AGENTS.md`，没有任何代码消费归一化后的 `config.instructions`。所以 `install.sh` 写的那几条今天完全是 no-op，留着只为将来宿主若支持了能白捡。
 
@@ -236,8 +284,22 @@ Rewriting auth middleware for compliance.
 
 ## 命令
 
+可用性：`reflect` 与 `memx_status` **只有 OpenCode 有**；`memory_search` **只有 DSH 有**；`memory_write` 与 `forget` **两边都有**。
+
 ### `reflect`
-手动触发风格 + 项目记忆提炼（`session.idle` 未自动触发时使用）。
+手动触发风格 + 项目记忆提炼（事件触发被节流或没发时的兜底）。
+
+### `forget`
+`forget(keyword)` 把匹配的 `.mem/*.md` 移进 `.trash/` 并移除索引条目。DSH 版还接受可选 `slug`；OpenCode 版固定用当前会话的项目。`forget` 成功后会触发一次同步 push（删除会传播出去）。
+
+### `memory_write`
+显式记一条项目记忆（用户说"这个记一下 / 记住"时调用）。参数：`text`（必填，≤500 字）、`type`（`user|feedback|project|reference`，默认 `project`）、`name`、`description`、`why`、`how_to_apply`、`evidence`。同名同类型视为**修订**，与后台提炼共用同一条单遍写路 + 文件锁，格式不会分叉。
+
+### `memory_search`
+DSH 独有。`memory_search(keyword, slug?)` 跨 `projects/<slug>/.mem/*.md` 做大小写不敏感全文检索，最多返回 20 条 `slug/file:line — <命中行>`。`slug` 缺省按会话工作目录推导；推导不出则退化为全库检索（只读，最坏多给几条）。检索范围是"索引里的 slug ∪ 磁盘上有 `.mem/` 的 slug"，孤儿文件也能搜到。
+
+### `memx_status`
+打印结构化诊断（捕获 / 提炼 / 写入计数、游标状态、坏输出连击、定位告警、健康、报警、显式写入）。只有 OpenCode 有；真实全量数据在 kv 行里。
 
 ### `memx doctor`
 只读状态面板：alerts / memory files / opencode diag / sync。命令是 **`pnpm run doctor`**——别用 `pnpm doctor`，
@@ -247,7 +309,7 @@ pnpm 有同名内建命令。想查看 memx 健康状态而不触发提炼时使
 
 通过 GitHub 仓（默认 `guraul/memx-sync`）在多台机器间同步 USER.md / MEMORY.md / `.mem/*.md`。
 **默认关**——在 `~/.opencode/memx.config.json` 里开：`{"sync": {"enabled": true, "machineName": "mbp"}}`
-（改完需重启 OpenCode）。每次记忆写盘后自动推；启动时拉一次 + 每 `intervalMinutes` 定时拉。
+（改完需重启 OpenCode）。每次记忆写盘成功后自动推（提炼写盘、`memory_write`、`forget` 三处）；启动时拉一次 + 每 `intervalMinutes` 定时拉。
 `pnpm sync:dry-run` 只读预览待同步内容（永不 push）；加 `-- --fetch` 会先 clone/fetch 到缓存 workdir
 再比对——**新机器第一次拉之前必须用这个模式**，否则 workdir 不存在，报告只能写「远端未取到」。
 拉取是**远端优先**：覆盖前若本地内容与远端不同，先把本地存成 `<file>.bak.<ts>`（每文件保留 5 份）。
@@ -257,12 +319,15 @@ pnpm 有同名内建命令。想查看 memx 健康状态而不触发提炼时使
 PII 闸门（8 类规则）拦截含 token/密钥的推送——命中只报 文件+行号+规则名，绝不回显内容。
 push 先数 `git rev-list --count @{u}..HEAD`：**无文件差异但有未推提交时照样 push**（断网期攒下的提交不再滞留）；
 未推提交数落进状态文件，`doctor` / `sync:op status` 可见。
-v1 有意不做：删除传播、逐行合并（同一文件两台机器都改靠 git rebase，冲突即 abort 留人工）。
+删除传播已实现：`forget` 的删除会随 push 传播（基线是上次同步的远端 sha）；别的机器删掉的文件，本地 pull 时会先存 `<file>.bak.<ts>` 再删。基线未知（首次同步 / 旧状态）时该轮**保守不删**，避免新机器误清空远端。
+v1 有意不做：逐行合并（同一文件两台机器都改靠 git rebase，冲突即 abort 留人工）、pull 与写盘之间的互斥（靠 `.bak` 兜底）。**DSH 壳暂不触发同步**。
 
 ## 故障排查
 
-- **`session.idle` 迟迟不触发**：该事件只在会话真正空闲（一轮回复完全结束）后触发，连续工具调用 / 活跃回合会无限延迟。直接调用 `reflect` 工具手动触发。
-- **改代码不生效**：插件在 OpenCode 启动时加载一次，修改 `src/` 后必须重启 OpenCode；修改 `~/.opencode/memx.config.json` 则即时生效（每次提炼时重新读取）。
+- **事件触发没反应 / 提炼像卡住了**：opencode v2 **不发 `session.idle`**，memx 挂的是 `session.execution.succeeded`，并且提炼有节流（`throttleMinutes`，默认 10 分钟）。要立刻跑一轮用 `reflect` 工具。
+- **DSH：没有 `memx_status` / doctor 面板**：这是预期——DSH 诊断只在内存，重启清零。搜宿主日志 `[memx]`；`skipped.*` 六类计数（`disabled` / `duplicate` / `written` / `empty` / `throttle` / `noModel`）能解释"轮末为什么没补记"。
+- **DSH：刚写的记忆本会话看不到**：注入每会话只算一次是设计语义，下个会话生效；文件已经落盘，不是丢数据。
+- **改代码不生效**：插件在宿主启动时加载一次，修改 `src/` 后必须重启 OpenCode（或 `dsh web`）；修改 `~/.opencode/memx.config.json` 则即时生效（每次提炼时重新读取；OpenCode 的 `sync` 段例外，要重启）。
 - **提炼模型**：默认 `opencode/mimo-v2.6-flash-free`（**生产目标**——生产 opencode 的模型目录里没有 `opencode-go`）。本机开发用 `~/.opencode/memx.config.json` 覆盖成 `opencode-go/longcat-2.5-preview-free`，因为本机免费档被网关挡（403 指纹校验 / 429 限流）。deepseek 官方 key 在当前环境无效，不要配置 `deepseek/*` 模型。
 - **日志**：位于 `~/.local/share/opencode/log/opencode.log`。插件的 `app.log` 消息不显示 `service` 字段，排查时搜索 `level=ERROR`，成功写入搜索 `Updated USER.md` 或 `Updated MEMORY.md`。
 - **LLM 输出排查**：每次提炼会记录 `llm raw(N): ...`（400 字符截断），可确认 LLM 原始返回是否合法 JSON。
@@ -271,7 +336,7 @@ v1 有意不做：删除传播、逐行合并（同一文件两台机器都改�
 
 ```bash
 pnpm install       # 安装依赖
-pnpm test          # 运行测试（基线：25 文件 / 366 用例全绿，低于即回归）
+pnpm test          # 运行测试（基线：26 文件 / 416 用例全绿，低于即回归）
 pnpm run typecheck # 类型检查
 ```
 

@@ -1,8 +1,8 @@
 # OPERATIONS.md — 安装、配置、测试与调试
 
-> 最后更新: 2026-10-15 · commit `fe26fa1`
+> 最后更新: 2026-10-25 · commit `c232168`
 
-## 1. 安装（install.sh，6 步幂等）
+## 1. 安装（install.sh，6 步幂等，**只装 OpenCode 半边**）
 
 ```bash
 git clone https://github.com/guraul/memx.git
@@ -37,6 +37,19 @@ bash install.sh            # 默认装到 ~/workspace/memx；bash install.sh <�
 
 模型可用性出问题：**停下报告，不降级不换模型**（用户硬约束）。
 
+### 2.0.1 DSH 侧配置（cordis 配置，不是 `memx.config.json`）
+
+DSH 的四个字段由薄壳包 `dsh-plugin-memx` 用 schemastery `.volatile()` 声明（**已落地并安装**；在 Web 设置页「设置 → 记忆」或 profile 的 `cordis.patch.yml` 的 `id: memx` 段修改）：
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `provider` | string | `""` | 提炼用 provider；空 = 跟随当前会话（`agent.options`） |
+| `model` | string | `""` | 提炼用 model；空 = 跟随当前会话 |
+| `autoRefine` | boolean | `true` | 轮末自动提炼；`false` 只关轮末补记，显式 `memory_write` 不受影响 |
+| `throttleMinutes` | number | `10` | 会话级节流（1–1440）；缺省回落 `memx.config.json` 的 `throttleMinutes` |
+
+四个都是 volatile 字段，**每次轮末现读**（改完即时生效，无需重启）。`~/.opencode/memx.config.json` 的 `refinementModel` 对 DSH **不生效**（路由来自上面两个字段或会话模型）。
+
 ### 2.1 云同步（阶段 4 第二半，默认关）
 
 | 字段 | 类型 | 默认 | 说明 |
@@ -61,7 +74,7 @@ pnpm sync:op -- push --machine=<name>   # 2) 人工首推（不改配置，宿�
 ## 3. 开发与验证
 
 ```bash
-pnpm test            # vitest run —— 基线 25 文件 / 366 用例全绿，低于即回归
+pnpm test            # vitest run —— 基线 26 文件 / 416 用例全绿，低于即回归
 pnpm run typecheck   # tsc --noEmit（strict + exactOptionalPropertyTypes + noUncheckedIndexedAccess）
 
 # 阶段 4 CLI（全部只读或显式手工操作，退出码恒 0）
@@ -88,7 +101,27 @@ pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
 所以删 CLI **没有**丢掉"跨 `.mem/*.md` 找 file:line"的能力。
 
 - 写盘副作用不变：`writeMemoryIndex` 覆盖前自动生成 `MEMORY.md.bak.<ts>`（留 5 份）；`forget`/`deprecate` 把文件移入 `.mem/.trash/`（软删可恢复）。
-- 宿主工具的 slug 缺省按会话 cwd 用 `deriveSlug` 推导（与注入一致）。
+- 宿主工具的 slug 缺省按会话 cwd 用 `deriveSlug` 推导（与注入一致）；DSH 的 `forget` 推导不出 slug 时直接失败（不猜项目）。
+
+### 3.2 DSH 宿主（已落地并安装）
+
+现状：适配器在本仓 `src/hosts/dsh/`；接线由独立仓的薄壳包 `dsh-plugin-memx`（`~/workspace/self-dsh-plugins/dsh-plugin-memx`）完成——已 link 进 `~/.dsh/profiles/web`，`cordis.patch.yml` 里有 `id: memx` 行。薄壳包用 TypeScript load hook **直接加载本仓源码**，所以改 memx 不用重编薄壳包。
+
+| 场景 | 做法 |
+|------|------|
+| 安装 / 升级薄壳包 | `dsh plugin --profile web add /Users/gubin/workspace/self-dsh-plugins/dsh-plugin-memx`，然后重启 dsh web |
+| 跑 DSH 适配器测试 | `pnpm test tests/hosts-dsh.test.ts`（假 ctx：systemPrompt / tools / llm / agents / workingDirectory） |
+| 改本仓 `src/hosts/dsh/**` | **重启 dsh web**（无 HMR；launchd 服务 `com.deepseek.dsh-web.*`）；不用重编薄壳包 |
+| 改薄壳包 `src/config.ts` / `src/client/**` | `pnpm build`（esbuild 出 `lib/config.js` / `lib/client.js`）后重启 dsh web |
+| 改 cordis 配置 / profile bundles | 即时热生效（web profile `patchReload: live`） |
+| 改设置页「记忆」四个字段 | 即时生效（volatile，轮末现读） |
+| 改 `~/.opencode/memx.config.json` | 即时生效（每次提炼重读），但 `refinementModel` 对 DSH 不生效 |
+
+⚠️ 薄壳包 `lib/index.js` 硬编码 `MEMX_ROOT=/Users/gubin/workspace/memx/`：搬仓 / 换 clone / 多 checkout 必须同步改，否则 DSH 静默加载旧代码。
+
+DSH 侧**没有** `pnpm run doctor` 的对应面板：诊断在内存 + 宿主日志（`[memx] …`）；Web 设置页只改配置、不显示计数。
+
+### 3.3 通用约定
 
 - ⚠️ **必须 `pnpm run doctor`**，别用 `pnpm doctor`——pnpm 有同名内建命令，会静默跑成 pnpm 自检而不是 memx 面板。
 - CLI 走 `node --experimental-strip-types` 直载 `.ts`：**相对 import 必须带 `.ts` 扩展名**（缺了 tsc/vitest 都发现不了，运行时才 `ERR_MODULE_NOT_FOUND`）；`tests/scripts-smoke.test.ts` 真跑脚本兜这条，所以**加了 CLI 就要让它进冒烟测试**。
@@ -107,7 +140,8 @@ pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
 4. **看宿主日志**：`~/.local/share/opencode/log/opencode.log`——搜 `level=ERROR`；成功写盘搜 `Updated USER.md` / `Updated MEMORY.md`；LLM 原始返回搜 `llm raw(N):`（400 字符截断，确认是否合法 JSON）。
 5. **子会话空回复**：先看 `finish` / `error` / `rawFinish` 三个字段，别只看 content parts。
 6. **手工触发提炼**：调 `reflect` 工具（`force=true` 绕节流）。
-7. **改了 src 不生效**：插件只在启动时加载——重启 OpenCode。改配置文件则即时生效（**`sync` 段例外，要重启**）。
+7. **改了 src 不生效**：插件只在启动时加载——重启 OpenCode / dsh web。改配置文件则即时生效（**OpenCode 的 `sync` 段例外，要重启**）。
+8. **DSH 侧排查**：没有 kv、没有 `memx_status`，看宿主日志里的 `[memx] …`；"轮末没写"按 `skipped.*` 六类计数定位（`disabled` / `duplicate` / `written` / `empty` / `throttle` / `noModel`，只在内存，重启清零）。
 
 常见症状速查：
 
@@ -121,15 +155,20 @@ pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
 | MEMORY.md 首行有 `<!-- memx: ⚠️ … -->` | 有 warn/critical 报警未销账——`pnpm run doctor` 看明细，修好后 `pnpm alerts:clear --code=X` |
 | 同步没动静 | `doctor` 的 sync 段：`enabled` / `machineName` 是否都非空；改过配置是否忘了重启宿主 |
 | 同步一直失败刷屏 | `memx-sync-state.json` 的 `lastError` / `consecutiveFailures`；报警已按同 code+message 去重 |
-| forget 掉的文件又被拉回来 / `mem status` 报 `orphanFiles` 不降 | `doctor` 看 `sync.pendingDeletions`（远端还有、本地已删）：>0 说明删除还没推出去，跑 `pnpm sync:op -- push` 收敛；issue #21 起 `forget` 成功后会自动推 |
+| forget 掉的文件又被拉回来 / `doctor` 的 `memory files` 段显示孤儿不降 | `doctor` 看 `sync.pendingDeletions`（远端还有、本地已删）：>0 说明删除还没推出去，跑 `pnpm sync:op -- push` 收敛；issue #21 起 `forget` 成功后会自动推 |
 | push 被拒（PII） | `pnpm sync:op pii`（或 `pnpm sync:dry-run`）看命中的 file/行号/规则名；**不要**为了推上去而删规则，先确认是真密钥（清理记忆内容）还是词形误报（调规则 + 补正反例测试） |
 | push 返回 `no-change` 但本地有提交没推出去 | `doctor` 的 `sync.unsyncedCommits`；issue #12 后 `no-change` 只在"无文件差异**且**无未推提交"时成立，>0 会照常 push |
 | pull 后本地改动没了 | 找 `<file>.bak.<ts>`（pull 覆盖前自动备份，每文件留 5 份） |
+| DSH 会话里看不到刚写的记忆 | 设计语义：DSH 注入每会话只算一次（下个会话生效），不是丢失 |
+| DSH 轮末不提炼 | 宿主日志 `[memx]`；按 `skipped.*` 判断：`disabled`（autoRefine=false）/ `throttle` / `noModel`（provider/model 取不到，不猜不回落） |
+| DSH 提示「已记住 N 条」不出现 | `createUserMessage` 动态 import 失败 → 只跳过提示，写盘不受影响 |
 
 ## 5. 发布物与兼容
 
 - 依赖：`@opencode/plugin` / `@opencode/client` ^2.0.26（v2-only）；v1 的 `@opencode-ai/plugin` 代码不再 import。
+- DSH 侧**不声明任何 `@deepseek-ai/*` 依赖**（结构类型手写在 `src/hosts/dsh/types.ts`）；接线在独立仓薄壳包 `dsh-plugin-memx`（声明 `dsh.bundle.patch` + schemastery 配置 + Web 设置页）。
 - `opencode.json` 的 `instructions` 是死字段（宿主只从 AGENTS.md 组装指令）——不要指望它注入。
-- `~/.config/opencode/AGENTS.md` 是宿主唯一验证过的指令通道；memx **不写**它（所有权缺口，见 CONVENTIONS.md §3）。
+- `~/.config/opencode/AGENTS.md` 是宿主唯一验证过的指令通道；memx **不写**它（所有权缺口，见 CONVENTIONS.md §2 #30）。
 - **相对 import 一律带 `.ts` 扩展名**（阶段 4 起）：CLI 走 `node --experimental-strip-types` 直载源码，缺扩展名只有真跑才炸。新增文件时照抄现有风格。
 - CLI 全部位于 `scripts/`（不是 `src/cli/`）；新增命令要同时改 `package.json` scripts 与 `tests/scripts-smoke.test.ts`。
+- `package-lock.json`（npm 残留）已于 2026-10-23 删除，仓库只维护 `pnpm-lock.yaml`；**不要重新生成 npm 锁文件**。

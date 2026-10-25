@@ -1,10 +1,10 @@
 # DATA.md — 数据存储与查询指南
 
-> 最后更新: 2026-10-15 · commit `0685bed`
+> 最后更新: 2026-10-25 · commit `c232168`
 
 ## 1. 数据实体清单
 
-全部数据是**本机 Markdown / JSON / 锁文件**，集中在 `~/.opencode/`（core 层 11 处硬编码，路径清单见 modules/store.md §文件族）。
+全部数据是**本机 Markdown / JSON / 锁文件**，集中在 `~/.opencode/`（core 层 **18 处** `join(homedir(), ".opencode", …)` 硬编码、**未参数化**；路径清单见 modules/store.md §文件族）。**OpenCode 与 DSH 共用这一份目录**——同一项目 slug 相同，画像与项目记忆真正跨宿主。
 
 | 实体 | 位置 | 内容 | 写入方 |
 |------|------|------|--------|
@@ -22,7 +22,8 @@
 | 同步锁 | `~/.opencode/.memx-sync.lock` | push/pull 串行闸门（ttl 10 分钟 / 等锁 5 分钟） | `core/sync.ts` |
 | 宿主入口 | `~/.config/opencode/plugins/memx.ts` | `export { default } from "<repo>/src/hosts/opencode/index";` | install.sh |
 | 宿主依赖声明 | `~/.config/opencode/package.json` | zod / @opencode/plugin / @opencode/client v2 | install.sh（v1→v2 名自愈） |
-| 诊断 + 游标 | OpenCode sqlite kv（`ctx.storage`） | `diag:<slug>` / `cursor:<sessionID>` | index.ts |
+| 诊断 + 游标 | OpenCode sqlite kv（`ctx.storage`） | `diag:<slug>` / `cursor:<sessionID>` | opencode/index.ts |
+| DSH 诊断 | **无持久化**（进程内存 `DshDiagnostics` + 宿主日志 `[memx] …`） | injections / capturedTurns / toolWrites / notices / skipped.* | dsh/index.ts |
 
 ## 2. 格式
 
@@ -83,8 +84,10 @@ Rewriting auth middleware for compliance.
 | 画像现在记了什么 | `~/.opencode/USER.md` | 直接打开；废弃条目带删除线 |
 | 某项目有哪些记忆 | `~/.opencode/MEMORY.md` 找 `## <slug>` 节 | 或打开对应 `.mem/` 目录 |
 | 某条记忆的完整内容 | 索引里的链接 | 打开对应 `.mem/*.md` |
-| 插件真实运行状态 | **sqlite kv 表**（不是 memx_status 的回执） | 见 §4 诊断 |
-| 某会话的捕获进度 | kv 的 `cursor:<sessionID>` | 同上 |
+| 哪个文件哪一行提到某关键词 | 全部 `.mem/*.md` | 宿主工具 `memory_search`（DSH；大小写不敏感、返回 `slug/file:line`）——索引 slug ∪ 磁盘 slug，孤儿文件也能搜到 |
+| 插件真实运行状态（OpenCode） | **sqlite kv 表**（不是 memx_status 的回执） | 见 §4 诊断 |
+| 插件真实运行状态（DSH） | 宿主日志 | 搜 `[memx]`；`skipped.*` 计数解释"为什么没写"（disabled/duplicate/written/empty/throttle/noModel） |
+| 某会话的捕获进度 | kv 的 `cursor:<sessionID>` | 同上（DSH 无游标） |
 | 写坏了想回滚 | `~/.opencode/*.bak.<ts>` | 按时间戳选版本覆盖回去 |
 | 被删掉的记忆 | `.mem/.trash/<file>.<ts>` | 改回文件名并重新登记索引 |
 | 有哪些报警、要不要销账 | `~/.opencode/memx-alerts.json` | 或跑 `pnpm run doctor` 看 counts + 最近 10 条；销账 `pnpm alerts:clear --code=X` |
@@ -105,17 +108,20 @@ sqlite3 ~/.local/share/opencode/opencode.db \
 
 （namespace = `plugin:` + "memx" 逐字符 4 位十六进制；键已按目录隔离为 `diag:<slug>`。）注意：**同目录多实例仍会互相覆盖**（`opencode run --server` 客户端也会实例化插件），排查优先看 serve 日志：`~/.local/share/opencode/log/opencode.log`（成功写盘搜 `Updated USER.md` / `Updated MEMORY.md`；LLM 原始返回搜 `llm raw(N):`，400 字符截断）。
 
+**DSH 侧没有 kv、没有 `memx_status`**：诊断只在进程内存（`DshDiagnostics`），异常与跳过原因落宿主日志（`ctx.logger.warn`，前缀 `[memx]`）。查"轮末为什么没写"看 `skipped.*` 的六类计数（`disabled` / `duplicate` / `written` / `empty` / `throttle` / `noModel`）——它们只在内存，重启即清零，所以要趁会话现场看日志。报警仍落同一份 `memx-alerts.json`（两宿主共用账本）。
+
 ## 5. 数据变更链路
 
 | 谁写入 | 写到哪 | 谁读取 |
 |--------|--------|--------|
-| 后台提炼（refine/refineMemory） | USER.md / MEMORY.md + .mem | 下一 step 的 context hook 注入 |
-| memory_write / forget 工具（opencode + DSH） | 同上（同一写入口 + 同一把锁） | 同上 |
+| 后台提炼（SessionPipeline → refine/refineMemory） | USER.md / MEMORY.md + .mem | 下一 step / 下一会话的注入 |
+| memory_write / forget 工具（OpenCode + DSH） | 同上（同一写入口 + 同一把锁） | 同上 |
 | forget / deprecate | 移入 .trash + 索引改条目 | 注入的索引随之更新 |
 | health auto-fix | MEMORY.md 索引（同锁内） | 同上 |
-| 报警（`recordAlert`） | `memx-alerts.json`（事实源）+ kv `diag.alerts`（镜像）+ MEMORY.md 首行面包屑 | doctor / `memx_status` / **模型**（面包屑随索引被注入） |
+| memory_search（DSH 工具） | **不写盘**（只读 `.mem/*.md` + 索引） | 模型回执 |
+| 报警（`recordAlert`） | `memx-alerts.json`（事实源）+ kv `diag.alerts`（镜像，仅 OpenCode）+ MEMORY.md 首行面包屑 | doctor / `memx_status` / **模型**（面包屑随索引被注入） |
 | 云同步 push | `memx-sync-repo/` → 远端 Git 仓（USER.md / MEMORY.md / `.mem/**`） | 其他机器的 pull；状态被 doctor 读取 |
-| 云同步 pull | 本地记忆文件（远端优先；本地差异先存 `.bak.<ts>`） | 下一 step 的 context hook 注入 |
+| 云同步 pull | 本地记忆文件（远端优先；本地差异先存 `.bak.<ts>`） | 下一 step / 下一会话的注入 |
 | 主 AI（❗非 memx 行为） | 可能自行写 AGENTS.md 等文件 | 宿主指令组装——**这是所有权缺口，协议 v1.2.0 规则 9 是软约束** |
 
-**多宿主并发**：文件锁（mtime TTL + 锁内重读）已覆盖"两个进程同时读改写同一文件"；未来 DSH 壳将共享 `~/.opencode/` 数据目录（2026-10-13 拍板，见 DSH-ADAPT.md）。
+**多宿主并发**：文件锁（mtime TTL + 锁内重读）已覆盖"两个进程同时读改写同一文件"；DSH 与 OpenCode **已实际共享** `~/.opencode/`（core 里 18 处硬编码路径默认值一致）。注意两宿主的注入缓存语义不同：OpenCode 每 step 重算，DSH 每会话只算一次——所以 DSH 会话里看不到本会话刚写的记忆，这是设计语义，不是丢失。
