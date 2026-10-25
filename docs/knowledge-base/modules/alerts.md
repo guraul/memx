@@ -11,6 +11,7 @@
 | 文件 | 职责 |
 |------|------|
 | `src/core/alerts.ts` | `createFileAlertStore`（账本读写）+ `formatBreadcrumb` / `formatAlertsPanel`（两个纯格式化器） |
+| `src/core/health/memory-stats.ts` | 只读统计（顶距 / 龄期 / `.trash`）+ `headroomAlert()` 判定（#30） |
 | `src/core/pipeline/session.ts` | 流水线内的 `recordAlert` 调用（三态连击 `REFINEMENT_FAILURE_STREAK`、健康 `HEALTH_ESCALATED`） |
 | `src/hosts/opencode/index.ts` | `recordAlert()`（写账本 + kv 镜像）、`applyAlertBreadcrumb()`（写 MEMORY.md 前套面包屑）、`CAPTURE_CURSOR_LOST` |
 | `src/hosts/dsh/index.ts` | `createFileAlertStore()` + `recordAlert`（只写账本，无 kv 镜像）+ 面包屑 |
@@ -67,6 +68,16 @@
 | `SYNC_ERROR` / `SYNC_PUSH_FAILED` | 同步失败（成功路径 `resolve` 销账） | warn |
 | `SYNC_CONFLICT` | pull rebase 冲突，留人工 | critical |
 | `SYNC_PII_BLOCKED` | PII 扫描命中，拒推 | critical |
+| `HEADROOM_LOW` | `MEMORY.md` 注入顶距 <20%（`core/health/memory-stats.ts` 的 `headroomAlert`，由 `doctor` 每次运行时检查） | critical |
+
+## 顶距预警 `HEADROOM_LOW`（#30）
+
+- **阈值**：注入单块上限 25KB（`INJECT_MAX_BYTES`）的**剩余**不足 20%（即已用 >80%，约 20KB）。判定用未取整的百分比，恰好 20% **不报**（阈值语义是"低于"）。
+- **为什么是 20%**：20% × 25KB = 5KB ≈ 18 条（283B/条），够跑一轮清理/改造而不至于下一秒就撞顶；再高会变成噪声，再低就只剩一两轮余量。
+- **message 里不放测得的数字**：数字每条记忆都会变，而账本按 `code + message` 去重（见下），带数字会让同一事实反复刷屏。具体百分比看 `pnpm run doctor` 面板。
+- **去重语义**：与 `core/sync.ts` 的 `alert()` 一致——只比较**最后一条**，同 `code + message` 就跳过。所以"顶距一直低"只会留一条；中间插入了别的报警才会再记一条（这是既有语义，不是本码特例）。
+- **销账**：`pnpm alerts:clear --code=HEADROOM_LOW`（清理/改造后顶距回到 20% 以上，再跑 doctor 也不会重新写）。
+- **只展示不报警**的两项：卡片龄期分布、`.trash` 文件计数——前者是信息，后者是可恢复历史，都不是故障。
 
 ## 依赖关系
 

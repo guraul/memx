@@ -74,16 +74,37 @@ pnpm sync:op -- push --machine=<name>   # 2) 人工首推（不改配置，宿�
 ## 3. 开发与验证
 
 ```bash
-pnpm test            # vitest run —— 基线 26 文件 / 416 用例全绿，低于即回归
+pnpm test            # vitest run —— 基线 28 文件 / 447 用例全绿，低于即回归
 pnpm run typecheck   # tsc --noEmit（strict + exactOptionalPropertyTypes + noUncheckedIndexedAccess）
 
-# 阶段 4 CLI（全部只读或显式手工操作，退出码恒 0）
-pnpm run doctor      # 只读状态面板：alerts / memory files / opencode diag / sync
+# 阶段 4 CLI（除 doctor 的顶距报警外都只读；退出码恒 0）
+pnpm run doctor      # 只读状态面板：alerts / memory files / memory stats / opencode diag / sync
 pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永不 push）
 pnpm sync:op -- status|pull|push|both [--machine=<name>]
 pnpm sync:op pii     # 只读 PII 自查：命中明细 file / 行号 / 规则名（绝不回显内容）
 pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
 ```
+
+### 3.0 doctor 的 memory stats 段（#30）
+
+`memory files` 之后新增四类行（`src/core/health/memory-stats.ts`，纯只读）：
+
+```
+memory index: 15.8KB / 25KB（已用 63.1%，顶距 36.9%；阈值 <20% 触发 HEADROOM_LOW）
+  Users-gubin-workspace-agent-mobile: 30 条, 8.3KB, 33.4% of 25KB
+  …
+card age: ≤7天=1 8-30天=0 31-90天=0 >90天=0 未知=88（共 89 张，按 frontmatter created；缺失计未知，不用 mtime）
+trash: 26 个文件（Users-gubin-workspace-agent-mobile=10 …）
+```
+
+| 行 | 口径 | 会不会报警 |
+|----|------|-----------|
+| `memory index` | 整份 `MEMORY.md` 的 UTF-8 字节 / `INJECT_MAX_BYTES`（25KB，与注入闸门同源）；顶距 = 100 − 已用 | **会**：顶距 <20% → 账本记一条 `critical/HEADROOM_LOW`（同 code+message 去重，`pnpm alerts:clear --code=HEADROOM_LOW` 销账） |
+| 各 slug 节 | 节头 + 指针行 + extras 原样行的字节，不含节间空行/preamble；百分比 = 该节字节 / 25KB（可 >100） | 不会（用来定位"该拆哪个节"） |
+| `card age` | 读卡片 frontmatter `created`（UTC 日期）分桶 ≤7 / 8-30 / 31-90 / >90 天；缺失或不可解析 → **未知**。**绝不用 mtime**（update 与 sync pull 都会重置它） | 不会 |
+| `trash` | `projects/<slug>/.mem/.trash/` 下普通文件数（含空 slug 遗留 `projects/.mem/`）；子目录不计 | 不会（软删残留是可恢复历史，不是故障） |
+
+因此 **doctor 是唯一会写盘的诊断命令**：只在阈值以下往 `~/.opencode/memx-alerts.json` append 一条，不改任何记忆文件。`scripts-smoke` 的新用例全部用临时 `HOME` 起子进程，不碰本机账本。
 
 ## 3.1 对外 CRUD 面（已退役，2026-10-23 / #24）
 
