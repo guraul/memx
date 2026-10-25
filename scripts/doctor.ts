@@ -10,6 +10,14 @@ import { spawnSync } from "node:child_process";
 import { createFileAlertStore, formatAlertsPanel } from "../src/core/alerts.ts";
 import { loadMemxConfig } from "../src/core/config.ts";
 import { findDuplicateEntries, findLegacyEmptySlugDir } from "../src/core/health/memory-health.ts";
+import {
+  cardAgeBuckets,
+  formatMemoryStatsPanel,
+  headroomAlert,
+  indexHeadroom,
+  trashCount,
+} from "../src/core/health/memory-stats.ts";
+import { readMemoryIndex } from "../src/core/store/memory-md.ts";
 import { listPendingDeletions, listToSync, readSyncState } from "../src/core/sync.ts";
 
 // ---- alerts ----
@@ -63,6 +71,26 @@ try {
   }
 } catch {
   console.log("memory files: 未取到");
+}
+
+// ---- memory stats（#30）：顶距 / 卡片龄期 / .trash 计数 ----
+// 只读：不改任何记忆文件、不联网。唯一的写入是"顶距 <20%"时往报警账本 append 一条 critical
+// （#32 的启用触发），销账走 `pnpm alerts:clear --code=HEADROOM_LOW`。
+try {
+  const headroom = indexHeadroom(readMemoryIndex());
+  console.log(formatMemoryStatsPanel(headroom, cardAgeBuckets(new Date()), trashCount()));
+
+  const alert = headroomAlert(headroom);
+  if (alert !== null) {
+    const alertStore = createFileAlertStore();
+    const last = alertStore.list().at(-1);
+    // 去重语义与 core/sync.ts 一致：只看最后一条，同 code+message 不重复刷屏
+    if (last === undefined || last.code !== alert.code || last.message !== alert.message) {
+      alertStore.append({ ...alert, ts: new Date().toISOString() });
+    }
+  }
+} catch {
+  console.log("memory stats: 未取到");
 }
 
 // ---- opencode diag ----

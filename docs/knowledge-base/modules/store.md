@@ -73,6 +73,7 @@ USER.md 是"慢变量画像"，同一条偏好被反复 append 会让它膨胀�
 - `MEMORY.md` 索引：tmp 写完整 → rename 到位（`*.tmp.<ts>` 不留残骸）。
 - **记忆卡：三件套顺序写**（`writeMemoryFile`）——① tmp 写完整 → ② 旧卡 rename 进 `.trash/<file>.<ts>` → ③ tmp rename 到位。任一崩溃点都至少留一份完整卡片；写失败清 tmp 并原样抛出。tmp 名不以 `.md` 结尾，所以 sync / `memory_search` / 健康检查（都按 `endsWith(".md")` 收文件）天然排除它。
 - **frontmatter 的 `created` / `updated` 由写盘层生成**（UTC 日期 `YYYY-MM-DD`，不进 `MemoryProposalSchema`）：新增取当天；更新时在移走旧卡**之前**读旧 frontmatter，`created` 原样保留、`updated` 刷新；老卡缺 `created` 就保持缺失（不拿 mtime 伪造，doctor 显示「未知龄期」）。`deprecate` 不做写卡，只把原卡按字节原样移入 `.trash/`。
+- **`.trash` 的统计口径**（#30）：`doctor` 的 `trashCount()` 只数 `projects/<slug>/.mem/.trash/` 下的**普通文件**（含空 slug 遗留的 `projects/.mem/`，子目录不计），只展示不报警、不清洗——它是软删可恢复的历史，不是故障信号；数字变小通常意味着有人手工清过。
 
 ## 健康检查（与写盘同锁）
 
