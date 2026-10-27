@@ -106,4 +106,9 @@ Track 2 写盘的同一把锁内跑 `runHealthMaintenance()`：死链（索引�
 
 `created` 由写卡层在**新建**时生成（`YYYY-MM-DD`），`update` 时原样保留；老卡缺失就显示「未知」，**不用 mtime 兜底**（update 会重置 mtime、sync pull 的 copyFileSync 也会重置）。
 
-一次性回填：`pnpm run backfill:created --dry-run` 先看「将回填 N / 已有 M / 保留未知 K」，确认后去掉 `--dry-run` 真跑。数据源是 `~/.opencode/memx-sync-repo` 的 git 首次新增时间；首推（2026-10-14）之前就存在的卡查不到，保持「未知」，**不猜**。实现走 `patchCreatedDate()`（只插一行、原子写、与写盘共用一把锁）。
+一次性回填：`pnpm run backfill:created --dry-run` 先看「将回填 N / 已有 M / 保留未知 K / 跳过 S」，确认后去掉 `--dry-run` 真跑。数据源是 `~/.opencode/memx-sync-repo` 的 git 首次新增时间，另有两条硬规则（#34 follow-up）：
+
+- **引导提交不算创建**：`git rev-list --max-parents=0 HEAD` 的根提交 = 镜像首次导入（2026-10-13）。随导入进仓的卡，其「首次新增」就是该根提交 → 判 `unknown`，**不写导入日**（否则几十张卡盖同一根假柱子，龄期分布失真）。dry-run 把这部分单列：`保留未知 K 中 X 张随镜像首导（引导提交 N 个）进仓，创建时间不可知`。
+- **`projects/.mem/` 空 slug 遗留卡**（如 `project_e2e_e4_memory.md`）也会被扫到并计数，但 slug `""` 是「宿主取不到 cwd」的哨兵（`deriveSlug` 语义），不是合法项目 → 记 `跳过 S（空 slug 遗留，需人工处理）`，**不写盘**，由人工归入某个项目或 `projects/root/.mem/`。
+
+首推（2026-10-14）之前就存在、又查不到首次提交的卡同样保持「未知」，**不猜**。实现走 `patchCreatedDate()`（只插一行、原子写、与写盘共用一把锁）。
