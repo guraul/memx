@@ -162,6 +162,16 @@ export function serializeMemoryIndex(doc: MemoryIndexDoc): string {
 
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---/;
 
+/**
+ * 卡片是否有 YAML frontmatter 块（`^---\n…\n---`）。
+ * 回填脚本据此区分「无 frontmatter，不能安全插行」与其它写失败（#34 follow-up）。
+ * 注意：CRLF 行尾 / 首字符不是 `---` 的都算「无 frontmatter」，这是有意的——
+ * 这种卡不该被 patchCreatedDate 重写（它会把整篇格式换掉）。
+ */
+export function hasFrontmatter(content: string): boolean {
+  return FRONTMATTER_RE.test(content);
+}
+
 /** 读卡片 frontmatter 里的 `created:`（只认 frontmatter 块内的行）。 */
 export function readCreatedDate(content: string): string | null {
   const block = content.match(FRONTMATTER_RE)?.[1];

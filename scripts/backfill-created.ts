@@ -17,12 +17,18 @@
 //      不在任何 `<slug>/.mem/` 里，旧实现漏扫。但 slug `""` 在 memx 里是**哨兵**
 //      （`deriveSlug` 对"宿主取不到 cwd"返回 `""`，`writeMemoryFile` 对它失败），
 //      不是合法项目 → 只列出 + 计数，**不写盘**（人工处理）。
+//
+// ③ **写失败的卡不能算 filled**（生产实测 2026-10-27）：`patchCreatedDate()` 返回 false 的
+//   一次也没写进去，旧实现仍按 pending 长度报「已回填 61」，实际只落 60 张。现在按原因分账：
+//   `skippedNoFrontmatter`（卡片没有 frontmatter 块 —— 补 `created` 无处可插，硬补等于重写
+//   整篇格式，必须原样不动）/ `skippedWriteFailed`（文件消失、期间已有 created、写入异常）/
+//   `skippedLegacy`（空 slug 遗留）。已有 `created` 的仍归 `already`。
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 
-import { readCreatedDate, patchCreatedDate } from "../src/core/store/memory-md.ts";
+import { readCreatedDate, patchCreatedDate, hasFrontmatter } from "../src/core/store/memory-md.ts";
 import { withFileLock, memoryIndexLockPath } from "../src/core/store/lock.ts";
 
 export interface BackfillOptions {
@@ -35,7 +41,7 @@ export interface BackfillOptions {
 }
 
 export interface BackfillResult {
-  /** 本次写入（或 dry-run 下将写入）的卡数 */
+  /** 本次**实际写成功**（dry-run 下为将写入）的卡数 */
   filled: number;
   /** 已有 created、跳过 */
   already: number;
@@ -43,10 +49,38 @@ export interface BackfillResult {
   unknown: number;
   /** `unknown` 中因"随镜像首导（引导提交）进仓"而不可知的数量 */
   unknownBootstrap: number;
-  /** 空 slug 遗留卡（`projects/.mem/` 下），需人工处理，不写盘 */
+  /** 未写入的卡总数（= 下面三类之和） */
   skipped: number;
-  /** 涉及的文件名（相对 `<slug>/.mem/`，空 slug 卡为 `projects/.mem/<file>`），供日志展示 */
+  /** 无 frontmatter 块：无可插入位置，原样不动 */
+  skippedNoFrontmatter: number;
+  /** 其它写失败：文件消失 / 期间已有 created / 写入异常 */
+  skippedWriteFailed: number;
+  /** 空 slug 遗留卡（`projects/.mem/` 下），需人工处理，不写盘 */
+  skippedLegacy: number;
+  /** 实际写入（或 dry-run 下将写入）的文件名，供日志展示 */
   files: string[];
+  /** 跳过的卡与可读原因，供逐条明细展示 */
+  skippedCards: SkippedCard[];
+}
+
+/** 跳过原因分类（计数与明细共用一套码）。 */
+export type SkipCode = "no-frontmatter" | "write-failed" | "legacy-empty-slug";
+
+export interface SkippedCard {
+  /** 相对 memx 根的路径（空 slug 卡为 `projects/.mem/<file>`） */
+  repoPath: string;
+  code: SkipCode;
+  reason: string;
+}
+
+const SKIP_REASONS: Record<SkipCode, string> = {
+  "no-frontmatter": "无 frontmatter：首字符非 --- 或 CRLF 行尾，补行等于重写整篇，保持原样",
+  "write-failed": "写失败（文件消失 / 期间已有 created / 写入异常）",
+  "legacy-empty-slug": "空 slug 遗留，需人工处理：应归入某个项目或 projects/root/.mem/",
+};
+
+function skip(code: SkipCode, repoPath: string): SkippedCard {
+  return { repoPath, code, reason: SKIP_REASONS[code] };
 }
 
 interface CardRef {
@@ -153,6 +187,15 @@ export function firstCommitDate(syncRepo: string, repoPath: string): string | nu
   return firstCommit(syncRepo, repoPath)?.date ?? null;
 }
 
+/** 汇总行：`<head> N / 已有 M / 保留未知 K / 跳过 S（无 frontmatter X，写失败 Y，空 slug 遗留 Z）` */
+function summaryLine(head: string, result: BackfillResult): string {
+  const skipped =
+    result.skipped > 0
+      ? ` / 跳过 ${result.skipped}（无 frontmatter ${result.skippedNoFrontmatter}，写失败 ${result.skippedWriteFailed}，空 slug 遗留 ${result.skippedLegacy}）`
+      : "";
+  return `${head} ${result.filled} / 已有 ${result.already} / 保留未知 ${result.unknown}${skipped}`;
+}
+
 export async function backfillCreated(options: BackfillOptions = {}): Promise<BackfillResult> {
   const root = options.root ?? join(homedir(), ".opencode");
   const syncRepo = options.syncRepo ?? join(root, "memx-sync-repo");
@@ -160,7 +203,7 @@ export async function backfillCreated(options: BackfillOptions = {}): Promise<Ba
   const cards = listCards(root);
 
   const pending: Array<{ card: CardRef; created: string }> = [];
-  const skippedCards: CardRef[] = [];
+  const skippedCards: SkippedCard[] = [];
   let already = 0;
   let unknown = 0;
   let unknownBootstrap = 0;
@@ -172,12 +215,18 @@ export async function backfillCreated(options: BackfillOptions = {}): Promise<Ba
   for (const card of cards) {
     // 空 slug 是哨兵（宿主取不到 cwd），不是合法项目：只列出，不写盘，交人工处理
     if (card.legacy) {
-      skippedCards.push(card);
+      skippedCards.push(skip("legacy-empty-slug", card.repoPath));
       continue;
     }
     const content = readFileSync(card.abs, "utf-8");
     if (readCreatedDate(content) != null) {
       already += 1;
+      continue;
+    }
+    // 无 frontmatter 块：`patchCreatedDate()` 必然返回 false。归 skipped 而不是 unknown ——
+    // 不是"时间查不到"，而是"这张卡根本写不进去"，且任何补写都会重排整篇 → 一个字节都不动。
+    if (!hasFrontmatter(content)) {
+      skippedCards.push(skip("no-frontmatter", card.repoPath));
       continue;
     }
     const first = firstCommit(syncRepo, card.repoPath);
@@ -194,47 +243,60 @@ export async function backfillCreated(options: BackfillOptions = {}): Promise<Ba
     pending.push({ card, created: first.date });
   }
 
-  const files = pending.map((i) => i.card.file);
+  // dry-run 不写盘，按计划记账；真跑只记 patchCreatedDate() 真的返回 true 的
+  let written: Array<{ card: CardRef; created: string }> = pending;
+  if (!options.dryRun) {
+    const done: Array<{ card: CardRef; created: string }> = [];
+    // 与写盘共用一把锁：回填是 read-modify-write，不能和 memory_write / 提炼并发
+    await withFileLock(memoryIndexLockPath(), () => {
+      for (const item of pending) {
+        let ok = false;
+        try {
+          ok = patchCreatedDate(item.card.slug, item.card.file, item.created);
+        } catch {
+          // 写失败（权限 / 磁盘 / 竞态）不该中断整批，也不该被算成 filled
+          ok = false;
+        }
+        if (ok) done.push(item);
+        else skippedCards.push(skip("write-failed", item.card.repoPath));
+      }
+    });
+    written = done;
+  }
+
   const result: BackfillResult = {
-    filled: pending.length,
+    filled: written.length,
     already,
     unknown,
     unknownBootstrap,
     skipped: skippedCards.length,
-    files,
+    skippedNoFrontmatter: skippedCards.filter((card) => card.code === "no-frontmatter").length,
+    skippedWriteFailed: skippedCards.filter((card) => card.code === "write-failed").length,
+    skippedLegacy: skippedCards.filter((card) => card.code === "legacy-empty-slug").length,
+    files: written.map((item) => item.card.file),
+    skippedCards,
   };
 
-  if (options.dryRun) {
-    const skippedNote = skippedCards.length > 0 ? ` / 跳过 ${skippedCards.length}（空 slug 遗留）` : "";
-    log(`[dry-run] 将回填 ${pending.length} / 已有 ${already} / 保留未知 ${unknown}${skippedNote}`);
-    if (unknownBootstrap > 0) {
-      log(`  保留未知 ${unknown} 中 ${unknownBootstrap} 张随镜像首导（引导提交 ${bootstrap.size} 个）进仓，创建时间不可知`);
-    }
-    for (const item of pending.slice(0, 10)) log(`  将回填 ${item.card.slug}/${item.card.file} → ${item.created}`);
-    for (const card of skippedCards.slice(0, 10)) {
-      log(`  跳过 ${card.repoPath}（空 slug 遗留，需人工处理：应归入某个项目或 projects/root/.mem/）`);
-    }
-    return result;
+  log(summaryLine(options.dryRun ? "[dry-run] 将回填" : "已回填", result));
+  if (unknownBootstrap > 0) {
+    log(`  保留未知 ${unknown} 中 ${unknownBootstrap} 张随镜像首导（引导提交 ${bootstrap.size} 个）进仓，创建时间不可知`);
   }
-
-  // 与写盘共用一把锁：回填是 read-modify-write，不能和 memory_write / 提炼并发
-  await withFileLock(memoryIndexLockPath(), () => {
-    for (const item of pending) {
-      patchCreatedDate(item.card.slug, item.card.file, item.created);
-    }
-  });
+  for (const item of written.slice(0, 10)) {
+    log(
+      options.dryRun
+        ? `  将回填 ${item.card.slug}/${item.card.file} → ${item.created}`
+        : `  ✓ ${item.card.file}`,
+    );
+  }
+  // 跳过明细带原因（两类模式都打；上限 10 条，避免刷屏）
+  for (const card of skippedCards.slice(0, 10)) log(`  跳过 ${card.repoPath}（${card.reason}）`);
 
   return result;
 }
 
 async function main(): Promise<void> {
   const dryRun = process.argv.includes("--dry-run");
-  const result = await backfillCreated({ dryRun, log: (line) => console.log(line) });
-  if (!dryRun) {
-    const skippedNote = result.skipped > 0 ? ` / 跳过 ${result.skipped}（空 slug 遗留）` : "";
-    console.log(`已回填 ${result.filled} / 已有 ${result.already} / 保留未知 ${result.unknown}${skippedNote}`);
-    for (const file of result.files.slice(0, 10)) console.log(`  ✓ ${file}`);
-  }
+  await backfillCreated({ dryRun, log: (line) => console.log(line) });
 }
 
 // 只在直接执行时跑 main（被测试 import 时不要触发）

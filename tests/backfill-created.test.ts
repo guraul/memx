@@ -183,4 +183,56 @@ describe("backfill-created（issue #34）", () => {
     expect(readCreatedDate(readFileSync(imported, "utf-8"))).toBeNull();
     expect(readCreatedDate(readFileSync(untracked, "utf-8"))).toBeNull();
   });
+
+  it("无 frontmatter 的卡 → 计 skippedNoFrontmatter、不计 filled，且文件逐字节不变", async () => {
+    commitRaw(".memx-mirror", "{}\n", "2026-10-13T09:00:00+08:00");
+    const normal = writeCard("demo", "ok.md", card("正常卡"));
+    commitInto("projects/demo/.mem/ok.md", "2026-09-05T10:00:00+08:00");
+
+    // 生产实测那张（2026-10-27）：首字符 `#`、全文无 `---`、CRLF 行尾。
+    // patchCreatedDate() 对它必然返回 false —— 旧实现仍把它算进 filled（报 61 实际 60）。
+    const raw = "# 项目恢复指派\r\n\r\n正文第一行\r\n第二行\r\n";
+    const noFrontmatter = writeCard("homebase", "project_homebase_revoke_assignment.md", raw);
+    commitInto("projects/homebase/.mem/project_homebase_revoke_assignment.md", "2026-09-06T10:00:00+08:00");
+
+    const dryLines: string[] = [];
+    const dry = await backfillCreated({
+      root,
+      syncRepo,
+      dryRun: true,
+      log: (line) => dryLines.push(line),
+    });
+    expect(dry.filled).toBe(1); // 只算真正能写的
+    expect(dry.skipped).toBe(1);
+    expect(dry.skippedNoFrontmatter).toBe(1);
+    expect(dry.skippedWriteFailed).toBe(0);
+    expect(dry.skippedLegacy).toBe(0);
+    expect(dry.already).toBe(0);
+    expect(dry.unknown).toBe(0);
+
+    const dryOut = dryLines.join("\n");
+    expect(dryOut).toContain("无 frontmatter 1");
+    expect(dryOut).toContain("写失败 0");
+    expect(dryOut).toContain("空 slug 遗留 0");
+    // 明细带原因
+    expect(dryOut).toContain("跳过 projects/homebase/.mem/project_homebase_revoke_assignment.md");
+    expect(dryOut).toContain("无 frontmatter：首字符非 ---");
+    // dry-run 不写盘
+    expect(readFileSync(noFrontmatter)).toEqual(Buffer.from(raw, "utf-8"));
+
+    const runLines: string[] = [];
+    const run = await backfillCreated({ root, syncRepo, log: (line) => runLines.push(line) });
+    expect(run.filled).toBe(1);
+    expect(run.skipped).toBe(1);
+    expect(run.skippedNoFrontmatter).toBe(1);
+    expect(run.files).toEqual(["ok.md"]);
+    // 真跑汇总行也要能看出跳过分类
+    expect(runLines.join("\n")).toContain("已回填 1 / 已有 0 / 保留未知 0 / 跳过 1（无 frontmatter 1");
+
+    // 逐字节不变：不加换行、不改 CRLF、不补 frontmatter
+    expect(readFileSync(noFrontmatter)).toEqual(Buffer.from(raw, "utf-8"));
+    expect(readCreatedDate(readFileSync(noFrontmatter, "utf-8"))).toBeNull();
+    // 正常卡照旧回填
+    expect(readCreatedDate(readFileSync(normal, "utf-8"))).toBe("2026-09-05");
+  });
 });
