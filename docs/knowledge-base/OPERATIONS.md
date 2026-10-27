@@ -74,7 +74,7 @@ pnpm sync:op -- push --machine=<name>   # 2) 人工首推（不改配置，宿�
 ## 3. 开发与验证
 
 ```bash
-pnpm test            # vitest run —— 基线 28 文件 / 447 用例全绿，低于即回归
+pnpm test            # vitest run —— 基线 29 文件 / 451 用例全绿，低于即回归
 pnpm run typecheck   # tsc --noEmit（strict + exactOptionalPropertyTypes + noUncheckedIndexedAccess）
 
 # 阶段 4 CLI（除 doctor 的顶距报警外都只读；退出码恒 0）
