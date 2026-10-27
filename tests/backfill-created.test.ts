@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { backfillCreated } from "../scripts/backfill-created.ts";
+import { backfillCreated, runBackfillCli } from "../scripts/backfill-created.ts";
+import type { BackfillPusher, BackfillPushSummary } from "../scripts/backfill-created.ts";
 import { readCreatedDate } from "../src/core/store/memory-md.ts";
 
 // 独立 HOME：patchCreatedDate / 锁路径都经 homedir() 派生，测试绝不能碰真实 ~/.opencode。
@@ -234,5 +235,171 @@ describe("backfill-created（issue #34）", () => {
     expect(readCreatedDate(readFileSync(noFrontmatter, "utf-8"))).toBeNull();
     // 正常卡照旧回填
     expect(readCreatedDate(readFileSync(normal, "utf-8"))).toBe("2026-09-05");
+  });
+});
+
+// ---- 推送（#34 收尾）：不 push 会被下一次 sync pull 覆盖 ----
+// 生产事故：脚本直写盘（不经 memory_write）写完 62 张卡的 created，下一次 pull 按镜像全抹掉。
+describe("backfill-created 的推送（--push）", () => {
+  /** 造一张"可回填"的卡（git 里有引导提交之后的首次新增） */
+  function seedWritable(created = false): string {
+    commitRaw(".memx-mirror", "{}\n", "2026-10-13T09:00:00+08:00");
+    const abs = writeCard("demo", "a.md", card("正文 A", created ? "2026-10-01" : undefined));
+    commitInto("projects/demo/.mem/a.md", "2026-09-01T10:00:00+08:00");
+    return abs;
+  }
+
+  function recorder(): { lines: string[]; log: (line: string) => void } {
+    const lines: string[] = [];
+    return { lines, log: (line) => lines.push(line) };
+  }
+
+  function fakePusher(summary?: BackfillPushSummary): { counter: { calls: number }; pusher: BackfillPusher } {
+    const counter = { calls: 0 };
+    const pusher: BackfillPusher = async () => {
+      counter.calls += 1;
+      return summary ?? { ok: true, kind: "pushed", message: "memx@test: 1 file +1 行", unsyncedCommits: 0 };
+    };
+    return { counter, pusher };
+  }
+
+  it("--push + 注入假 pusher → 调用一次，输出含推送结果；写入真实落盘", async () => {
+    const abs = seedWritable();
+    const { lines, log } = recorder();
+    const fake = fakePusher();
+
+    const res = await backfillCreated({ root, syncRepo, push: true, pusher: fake.pusher, log });
+
+    expect(fake.counter.calls).toBe(1);
+    expect(res.filled).toBe(1);
+    expect(res.push?.ok).toBe(true);
+    expect(res.push?.kind).toBe("pushed");
+    // 写入与推送都发生了
+    expect(readCreatedDate(readFileSync(abs, "utf-8"))).toBe("2026-09-01");
+    const out = lines.join("\n");
+    expect(out).toContain("推送成功");
+    expect(out).toContain("memx@test: 1 file +1 行");
+    expect(out).toContain("未推提交 0");
+    // 推送了就不该再喊"会被覆盖"
+    expect(out).not.toContain("⚠️");
+  });
+
+  it("不传 --push 且有写入 → 输出醒目警告（sync pull / 覆盖）", async () => {
+    seedWritable();
+    const { lines, log } = recorder();
+
+    const res = await backfillCreated({ root, syncRepo, log });
+
+    expect(res.filled).toBe(1);
+    expect(res.push).toBeNull();
+    const out = lines.join("\n");
+    expect(out).toContain("⚠️");
+    expect(out).toContain("没有推送");
+    expect(out).toContain("sync pull");
+    expect(out).toContain("覆盖");
+    expect(out).toContain("--push");
+  });
+
+  it("--push 且 pusher 抛错 → exit 非 0、输出含手动指引，且不掩盖已写入", async () => {
+    const abs = seedWritable();
+    const { lines, log } = recorder();
+
+    const { exitCode, result } = await runBackfillCli(["--push"], {
+      root,
+      syncRepo,
+      pusher: async () => {
+        throw new Error("network unreachable");
+      },
+      log,
+    });
+
+    expect(exitCode).toBe(1);
+    // 写入事实不掩盖
+    expect(result.filled).toBe(1);
+    expect(readCreatedDate(readFileSync(abs, "utf-8"))).toBe("2026-09-01");
+    const out = lines.join("\n");
+    expect(out).toContain("写入已完成但推送失败");
+    expect(out).toContain("network unreachable");
+    expect(out).toContain("pnpm sync:op -- push --machine=<name>");
+  });
+
+  it("--push 且 pusher 返回失败（不抛） → 同样 exit 非 0 + 手动指引", async () => {
+    seedWritable();
+    const { lines, log } = recorder();
+
+    const { exitCode, result } = await runBackfillCli(["--push"], {
+      root,
+      syncRepo,
+      pusher: async () => ({ ok: false, kind: "pii-blocked", message: "PII 闸门拦截：2 处敏感信息命中" }),
+      log,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(result.push?.ok).toBe(false);
+    expect(result.push?.kind).toBe("pii-blocked");
+    const out = lines.join("\n");
+    expect(out).toContain("写入已完成但推送失败");
+    expect(out).toContain("PII 闸门拦截");
+    expect(out).toContain("pnpm sync:op -- push --machine=<name>");
+  });
+
+  it("sync 未启用（disabled）→ 不崩溃、exit 0，给配置指引而非故障", async () => {
+    seedWritable();
+    const { lines, log } = recorder();
+
+    const { exitCode, result } = await runBackfillCli(["--push"], {
+      root,
+      syncRepo,
+      pusher: async () => ({
+        ok: false,
+        kind: "disabled",
+        disabled: true,
+        message: "enabled=false machineName=(未设置)",
+      }),
+      log,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(result.push?.disabled).toBe(true);
+    const out = lines.join("\n");
+    expect(out).toContain("sync 未启用");
+    expect(out).toContain("sync.enabled");
+    expect(out).not.toContain("写入已完成但推送失败");
+  });
+
+  it("没有写入（filled=0）→ 不调用 pusher、不打印警告", async () => {
+    seedWritable(true); // 已有 created → 无可回填
+    const { lines, log } = recorder();
+    const fake = fakePusher();
+
+    const res = await backfillCreated({ root, syncRepo, push: true, pusher: fake.pusher, log });
+
+    expect(res.filled).toBe(0);
+    expect(fake.counter.calls).toBe(0);
+    expect(res.push).toBeNull();
+    const out = lines.join("\n");
+    expect(out).not.toContain("⚠️");
+    expect(out).not.toContain("推送");
+  });
+
+  it("--dry-run 不推送（即便传了 --push）", async () => {
+    const abs = seedWritable();
+    const { lines, log } = recorder();
+    const fake = fakePusher();
+
+    const res = await backfillCreated({
+      root,
+      syncRepo,
+      dryRun: true,
+      push: true,
+      pusher: fake.pusher,
+      log,
+    });
+
+    expect(res.filled).toBe(1); // 计划数
+    expect(fake.counter.calls).toBe(0);
+    expect(res.push).toBeNull();
+    expect(readCreatedDate(readFileSync(abs, "utf-8"))).toBeNull();
+    expect(lines.join("\n")).toContain("[dry-run] 未推送");
   });
 });

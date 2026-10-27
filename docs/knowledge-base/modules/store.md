@@ -106,10 +106,17 @@ Track 2 写盘的同一把锁内跑 `runHealthMaintenance()`：死链（索引�
 
 `created` 由写卡层在**新建**时生成（`YYYY-MM-DD`），`update` 时原样保留；老卡缺失就显示「未知」，**不用 mtime 兜底**（update 会重置 mtime、sync pull 的 copyFileSync 也会重置）。
 
-一次性回填：`pnpm run backfill:created --dry-run` 先看「将回填 N / 已有 M / 保留未知 K / 跳过 S（无 frontmatter X，写失败 Y，空 slug 遗留 Z）」，确认后去掉 `--dry-run` 真跑。数据源是 `~/.opencode/memx-sync-repo` 的 git 首次新增时间，另有三条硬规则（#34 / #34 follow-up）：
+一次性回填：`pnpm run backfill:created --dry-run` 先看「将回填 N / 已有 M / 保留未知 K / 跳过 S（无 frontmatter X，写失败 Y，空 slug 遗留 Z）」，确认后改跑 `pnpm run backfill:created --push` 真跑并推送。数据源是 `~/.opencode/memx-sync-repo` 的 git 首次新增时间，另有四条硬规则（#34 / #34 follow-up / #34 收尾）：
 
 - **引导提交不算创建**：`git rev-list --max-parents=0 HEAD` 的根提交 = 镜像首次导入（2026-10-13）。随导入进仓的卡，其「首次新增」就是该根提交 → 判 `unknown`，**不写导入日**（否则几十张卡盖同一根假柱子，龄期分布失真）。dry-run 把这部分单列：`保留未知 K 中 X 张随镜像首导（引导提交 N 个）进仓，创建时间不可知`。
 - **`projects/.mem/` 空 slug 遗留卡**（如 `project_e2e_e4_memory.md`）也会被扫到并计数，但 slug `""` 是「宿主取不到 cwd」的哨兵（`deriveSlug` 语义），不是合法项目 → 记 `skippedLegacy`，**不写盘**，由人工归入某个项目或 `projects/root/.mem/`。
 - **没有 frontmatter 的卡一律跳过、一个字节都不动**（2026-10-27 生产实测：`project_homebase_revoke_assignment.md` 首字符 `#`、全文无 `---`、CRLF，`patchCreatedDate()` 返回 false 却被算进 filled，报 61 实际 60）。`created` 只能插进 frontmatter 块，硬补等于重写整篇格式（连带 CRLF 归一）→ 记 `skippedNoFrontmatter`，明细里打印原因，交人工加 frontmatter。**只有 `patchCreatedDate()` 真返回 true 才计入 `filled`**，其余写失败记 `skippedWriteFailed`。
+- **回填后必须 push，否则下一次 pull 会覆盖本地 `created`（硬规则）**：脚本直接写盘，**不经过 `memory_write`**，所以不会触发自动推送；此时本地有 `created`、镜像 `memx-sync-repo` 里没有，而 **sync pull 是「远端优先」，会按镜像覆写本地**——2026-10-27 生产实测就是这样把 62 张卡的 `created` 全抹掉的。所以：
+  - 真跑一律加 `--push`（`BackfillOptions.push`）：写完且有实际写入时走**与 `pnpm sync:op -- push` 完全相同**的路径 —— `loadMemxConfig()` 取 `machineName` / `repo` → `createSync().push()`；成功打印 `kind` / `message` / 未推提交数。
+  - 不传 `--push` 而确有写入 → 打印多行 ⚠️ 警告（说明"不推送会被下一次 sync pull 覆盖"）。
+  - 推送失败（抛错 / `ok=false`）→ 明确打 **「写入已完成但推送失败」+ 手动 `pnpm sync:op -- push --machine=<name>` 指引 + 后果说明**，CLI 退出码 1。**不得把"推送失败"伪装成"整体失败"**，也不得静默——写入已经落盘，用户必须知道补推。
+  - `filled = 0`（无可回填）或 `--dry-run` 不推、不警告。
+  - sync 未启用（`enabled=false` / `machineName` 空）不算故障：给配置指引、退出码 0（本机没有定时 pull，不会被覆盖）。
+  - 推送实现可注入（`BackfillOptions.pusher`），测试用假 pusher，**绝不真 push**。
 
 首推（2026-10-14）之前就存在、又查不到首次提交的卡同样保持「未知」，**不猜**。实现走 `patchCreatedDate()`（只插一行、原子写、与写盘共用一把锁）。
