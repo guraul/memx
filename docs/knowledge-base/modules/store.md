@@ -60,6 +60,23 @@ USER.md 是"慢变量画像"，同一条偏好被反复 append 会让它膨胀�
 
 > 设计意图：LLM 偶尔会重复提炼同一条偏好；靠 prompt 约束不可靠，所以在写盘层做确定性兜底，并把"做了什么"记进诊断。
 
+## 记忆卡同名判定：同义 = 修订，不同义 = fork（#31）
+
+`memory_write` 的落名不再是"同名同类型即 update"——**同名 + 同义**才算同一条记忆的修订：
+
+| 情况 | 行为 |
+|------|------|
+| 同名文件不存在 | 新建 `<type>_<slug>.md`（append） |
+| 同名 + 内容**归一化后相等** | update 原卡（修订语义不变；`created` 保留、`updated` 刷新） |
+| 同名 + 内容**不同** | fork 出 `<type>_<slug>--<内容 hash 前 6 位>.md`；原卡**保留**，尾部追加 `**Superseded by:** <新卡>`；新卡 frontmatter 记 `same_name_as: <原卡文件名>` |
+| 同名 + 同内容再写（含已 fork 的那段） | 命中同一张卡 update（hash 取自内容 → **幂等**，不会越写越多） |
+
+- 归一化（`normalizeMemoryContent`）：CRLF、行尾空白、连续空行（≥3 → 2）、首尾空白。**不剥 markdown 标记**——语义差异必须算不同内容。
+- 比对对象是卡片"用户内容"段（`extractCardContent`）：去 frontmatter、剥掉尾部 `**Why:**` / `**How to apply:**` / `**Supersedes:**` / `**Merges:**` / `**Superseded by:**` 审计行，所以只改 description 或 how_to_apply 仍是修订。
+- hash 走 `sha256(归一化内容)`：**纯中文名与 ASCII 名同一条确定性路径**（文件名始终合法 ASCII），碰撞时尾缀加长到 12 位，仍撞则报错而不是覆盖。
+- 索引层（`uniqueEntryTitle`）：同一节里两条不同文件不能共用完全相同的标题 → fork 卡登记成 `<name> (2)` / `(3)`…（编号稳定，重复写不回退、不叠加）。
+- refine 路径**不受影响**：LLM 看着索引快照自己选的 `target_file` 已经做过"同一条记忆"的裁决，`update` 照旧原地覆盖。
+
 ## 锁（P0-4）
 
 - `withFileLock(path, fn)`：**只包 read-modify-write**；锁内**重读文件**再应用（消掉"快照读→写盘"窗口的丢更新）。
@@ -92,7 +109,7 @@ Track 2 写盘的同一把锁内跑 `runHealthMaintenance()`：死链（索引�
 
 1. **写盘必须保留非受管内容**：parse 只投影受管集合（分类小节 + `- [日期]` 条目），其余（协议块、用户自写标题、散文、未知 `##` 小节）由 `preamble` / `section.extras` 原样带回。曾经直接丢弃，首次成功提炼就把 USER.md 的协议块冲掉 → AI 不再发信号 → memx 第二轮起静默失效。
 2. **锁绝不包 LLM**；改锁参数（TTL/timeout）先读 `lock.ts` 头注释。
-3. 记忆文件同名同类型 = 修订（update）；**纯中文名走确定性哈希文件名**（否则每次写都新建文件，更新语义失效）。
+3. 记忆文件同名同类型 ≠ 一定修订：**同名且同义（归一化后内容相等）才 update**；同名不同义 → fork 出 `--<内容 hash>` 新卡，旧卡保留并记 `**Superseded by:**`（#31，详见上一节）。**纯中文名走确定性哈希文件名**（否则每次写都新建文件，更新语义失效）。
 4. text >500 字的 memory_write 直接拒绝不截断。
 5. deprecate/forget 是软删（挪 `.trash/`），不物理删除。
 6. `exactOptionalPropertyTypes`：`target_line?: number` 不能显式赋 `undefined`，用 `!= null` 判断。

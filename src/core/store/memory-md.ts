@@ -233,6 +233,7 @@ export function writeMemoryFile(slug: string, proposal: MemoryProposal): void {
     `description: ${proposal.description}`,
     `type: ${proposal.type}`,
   ];
+  if (proposal.same_name_as != null) lines.push(`same_name_as: ${proposal.same_name_as}`);
   if (created != null) lines.push(`created: ${created}`);
   lines.push(`updated: ${today}`, "---", "", proposal.content);
 
@@ -266,6 +267,33 @@ export function writeMemoryFile(slug: string, proposal: MemoryProposal): void {
     }
     throw error;
   }
+
+  // #31 fork：旧卡**保留**，只追加一行与 `**Supersedes:**` 对称的审计行（不删、不进 .trash）。
+  if (proposal.same_name_as != null) {
+    markSupersededBy(slug, proposal.same_name_as, proposal.target_file, today);
+  }
+}
+
+/**
+ * 在旧卡尾部追加 / 刷新 `**Superseded by:** <新卡>`。
+ * 幂等：同一新卡重复写不改动；换了一张 fork 卡则原地替换那一行（不叠加多行）。
+ * 只动尾部一行，frontmatter（`created` 等）与正文原样保留 → 走 tmp + rename 原子写。
+ */
+function markSupersededBy(slug: string, oldFilename: string, newFilename: string, today: string): void {
+  const oldPath = getMemoryFilePath(slug, oldFilename);
+  if (!existsSync(oldPath)) return;
+  const lines = readFileSync(oldPath, "utf-8").replace(/\n+$/, "").split("\n");
+  const line = `**Superseded by:** ${newFilename} (forked on ${today})`;
+  const idx = lines.findIndex((l) => l.startsWith("**Superseded by:**"));
+  if (idx !== -1) {
+    if (lines[idx] === line) return;
+    lines[idx] = line;
+  } else {
+    lines.push("", line);
+  }
+  const tmpPath = `${oldPath}.tmp.${Date.now()}`;
+  writeFileSync(tmpPath, lines.join("\n") + "\n", "utf-8");
+  renameSync(tmpPath, oldPath);
 }
 
 export function readMemoryFile(slug: string, filename: string): string {
@@ -277,6 +305,18 @@ export function readMemoryFile(slug: string, filename: string): string {
 export interface MemoryApplyResult {
   content: string;
   warnings: string[];
+}
+
+/**
+ * 索引标题去重（#31）：同一 slug 节里**不同文件**不能共用完全相同的标题。
+ * 撞了就给新条目加 ` (2)` / ` (3)`…；已占用的编号跳过，所以反复写同一张卡时标题稳定不变。
+ */
+function uniqueEntryTitle(section: MemoryIndexSection, desired: string, filePath: string): string {
+  const taken = new Set(section.entries.filter((e) => e.filePath !== filePath).map((e) => e.title));
+  if (!taken.has(desired)) return desired;
+  let n = 2;
+  while (taken.has(`${desired} (${n})`)) n++;
+  return `${desired} (${n})`;
 }
 
 function applyOneMemoryProposal(
@@ -303,11 +343,13 @@ function applyOneMemoryProposal(
 
   writeMemoryFile(slug, proposal);
 
+  // #31：同名不同义的 fork 卡与原卡共存于同一节，标题必须可区分（否则索引里两条一模一样）。
+  const title = uniqueEntryTitle(section, proposal.name, filePath);
   const entry: MemoryIndexEntry = {
-    title: proposal.name,
+    title,
     filePath,
     hook: proposal.description,
-    raw: `- [${proposal.name}](${filePath}) - ${proposal.description}`,
+    raw: `- [${title}](${filePath}) - ${proposal.description}`,
   };
 
   switch (proposal.action) {

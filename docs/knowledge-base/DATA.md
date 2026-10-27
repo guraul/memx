@@ -71,6 +71,8 @@ Rewriting auth middleware for compliance.
 
 四类 type：`project`（进行中的工作）/ `reference`（外部资源指针）/ `feedback`（协作指导，强制 Why+How）/ `user`（用户背景）。
 
+**文件名与同名判定（#31）**：`<type>_<name 的 ASCII slug>.md`；纯中文名用名字 sha1 前 8 位（`project_h<8hex>.md`）。同名同类型**不再一律视为修订**——只有归一化后内容相等（CRLF / 行尾空白 / 连续空行 / 首尾空白差异忽略，markdown 标记不算差异）才 update 原卡；同名不同义 fork 成 `<type>_<slug>--<内容 sha256 前 6 位>.md`，新卡 frontmatter 多一行 `same_name_as: <原卡文件名>`，原卡尾部多一行 `**Superseded by:** <新卡> (forked on YYYY-MM-DD)`。同 name + 同内容反复写永远命中同一张卡（hash 取自内容，幂等）。索引里两张卡标题必须可区分：fork 卡登记为 `<name> (2)`、`(3)`…（同一节内不出现两条完全相同标题）。
+
 `created` / `updated` 是 UTC 日期（`YYYY-MM-DD`），由写盘层生成——**不进 `MemoryProposalSchema`**（LLM 不产时间戳）：新卡两者同日；update 在移走旧卡前读旧 frontmatter，`created` 原样保留、`updated` 刷新为今天。**老卡没有 `created:` 就保持缺失**，doctor 显示「未知龄期」——不伪造、也不用文件 mtime 兜底（update 会重置 mtime，sync pull 的 `copyFileSync` 也会重置）。
 
 ### slug 规则（`core/memory-types.ts` 的 `deriveSlug`）

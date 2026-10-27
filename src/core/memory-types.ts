@@ -68,6 +68,8 @@ export const MemoryProposalSchema = z.object({
   why: z.string().max(200).nullish(),
   how_to_apply: z.string().max(200).nullish(),
   target_file: z.string().max(80),
+  /** #31 fork：同名不同义另存新卡时，指向被顶替/并列的原卡文件名（仅供写盘层落 frontmatter + 旧卡审计行）。 */
+  same_name_as: z.string().max(80).nullish(),
   supersedes: z.string().max(80).nullish(),
   merges: z.string().max(200).nullish(),
   reason: z.string().max(200),

@@ -10,6 +10,7 @@ import { MEMORY_TYPES } from "./memory-types.ts";
 import {
   applyMemoryProposals,
   getMemoryFilePath,
+  readMemoryFile,
   readMemoryIndex,
   writeMemoryIndex,
 } from "./store/memory-md.ts";
@@ -66,6 +67,85 @@ export function deriveMemoryFilename(type: MemoryType, name: string): string {
   return `${type}_${slugifyMemoryName(name)}.md`;
 }
 
+/** fork 尾缀长度阶梯：6 hex（≈1677 万）够用；撞上不同内容才加长到 12（#31）。 */
+const FORK_HASH_LENGTHS = [6, 12] as const;
+
+/** 卡片正文尾部由写盘层追加的审计行（不是用户内容，比对内容时必须剥掉）。 */
+const CARD_TRAILER_RE = /^\*\*(?:Why|How to apply|Supersedes|Merges|Superseded by):\*\*/;
+
+/**
+ * 内容归一化：只抹掉**不影响语义**的排版差异（CRLF、行尾空白、连续空行、首尾空白）。
+ * 刻意**不**剥离 markdown 标记——`**粗体**`、`- 列表`、代码块都算内容差异。
+ */
+export function normalizeMemoryContent(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** 取卡片里「用户内容」那一段：去 frontmatter，再切掉尾部 `**Why:**` 等审计行。 */
+export function extractCardContent(card: string): string {
+  const body = card.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
+  const lines = body.split("\n");
+  const cut = lines.findIndex((line, i) => (i === 0 || lines[i - 1]!.trim() === "") && CARD_TRAILER_RE.test(line));
+  return (cut === -1 ? lines : lines.slice(0, cut)).join("\n");
+}
+
+/** 同名判定「同义」：归一化后逐字相等（不做语义近似——那是 LLM 裁决的活，见 refine 路径）。 */
+export function isSameMemoryContent(card: string, text: string): boolean {
+  return normalizeMemoryContent(extractCardContent(card)) === normalizeMemoryContent(text);
+}
+
+/** 内容 hash（sha256 前 N 位），对**归一化后**的内容取——纯中文/纯 ASCII 同一条确定性路径。 */
+export function hashMemoryContent(text: string, length = 6): string {
+  return createHash("sha256").update(normalizeMemoryContent(text)).digest("hex").slice(0, length);
+}
+
+/** 同名不同义时的 fork 文件名：`<type>_<slug>--<内容 hash>`（`--` 与 slug 的下划线区分，避免歧义）。 */
+export function deriveForkFilename(type: MemoryType, name: string, text: string, hashLength = 6): string {
+  return `${type}_${slugifyMemoryName(name)}--${hashMemoryContent(text, hashLength)}.md`;
+}
+
+interface ResolvedTarget {
+  filename: string;
+  action: "append" | "update";
+  /** fork 时指向原卡文件名（null = 没有 fork，就是原卡本身） */
+  sameNameAs: string | null;
+}
+
+/**
+ * 决定这次写到哪个文件（#31）：
+ * - 文件不存在 → append；
+ * - 存在且**内容同义**（归一化后相等）→ update 原卡（修订语义不变）；
+ * - 存在但内容不同 → fork 出 `<slug>--<内容 hash>` 新卡，原卡保留并在其尾部记 `**Superseded by:**`；
+ * - fork 卡已存在且内容同义 → update 它（同 name + 同内容反复写永远命中同一张，幂等）。
+ */
+export function resolveMemoryTarget(
+  slug: string,
+  type: MemoryType,
+  name: string,
+  text: string,
+): ResolvedTarget | { error: string } {
+  const base = deriveMemoryFilename(type, name);
+  if (!existsSync(getMemoryFilePath(slug, base))) return { filename: base, action: "append", sameNameAs: null };
+  if (isSameMemoryContent(readMemoryFile(slug, base), text)) return { filename: base, action: "update", sameNameAs: null };
+
+  for (const hashLength of FORK_HASH_LENGTHS) {
+    const candidate = deriveForkFilename(type, name, text, hashLength);
+    if (!existsSync(getMemoryFilePath(slug, candidate))) {
+      return { filename: candidate, action: "append", sameNameAs: base };
+    }
+    if (isSameMemoryContent(readMemoryFile(slug, candidate), text)) {
+      return { filename: candidate, action: "update", sameNameAs: base };
+    }
+  }
+  return { error: `同名不同义但 fork 文件名 hash 碰撞（${base}）——请换个 name` };
+}
+
 function firstLine(text: string): string {
   return text.split("\n")[0]?.trim() ?? "";
 }
@@ -105,10 +185,10 @@ export async function writeProjectMemory(
   const why = (input.why?.trim() || `用户显式要求记住${input.evidence ? `：${input.evidence.trim()}` : ""}`).slice(0, 200);
   const howToApply = input.how_to_apply?.trim().slice(0, 200);
 
-  const filename = deriveMemoryFilename(type, name);
+  const resolved = resolveMemoryTarget(slug, type, name, text);
+  if ("error" in resolved) return { ok: false, error: resolved.error };
+  const { filename, action, sameNameAs } = resolved;
   const filePath = getMemoryFilePath(slug, filename);
-  // 存在即更新（同名同类型视为同一条记忆的修订），不存在即新增——`update` 在索引里也是 upsert
-  const action: "append" | "update" = existsSync(filePath) ? "update" : "append";
 
   const proposal: MemoryProposal = {
     action,
@@ -119,6 +199,7 @@ export async function writeProjectMemory(
     why,
     how_to_apply: howToApply && howToApply.length > 0 ? howToApply : null,
     target_file: filename,
+    ...(sameNameAs != null ? { same_name_as: sameNameAs } : {}),
     reason: "用户显式记录（memory_write）",
   };
 
@@ -132,6 +213,9 @@ export async function writeProjectMemory(
   });
 
   const warnings = [...applied.warnings];
+  if (sameNameAs != null) {
+    warnings.push(`同名不同义：旧卡 ${sameNameAs} 保留未改，本次${action === "append" ? "另存为" : "更新"} ${filename}`);
+  }
   if ((type === "feedback" || type === "project") && proposal.how_to_apply == null) {
     warnings.push("how_to_apply 缺失（feedback/project 的惯例字段，建议补上「以后怎么用」）");
   }

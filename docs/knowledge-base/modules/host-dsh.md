@@ -50,7 +50,7 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void
 
 | 工具 | 参数 | 行为 |
 |------|------|------|
-| `memory_write` | `text`（必填）/ `type` / `name` / `description` / `why` / `how_to_apply` / `evidence` | `writeProjectMemory`（同名同类型 = 修订） |
+| `memory_write` | `text`（必填）/ `type` / `name` / `description` / `why` / `how_to_apply` / `evidence` | `writeProjectMemory`（同名同义 = 修订；同名不同义 = hash 尾缀 fork，#31） |
 | `memory_search` | `keyword`（必填）/ `slug` | `searchMemories`（只读；slug 推导不出 → 全库；最多 20 条） |
 | `forget` | `keyword`（必填）/ `slug` | 锁内 `forgetMemory` + `writeMemoryIndex`（软删到 `.trash/`） |
 
