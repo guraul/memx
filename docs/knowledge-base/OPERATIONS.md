@@ -74,12 +74,12 @@ pnpm sync:op -- push --machine=<name>   # 2) 人工首推（不改配置，宿�
 ## 3. 开发与验证
 
 ```bash
-pnpm test            # vitest run —— 基线 29 文件 / 451 用例全绿，低于即回归
+pnpm test            # vitest run —— 基线 29 文件 / 459 用例全绿，低于即回归
 pnpm run typecheck   # tsc --noEmit（strict + exactOptionalPropertyTypes + noUncheckedIndexedAccess）
 
-# 阶段 4 CLI（除 doctor 的顶距报警外都只读；退出码恒 0）
-pnpm run backfill:created --dry-run   # created 回填预演（只报数不写盘）
-pnpm run backfill:created             # 真跑（幂等，已有 created 不动）
+# 阶段 4 CLI（除 doctor 的顶距报警外都只读；退出码恒 0 —— 唯一例外：backfill --push 推送失败退 1）
+pnpm run backfill:created --dry-run   # created 回填预演：只报数不写盘
+pnpm run backfill:created --push      # created 回填真跑并推送（**必须**：只写不推会被下一次 sync pull 覆盖）
 pnpm run doctor      # 只读状态面板：alerts / memory files / memory stats / opencode diag / sync
 pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永不 push）
 pnpm sync:op -- status|pull|push|both [--machine=<name>]

@@ -2,7 +2,17 @@
 //
 // 用法：
 //   node --experimental-strip-types scripts/backfill-created.ts --dry-run
-//   node --experimental-strip-types scripts/backfill-created.ts
+//   node --experimental-strip-types scripts/backfill-created.ts --push
+//
+// ⚠️ **回填后必须 push**（生产事故，2026-10-27）：本脚本直接写盘，不经过 `memory_write` 的
+// 自动推送路径。只写不推 = 本地有 created、镜像 `memx-sync-repo` 里没有 → **下一次 sync pull
+// 按镜像覆写本地，62 张卡刚回填的 created 全部被抹掉**。所以：
+//   · 传 `--push`：写完（且真有写入）后复用 `pnpm sync:op -- push` 那条路径
+//     （`loadMemxConfig()` 读 machineName/repo → `createSync().push()`），成功打摘要；
+//   · 不传 `--push`：打多行醒目警告（不推送会被 pull 覆盖）；
+//   · 推送失败**不掩盖已写入的事实**：明确报"写入已完成但推送失败" + 手动指引，退出码非 0；
+//   · sync 未启用（enabled=false / machineName 空）不算故障：给出配置指引，退出码 0
+//     （没有 pull 就不会被覆盖）。
 //
 // 为什么需要：`created` 是 f8f3622 才加进 frontmatter 的字段，之前写下的卡都没有 →
 // doctor 的龄期分布全是「未知」。**禁止用 mtime 兜底**（update 会重置 mtime，sync pull 的
@@ -30,6 +40,32 @@ import { spawnSync } from "node:child_process";
 
 import { readCreatedDate, patchCreatedDate, hasFrontmatter } from "../src/core/store/memory-md.ts";
 import { withFileLock, memoryIndexLockPath } from "../src/core/store/lock.ts";
+import { loadMemxConfig } from "../src/core/config.ts";
+import { createFileAlertStore } from "../src/core/alerts.ts";
+import { createSync } from "../src/core/sync.ts";
+
+/** 推送结果摘要（真实实现由 `createSync().push()` 产出，测试可注入假实现）。 */
+export interface BackfillPushSummary {
+  ok: boolean;
+  /** `pushed` / `no-change` / `pii-blocked` / `conflict` / `error` / `disabled` */
+  kind: string;
+  message: string;
+  /** 未推提交数（push 成功后应为 0） */
+  unsyncedCommits?: number;
+  /** sync 未启用（enabled=false 或 machineName 为空）——不是故障，给指引即可 */
+  disabled?: boolean;
+}
+
+/** 可注入的推送依赖：默认实现走真实 sync，测试注入假实现（绝不真 push）。 */
+export type BackfillPusher = () => Promise<BackfillPushSummary>;
+
+/** 本次推送的最终结论（`null` = 没尝试推送）。 */
+export interface BackfillPushOutcome {
+  ok: boolean;
+  kind: string;
+  message: string;
+  disabled: boolean;
+}
 
 export interface BackfillOptions {
   /** memx 根目录，默认 `~/.opencode` */
@@ -37,6 +73,10 @@ export interface BackfillOptions {
   /** 同步镜像仓库，默认 `<root>/memx-sync-repo` */
   syncRepo?: string;
   dryRun?: boolean;
+  /** 真有写入时推送（与 `pnpm sync:op -- push` 同一条代码路径）；不传则只警告。 */
+  push?: boolean;
+  /** 推送实现覆盖（测试用）。默认读 memx 配置 → `createSync().push()`。 */
+  pusher?: BackfillPusher;
   log?: (line: string) => void;
 }
 
@@ -61,6 +101,8 @@ export interface BackfillResult {
   files: string[];
   /** 跳过的卡与可读原因，供逐条明细展示 */
   skippedCards: SkippedCard[];
+  /** 本次推送结论；`null` = 未尝试（没写入 / 没传 `--push` / dry-run） */
+  push: BackfillPushOutcome | null;
 }
 
 /** 跳过原因分类（计数与明细共用一套码）。 */
@@ -196,6 +238,75 @@ function summaryLine(head: string, result: BackfillResult): string {
   return `${head} ${result.filled} / 已有 ${result.already} / 保留未知 ${result.unknown}${skipped}`;
 }
 
+/** 手动补推指引（失败与"没传 --push"两处共用，避免两套措辞）。 */
+const MANUAL_PUSH_HINT =
+  "    → 请手动 pnpm sync:op -- push --machine=<name>（<name> = memx.config.json 的 sync.machineName）";
+
+/** 真实推送：与 `pnpm sync:op -- push` 完全同一条路径（同一份配置、同一个 `createSync().push()`）。 */
+async function defaultPusher(): Promise<BackfillPushSummary> {
+  const config = (await loadMemxConfig()).sync;
+  // 与 createSync 的 `active` 判据一致：未启用时它只返回 error，这里提前分出来给"配置指引"而不是"故障"
+  if (!config.enabled || config.machineName === "") {
+    return {
+      ok: false,
+      kind: "disabled",
+      disabled: true,
+      message: `enabled=${config.enabled} machineName=${config.machineName || "(未设置)"}`,
+    };
+  }
+  const sync = createSync({ config, alerts: createFileAlertStore() });
+  try {
+    const r = await sync.push();
+    return { ok: r.ok, kind: r.kind, message: r.message, unsyncedCommits: sync.status().unsyncedCommits };
+  } finally {
+    sync.dispose();
+  }
+}
+
+/** 执行推送并打印结论；任何异常都收敛成 `ok=false`（推送失败绝不能把"已写入"这个事实吞掉）。 */
+async function runPush(
+  pusher: BackfillPusher,
+  log: (line: string) => void,
+): Promise<BackfillPushOutcome> {
+  log(`推送中（与 pnpm sync:op -- push 同一路径）…`);
+  let summary: BackfillPushSummary;
+  try {
+    summary = await pusher();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`⚠️  写入已完成但推送失败：${message}`);
+    log("    本地 created 已落盘、镜像里没有 → 下一次 sync pull 会按镜像覆写，created 会被抹掉。");
+    log(MANUAL_PUSH_HINT);
+    return { ok: false, kind: "threw", message, disabled: false };
+  }
+
+  if (summary.ok) {
+    const unsynced = summary.unsyncedCommits != null ? `（未推提交 ${summary.unsyncedCommits}）` : "";
+    log(`✓ 推送成功：kind=${summary.kind} ${summary.message}${unsynced}`);
+    return { ok: true, kind: summary.kind, message: summary.message, disabled: false };
+  }
+
+  if (summary.disabled) {
+    log(`未推送：sync 未启用（${summary.message}）`);
+    log("    本机没有定时 pull，created 不会被远端覆盖；要上云请先在 memx.config.json 开 sync.enabled + machineName。");
+    return { ok: false, kind: summary.kind, message: summary.message, disabled: true };
+  }
+
+  log(`⚠️  写入已完成但推送失败：${summary.message}`);
+  log("    本地 created 已落盘、镜像里没有 → 下一次 sync pull 会按镜像覆写，created 会被抹掉。");
+  log(MANUAL_PUSH_HINT);
+  return { ok: false, kind: summary.kind, message: summary.message, disabled: false };
+}
+
+/** 没传 `--push` 又确实写了盘：多行醒目警告（生产上就是这样丢的 62 张卡）。 */
+function warnNotPushed(log: (line: string) => void): void {
+  log("");
+  log("⚠️  ⚠️  ⚠️  本次写入没有推送 —— 不推送，下一次 sync pull 会把 created 全部覆盖掉");
+  log("    原因：本脚本直接写盘，不经过 memory_write，不会触发自动推送；");
+  log("    而 sync pull 是「远端优先」：镜像 memx-sync-repo 里这些卡还没有 created，pull 会按镜像覆写本地。");
+  log("    补推：pnpm run backfill:created --push（幂等，已写过的不再写），或 pnpm sync:op -- push");
+}
+
 export async function backfillCreated(options: BackfillOptions = {}): Promise<BackfillResult> {
   const root = options.root ?? join(homedir(), ".opencode");
   const syncRepo = options.syncRepo ?? join(root, "memx-sync-repo");
@@ -275,6 +386,7 @@ export async function backfillCreated(options: BackfillOptions = {}): Promise<Ba
     skippedLegacy: skippedCards.filter((card) => card.code === "legacy-empty-slug").length,
     files: written.map((item) => item.card.file),
     skippedCards,
+    push: null,
   };
 
   log(summaryLine(options.dryRun ? "[dry-run] 将回填" : "已回填", result));
@@ -291,12 +403,52 @@ export async function backfillCreated(options: BackfillOptions = {}): Promise<Ba
   // 跳过明细带原因（两类模式都打；上限 10 条，避免刷屏）
   for (const card of skippedCards.slice(0, 10)) log(`  跳过 ${card.repoPath}（${card.reason}）`);
 
+  // ---- 推送：只有"真写了盘"才需要（dry-run 没写入、filled=0 没东西可推） ----
+  const wroteSomething = !options.dryRun && result.filled > 0;
+  if (wroteSomething) {
+    if (options.push) result.push = await runPush(options.pusher ?? defaultPusher, log);
+    else warnNotPushed(log);
+  } else if (options.dryRun && options.push) {
+    log("[dry-run] 未推送（没有写盘，无内容可推）");
+  }
+
   return result;
 }
 
+export interface BackfillCliOptions {
+  root?: string;
+  syncRepo?: string;
+  /** 注入假 pusher（测试用）；不传走真实 sync。 */
+  pusher?: BackfillPusher;
+  log?: (line: string) => void;
+}
+
+/**
+ * CLI 入口的纯函数版：解析 `--dry-run` / `--push` 并返回**退出码**（不写 `process.exitCode`，
+ * 便于测试直接断言；`main()` 负责把它落到进程上）。
+ * 退出码 1 只用于"写入成功但推送真失败"——sync 未启用不算失败。
+ */
+export async function runBackfillCli(
+  argv: readonly string[],
+  opts: BackfillCliOptions = {},
+): Promise<{ exitCode: number; result: BackfillResult }> {
+  const options: BackfillOptions = {
+    dryRun: argv.includes("--dry-run"),
+    push: argv.includes("--push"),
+  };
+  if (opts.root !== undefined) options.root = opts.root;
+  if (opts.syncRepo !== undefined) options.syncRepo = opts.syncRepo;
+  if (opts.pusher !== undefined) options.pusher = opts.pusher;
+  options.log = opts.log ?? ((line: string) => console.log(line));
+
+  const result = await backfillCreated(options);
+  const pushFailed = result.push !== null && !result.push.ok && !result.push.disabled;
+  return { exitCode: pushFailed ? 1 : 0, result };
+}
+
 async function main(): Promise<void> {
-  const dryRun = process.argv.includes("--dry-run");
-  await backfillCreated({ dryRun, log: (line) => console.log(line) });
+  const { exitCode } = await runBackfillCli(process.argv.slice(2));
+  if (exitCode !== 0) process.exitCode = exitCode;
 }
 
 // 只在直接执行时跑 main（被测试 import 时不要触发）
