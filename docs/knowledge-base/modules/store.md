@@ -101,3 +101,9 @@ Track 2 写盘的同一把锁内跑 `runHealthMaintenance()`：死链（索引�
 ## 测试
 
 `tests/user-md.test.ts` / `user-md-anchors.test.ts` / `user-md-dedupe.test.ts` / `memory-md.test.ts` / `memory-search.test.ts` / `lock.test.ts` / `memory-write.test.ts`——覆盖保留语义、单遍应用、锚点四级降级、去重自愈、检索、锁竞争。测试 mock homedir 到独立 tmp home（路径带 `process.pid`，并发跑安全），**绝不碰真实 `~/.opencode`**。
+
+## `created` 的来源与回填（#34）
+
+`created` 由写卡层在**新建**时生成（`YYYY-MM-DD`），`update` 时原样保留；老卡缺失就显示「未知」，**不用 mtime 兜底**（update 会重置 mtime、sync pull 的 copyFileSync 也会重置）。
+
+一次性回填：`pnpm run backfill:created --dry-run` 先看「将回填 N / 已有 M / 保留未知 K」，确认后去掉 `--dry-run` 真跑。数据源是 `~/.opencode/memx-sync-repo` 的 git 首次新增时间；首推（2026-10-14）之前就存在的卡查不到，保持「未知」，**不猜**。实现走 `patchCreatedDate()`（只插一行、原子写、与写盘共用一把锁）。

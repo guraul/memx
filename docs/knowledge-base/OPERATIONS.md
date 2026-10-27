@@ -78,6 +78,8 @@ pnpm test            # vitest run —— 基线 28 文件 / 447 用例全绿，�
 pnpm run typecheck   # tsc --noEmit（strict + exactOptionalPropertyTypes + noUncheckedIndexedAccess）
 
 # 阶段 4 CLI（除 doctor 的顶距报警外都只读；退出码恒 0）
+pnpm run backfill:created --dry-run   # created 回填预演（只报数不写盘）
+pnpm run backfill:created             # 真跑（幂等，已有 created 不动）
 pnpm run doctor      # 只读状态面板：alerts / memory files / memory stats / opencode diag / sync
 pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永不 push）
 pnpm sync:op -- status|pull|push|both [--machine=<name>]

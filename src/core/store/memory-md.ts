@@ -163,10 +163,37 @@ export function serializeMemoryIndex(doc: MemoryIndexDoc): string {
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---/;
 
 /** 读卡片 frontmatter 里的 `created:`（只认 frontmatter 块内的行）。 */
-function readCreatedDate(content: string): string | null {
+export function readCreatedDate(content: string): string | null {
   const block = content.match(FRONTMATTER_RE)?.[1];
   if (!block) return null;
   return block.match(/^created:\s*(\S+)\s*$/m)?.[1] ?? null;
+}
+
+/**
+ * 回填用：给缺 `created` 的卡片补一行（#34）。
+ * - 已有 `created` → 不动，返回 false（幂等）；
+ * - 无 frontmatter 块 / 文件不存在 → 返回 false；
+ * - 只插入一行，其余字节原样保留（不重排字段、不碰正文）；
+ * - 原子写：tmp → rename（纯元数据补一行，不需要进 `.trash`，内容不会丢）。
+ * 调用方负责加锁（与写盘共用 `memoryIndexLockPath()`）。
+ */
+export function patchCreatedDate(slug: string, filename: string, created: string): boolean {
+  const filePath = getMemoryFilePath(slug, filename);
+  if (!existsSync(filePath)) return false;
+  const content = readFileSync(filePath, "utf-8");
+  const block = content.match(FRONTMATTER_RE);
+  if (!block || block[1] === undefined) return false;
+  if (readCreatedDate(content) != null) return false;
+
+  const lines = block[1].split("\n");
+  const typeIdx = lines.findIndex((line) => /^type:/.test(line));
+  lines.splice(typeIdx >= 0 ? typeIdx + 1 : lines.length, 0, `created: ${created}`);
+  const next = content.replace(block[0], `---\n${lines.join("\n")}\n---`);
+
+  const tmpPath = `${filePath}.tmp.${Date.now()}`;
+  writeFileSync(tmpPath, next, "utf-8");
+  renameSync(tmpPath, filePath);
+  return true;
 }
 
 /** 把现有卡片原样移入 `.trash/<file>.<ts>`；文件不存在返回 false（软删语义，不物理删除）。 */
