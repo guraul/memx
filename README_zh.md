@@ -293,7 +293,7 @@ Rewriting auth middleware for compliance.
 `forget(keyword)` 把匹配的 `.mem/*.md` 移进 `.trash/` 并移除索引条目。DSH 版还接受可选 `slug`；OpenCode 版固定用当前会话的项目。`forget` 成功后会触发一次同步 push（删除会传播出去）。
 
 ### `memory_write`
-显式记一条项目记忆（用户说"这个记一下 / 记住"时调用）。参数：`text`（必填，≤500 字）、`type`（`user|feedback|project|reference`，默认 `project`）、`name`、`description`、`why`、`how_to_apply`、`evidence`。同名同类型视为**修订**，与后台提炼共用同一条单遍写路 + 文件锁，格式不会分叉。
+显式记一条项目记忆（用户说"这个记一下 / 记住"时调用）。参数：`text`（必填，≤500 字）、`type`（`user|feedback|project|reference`，默认 `project`）、`name`、`description`、`why`、`how_to_apply`、`evidence`。同名同类型且**内容同义**视为**修订**；同名但内容不同会 fork 出 `<name>--<内容 hash>.md` 新卡、旧卡保留（`same_name_as` / `**Superseded by:**`），不再静默覆盖。与后台提炼共用同一条单遍写路 + 文件锁，格式不会分叉。
 
 ### `memory_search`
 DSH 独有。`memory_search(keyword, slug?)` 跨 `projects/<slug>/.mem/*.md` 做大小写不敏感全文检索，最多返回 20 条 `slug/file:line — <命中行>`。`slug` 缺省按会话工作目录推导；推导不出则退化为全库检索（只读，最坏多给几条）。检索范围是"索引里的 slug ∪ 磁盘上有 `.mem/` 的 slug"，孤儿文件也能搜到。

@@ -295,9 +295,11 @@ Manually triggers style + project memory refinement (fallback when the event tri
 ### `memory_write`
 Explicitly record one project-scoped memory (this is what a companion agent calls when the user says
 "remember this"). Arguments: `text` (required, ≤500 chars), `type` (`user|feedback|project|reference`,
-default `project`), `name`, `description`, `why`, `how_to_apply`, `evidence`. Same type + name is treated
-as a revision (update), not a duplicate. It writes through the same single-pass + file-lock path as the
-refinement pipeline, so the two can never disagree about the file format.
+default `project`), `name`, `description`, `why`, `how_to_apply`, `evidence`. Same type + name with
+**equivalent content** is treated as a revision (update), not a duplicate; same name with *different*
+content forks a new card `<name>--<content hash>.md` and keeps the old one (`same_name_as` /
+`**Superseded by:**`), so nothing is overwritten silently. It writes through the same single-pass +
+file-lock path as the refinement pipeline, so the two can never disagree about the file format.
 
 ### `memory_search`
 DSH only. `memory_search(keyword, slug?)` does a case-insensitive full-text search across `projects/<slug>/.mem/*.md` and returns up to 20 hits as `slug/file:line — <line>`. The slug defaults to the session's working directory; when it cannot be derived the search falls back to the whole library (read-only, at worst a few extra hits). It searches the union of indexed slugs and on-disk `.mem/` dirs, so orphan files are still findable.
