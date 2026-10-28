@@ -1,6 +1,6 @@
 # modules/sync.md — 多机云同步
 
-> 最后更新: 2026-10-25 · commit `c232168` · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）/ #21（删除传播）
+> 最后更新: 2026-10-28 · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）/ #21（删除传播）/ #33（PII 规则分层）
 
 ## 职责
 
@@ -10,7 +10,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `src/core/sync.ts`（834 行） | 全部编排：`GitRunner` / `scanSensitive` / `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
+| `src/core/sync.ts`（972 行） | 全部编排：`GitRunner` / `scanSensitive`（block+alert 分层）/ `listToSync` / 状态读写 / `buildDryRunReport` / `createSync` |
 | `src/core/config.ts` | `MemxSyncConfigSchema`（enabled / repo / branch / machineName / intervalMinutes） |
 | `src/hosts/opencode/index.ts` | 接线：setup 建 sync、启动拉一次、定时拉、三个 push 触发点（提炼写盘 / memory_write / forget） |
 | `scripts/sync-op.ts` | 手工通道（status / pii / pull / push / both，`--machine=<name>` 覆盖） |
@@ -45,7 +45,8 @@
 
 ```
 1. scanSensitive(全部待推文件)        ← 锁外做
-   命中 → 拒推 + SYNC_PII_BLOCKED critical（只报行号+规则名，绝不回显内容）
+   block 层命中 → 拒推 + SYNC_PII_BLOCKED critical（只报行号+规则名，绝不回显内容）
+   alert 层命中 → 照推 + SYNC_PII_ALERTED warn；明细先落 lastPiiScan / piiAlertLog（持久留痕，issue #33）
 2. withFileLock(~/.opencode/.memx-sync.lock, ttl 10min / 等锁 5min)
      copy 到 workdir
      → 删除传播（issue #21）：基线树里有、本地已删的同步文件 → 从 workdir 删掉
@@ -116,12 +117,21 @@
 | 路径 | 内容 |
 |------|------|
 | `~/.opencode/memx-sync-repo/` | Git workdir（不存在则 clone，存在则 fetch） |
-| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{hits,files,at}` / `lastRemoteSha`（上次成功 pull **或 push** 后的远端 sha；删除传播的基线 + 前置短路都用它；**旧文件无此字段 = null = 未知 → 走真实 pull、本轮不传播删除**，issue #21） / `unsyncedCommits`（最近一次观测到的未推提交数；**旧文件无此字段 = 0**，issue #12） |
+| `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan{at,files,hits,blocked,alerted,alertHits}`（`alertHits` 只含 file/pattern/line，**绝不回显内容**）/ `piiAlertLog`（alert 层命中历史：append-only、**不剪龄**、封顶 200，issue #33）/ `lastRemoteSha`（上次成功 pull **或 push** 后的远端 sha；删除传播的基线 + 前置短路都用它；**旧文件无此字段 = null = 未知 → 走真实 pull、本轮不传播删除**，issue #21） / `unsyncedCommits`（最近一次观测到的未推提交数；**旧文件无此字段 = 0**，issue #12） |
 | `~/.opencode/.memx-sync.lock` | 串行闸门（`withFileLock`，ttl 10 分钟 / 等锁上限 5 分钟） |
 
 ## PII 脱敏闸门（`scanSensitive`）
 
-8 类规则：`openai-key` / `aws-access-key` / `github-token` / `github-pat` / `slack-token` / `jwt` / `private-key` / `env-assignment`。
+规则分两层（issue #33），每处命中都带 `tier`：
+
+| 层 | 规则 | 行为 |
+|----|------|------|
+| **block（冻结）** | `openai-key` / `aws-access-key` / `github-token` / `github-pat` / `slack-token` / `jwt` / `private-key` / `env-assignment` | 命中即**拒推** + `SYNC_PII_BLOCKED` critical；一个 git 命令都不发 |
+| **alert** | `password-statement`（「我的密码是 abc123」这类语义陈述） | **照推不阻断** + `SYNC_PII_ALERTED` warn；明细落 `lastPiiScan` + `piiAlertLog` |
+
+**block 层 = 高精度机器凭据形态，8 条冻结、永不下放**（issue #33）。低置信规则为什么不能进 block：
+一次误报就 fail-closed 锁死整机同步（issue #10 实测锁了一整天）。**alert 层只解决可见性**：值里要求至少
+一位数字，过滤「密码管理器」「password is required」这类讨论；宁可漏报，也不把普通文档刷成告警。
 
 `openai-key` **必须带词边界**（issue #10 教训）：旧写法 `/sk-[A-Za-z0-9_-]{10,}/` 会把
 `task-spec-branch-name-verify`、`risk-management-foo` 这类普通词的**中段** `sk-…` 判成 key，
@@ -129,8 +139,11 @@
 `(^|[^A-Za-z0-9_-])sk-` 词边界 + 真实前缀（`proj-` / `ant-`）放行 + 裸 `sk-` 要求 ≥20 位 base62 且含大写或数字。
 **改这条规则必须同时补正反例**（`tests/sync.test.ts` 的 `issue #10` 两条用例）。
 
-命中即**拒推** + `SYNC_PII_BLOCKED` critical alert，报告只含**行号 + 规则名**，绝不回显命中内容。
-用户/运维自查走 `pnpm sync:op pii`（同一份 `scanSensitive`，列出 file / 行号 / 规则名，同样不回显内容）。
+命中报告只含**行号 + 规则名**，绝不回显命中内容。alert 层命中必须走**持久管道**，不能只 append 到
+AlertStore（7 天剪龄）：`lastPiiScan.alertHits` 记录最近一次扫描，`piiAlertLog` 是 append-only 历史
+（不随扫描覆盖、不剪龄、封顶 200 条）。用户/运维自查走 `pnpm sync:op pii`（同一份 `scanSensitive`，
+分层列出 block / alert 命中 + `piiAlertLog` 历史，同样不回显内容）；doctor 的 sync 段显示
+`block=` / `alert=` 计数与留痕条数。
 
 ## 关键设计
 
@@ -147,13 +160,14 @@
 pnpm sync:op status                       只读：config + 待同步清单 + PII + 近况（连 fetch 都不做）
 pnpm sync:op pii                          只读：PII 自查明细（file / 行号 / 规则名，绝不回显内容）
 pnpm sync:op -- pull  [--machine=prod]    拉取（远端优先，本地差异自动 .bak.<ts>）
-pnpm sync:op -- push  [--machine=prod]    推送（PII 命中即拒推）
+pnpm sync:op -- push  [--machine=prod]    推送（PII block 层命中即拒推；alert 层照推留痕）
 pnpm sync:op -- both  [--machine=prod]    先拉后推
 ```
 
 - **与插件同一条代码路径**（`createSync` 的 push/pull + `scanSensitive`），不是第二套实现。
 - `pii`（issue #10 DoD ③）= 用户不必读源码的自查入口：闸门只存/只报行号+规则名，此命令用同一份
-  `scanSensitive` 把命中明细列成 `file:line  规则名`，**绝不回显命中内容**（不打印那一行文字）。
+  `scanSensitive` 分层列出 block（拒推）/ alert（照推留痕）命中，并展示 `piiAlertLog` 历史，
+  **绝不回显命中内容**（不打印那一行文字）。
 - `pull` / `both` **强制真实 pull**（`sync.pull({ force: true })`）——人工跑就是要把远端搬下来，不参与"远端无变化则跳过"。
 - `--machine=<name>` = 显式覆盖 `{enabled:true, machineName:<name>}`，用于"配置还没开、但要人工跑一次首推/首拉"（prod 首次合并）；**它不改配置文件**，运行中的宿主不受影响。不传则完全按配置（未启用直接拒绝）。
 - 存在的理由：`createSync` 对 `enabled=false` 是硬拒绝，而"先开配置再推"会让运行中的宿主开始自动同步——手工通道把这两件事解耦。
@@ -168,6 +182,7 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 
 | 限制 | 说明 |
 |------|------|
+| **告警层推出后不可追回（issue #33 的核心 trade-off）** | alert 层只告警不阻断：低置信内容一旦被 push，**远端 git 历史是永久的**；本地能留的只有 `piiAlertLog`（封顶 200 条、不剪龄）和 `lastPiiScan`，而即时的 `SYNC_PII_ALERTED` alert 只保留 **7 天**（AlertStore 剪龄）。也就是说 7 天后本地提醒消失、记录也可能被后续写入挤出，但远端仍可检出原文。**接受这个风险的理由**：把低置信规则放进 block 层会让一次误报 fail-closed 锁死整机同步（issue #10 实测一天），代价远大于可见性收益。事后处置只能靠人工清理记忆内容 + 清理远端 git 历史 / 轮换凭据。 |
 | 删除传播依赖基线 | 首次 push（从未同步过）与旧状态文件的首次 pull 各有一轮不传播删除（保守 fail-safe）；基线写入后收敛。见「删除传播」 |
 | 不做逐行合并 | 同一文件两台机器都改 → 靠 git rebase，冲突即 abort 留人工 |
 | pull 不持记忆文件锁 | 与提炼写盘并发时最后写者胜，靠覆盖前 `.bak.` 备份兜底（同步操作彼此之间由 `.memx-sync.lock` 串行） |
@@ -187,7 +202,8 @@ pnpm sync:op -- both  [--machine=prod]    先拉后推
 6. 镜像范围改动要同步 `walkMirror` 与测试（`.trash/`、`.bak.` 的排除是有原因的，别顺手放开）。
 7. **删除传播的安全边界不许放宽**（issue #21）：`isSyncRepoPath` 的白名单、`listPendingDeletions` 的基线判据、pull 的 `--diff-filter=D` 三者缺一不可；任何"本地没有就删远端 / 远端没有就删本地"的朴素写法都会误删"本地新增未推"的记忆（现场教训：7 条 forget 被 pull 连续复活两天）。
 8. 真实 git 端到端测试用本地 bare 仓，**不要**改成联网远端（CI 无凭据）。
+9. **PII 分层边界（issue #33）**：block 层现有 8 条**冻结**，不得下放到 alert；alert 层不得反向升级为阻断（会把误报重新变成整机锁死）。alert 命中必须同时写 `lastPiiScan` 与 `piiAlertLog`——只 append AlertStore 不满足持久留痕（7 天剪龄）。
 
 ## 测试
 
-`tests/sync.test.ts`（假 runner 编排 + 真实 git 端到端 + PII/备份/锁/重试/前置短路 + issue #21 两条删除传播路径）+ `tests/scripts-smoke.test.ts`（CLI 真跑）。每文件独立 tmp home。
+`tests/sync.test.ts`（假 runner 编排 + 真实 git 端到端 + PII 分层/备份/锁/重试/前置短路 + issue #21 两条删除传播路径）+ `tests/scripts-smoke.test.ts`（CLI 真跑）。每文件独立 tmp home。

@@ -142,9 +142,17 @@ void (async () => {
       const pii = state?.lastPiiScan;
       console.log(
         pii
-          ? `sync.pii: ${pii.hits} 处命中 / ${pii.files} 个文件 @ ${pii.at}；明细自查：pnpm sync:op pii`
+          ? `sync.pii: block=${pii.blocked}（拒推）/ alert=${pii.alerted}（照推留痕）/ 共 ${pii.hits} 处命中 · ${pii.files} 个文件 @ ${pii.at}；明细自查：pnpm sync:op pii`
           : "sync.pii: 未取到（尚未扫描）；自查：pnpm sync:op pii",
       );
+      // issue #33：alert 命中的持久留痕（状态文件 append-only，不随 7 天剪龄消失）
+      const alertLog = state?.piiAlertLog ?? [];
+      if (alertLog.length > 0) {
+        const latest = alertLog[alertLog.length - 1]!;
+        console.log(
+          `sync.piiAlertLog: ${alertLog.length} 条低置信命中留痕（最近 ${latest.at} ${latest.file}:${latest.line} ${latest.pattern}）；明细自查：pnpm sync:op pii`,
+        );
+      }
     }
   } catch {
     console.log("sync: 未取到");

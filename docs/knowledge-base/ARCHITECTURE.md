@@ -184,7 +184,8 @@ push 触发点（三处，均 void 不 await）：
    memory_write 工具成功后（index.ts:569）
    forget 工具成功后（index.ts:601，issue #21：不推会被下一轮 pull 拉回）
 
-push 流程：scanSensitive(全部待推文件) → 命中即拒推 + SYNC_PII_BLOCKED critical
+push 流程：scanSensitive(全部待推文件) → block 层命中即拒推 + SYNC_PII_BLOCKED critical；
+        alert 层照推 + SYNC_PII_ALERTED warn，明细落 lastPiiScan / piiAlertLog（issue #33 分层）
         → withFileLock(.memx-sync.lock, ttl 10min / 等锁 5min) 内：
              copy → 删除传播（基线里存在且本地已删 → 从 workdir 删）
              → git status（文件差异）+ git rev-list --count @{u}..HEAD（未推提交）

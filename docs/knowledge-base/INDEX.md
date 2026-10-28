@@ -181,7 +181,7 @@ dsh/index.ts ──→ dsh/llm.ts ──→ core/refine/refinement.ts（仅 LLMC
 任何 `recordAlert(level, code, message)` → `AlertStore.append`（`~/.opencode/memx-alerts.json`，封顶 200、剪龄 7 天）+ OpenCode 侧 `diag.alerts` 只写镜像 → 面包屑 / doctor / `memx_status` 都读 store（DSH 无 kv，诊断只在内存 + 宿主日志）。
 
 **多机云同步（默认关）**：
-启用后 setup 时 `void sync.pull()` 一次 + 每 `intervalMinutes` 定时拉；**推触发点** = Track 2 提炼写盘成功后 + `memory_write` / `forget` 工具成功后（`void sync.push()` 不 await，仅 OpenCode 壳接线）→ `push()` 先 `scanSensitive()` 全量 PII 扫描（命中即拒推 + critical 报警）→ `.memx-sync.lock` 串行闸门内做 git 动作（镜像 = USER.md + MEMORY.md + `.mem/**/*.md`，排除 `.trash/`、`.bak.`；删除传播以 `lastRemoteSha` 为基线）→ 状态落 `memx-sync-state.json`。
+启用后 setup 时 `void sync.pull()` 一次 + 每 `intervalMinutes` 定时拉；**推触发点** = Track 2 提炼写盘成功后 + `memory_write` / `forget` 工具成功后（`void sync.push()` 不 await，仅 OpenCode 壳接线）→ `push()` 先 `scanSensitive()` 全量 PII 扫描（block 层命中即拒推 + critical；alert 层照推 + warn 并落状态文件留痕，issue #33）→ `.memx-sync.lock` 串行闸门内做 git 动作（镜像 = USER.md + MEMORY.md + `.mem/**/*.md`，排除 `.trash/`、`.bak.`；删除传播以 `lastRemoteSha` 为基线）→ 状态落 `memx-sync-state.json`。
 
 **显式出口**：用户说"记一下" → `memory_write` 工具（两宿主同一条 core 写路）→ 成功后 OpenCode 触发 `sync.push()`；`memory_search` / `forget` 只读/软删，同样走 core。
 
