@@ -41,7 +41,7 @@
 | 记忆库健康检查（死链/孤儿，auto-fix ≤3） | core | `src/core/health/memory-health.ts` |
 | 报警账本（单一事实源 + 剪龄 + 销账） | core | `src/core/alerts.ts` |
 | 多机云同步（Git 镜像 + PII 闸门 + 删除传播） | core | `src/core/sync.ts` |
-| 注入来源读取（整份索引 / 按 slug 只取当前项目小节） | core | `src/core/pipeline/injection-source.ts` |
+| 注入来源读取（当前节 + related；停用词 / 词边界 / 前 10 条） | core | `src/core/pipeline/injection-source.ts` |
 | system prompt 注入装配（三块、200 行/25KB 上限、agent 闸门） | core | `src/core/injection.ts` |
 | context hook 判定（子会话整体替换 vs 其余 append） | hosts | `src/hosts/opencode/context-hook.ts` |
 | 信号协议唯一真源（v1.2.0） | core | `src/core/protocol-template.ts` |
@@ -84,7 +84,7 @@ memx/
 │   │   ├── injection.ts          # 注入装配纯函数（顺序/上限/截断提示/闸门真值表）
 │   │   ├── pipeline/             # 宿主无关流水线（#17）
 │   │   │   ├── session.ts        # SessionPipeline（两轨提炼 + 三态 + 写盘 + 报警）+ PipelineHost 窄口
-│   │   │   └── injection-source.ts # 三块来源 + stat 缓存 + memorySectionForSlug（DSH 只取本项目节）
+│   │   │   └── injection-source.ts # 三块来源 + stat 缓存 + buildMemoryInjection（当前节 + related）
 │   │   ├── alerts.ts             # 报警账本（文件单一事实源 + 面包屑/面板格式化）
 │   │   ├── sync.ts               # 多机云同步（GitRunner 注入 + PII 闸门 + 删除传播 + dry-run）
 │   │   ├── memory-write.ts       # memory_write 的 core 写路（确定性文件名哈希 + 面包屑）
@@ -160,7 +160,7 @@ opencode/index.ts ──→ session-llm.ts ──→ context-shape.ts
 dsh/index.ts ──→ dsh/llm.ts ──→ core/refine/refinement.ts（仅 LLMClient 类型）
    ├──→ dsh/types.ts（纯类型，零宿主 import）
    ├──→ core/pipeline/session.ts（SessionPipeline + PipelineHost 实现）
-   ├──→ core/pipeline/injection-source.ts（readInjectionSourcesForSlug）
+   ├──→ core/pipeline/injection-source.ts（readInjectionSourcesForSlug：当前节 + related）
    ├──→ core/store/memory-search.ts（memory_search）
    └──→ core/alerts.ts / memory-write.ts / memory-md.ts / lock.ts
 ```
@@ -173,7 +173,7 @@ dsh/index.ts ──→ dsh/llm.ts ──→ core/refine/refinement.ts（仅 LLMC
 `主 AI 发 STYLE_SIGNAL HTML 注释` → 回合结束事件（OpenCode `session.execution.succeeded` / DSH `turn/end`）→ 捕获（OpenCode 走 `planCapture` 游标增量；DSH 走 `captureMemorySignals` 扫本轮文本）→ 缓冲（上限 20、evidence 去重）→ 节流门 → `SessionPipeline.refineStyle` → `refine()` 子会话/一次性 LLM 批量裁决（三态）→ `withFileLock` 锁内重读 → `user-md.applyProposals` 单遍应用（append 前归一查重 + 落盘 `dedupeUserMd` 自愈）→ `USER.md`（备份留 5 版）→ 下一 step 注入。
 
 **Track 2（项目记忆，项目绑定快变量）**：
-同一条触发/捕获管道 → `SessionPipeline.refineMemory` → `refineMemory()`（独立提示词/缓冲/三态计数）→ `withFileLock` → `memory-md.applyMemoryProposals` 单遍应用（`.mem/*.md` 卡片 + 索引 upsert + `.trash/` 软删）→ 同锁内 `runHealthMaintenance()`（死链/孤儿，auto-fix ≤3）→ 写索引前套一层 `applyAlertBreadcrumb`（有 warn/critical 时在首行插一行 `<!-- memx:` 面包屑）→ 注入的是 **MEMORY.md 索引**（OpenCode 整份 / DSH 只取当前项目小节）。
+同一条触发/捕获管道 → `SessionPipeline.refineMemory` → `refineMemory()`（独立提示词/缓冲/三态计数）→ `withFileLock` → `memory-md.applyMemoryProposals` 单遍应用（`.mem/*.md` 卡片 + 索引 upsert + `.trash/` 软删）→ 同锁内 `runHealthMaintenance()`（死链/孤儿，auto-fix ≤3）→ 写索引前套一层 `applyAlertBreadcrumb`（有 warn/critical 时在首行插一行 `<!-- memx:` 面包屑）→ 注入的是 **MEMORY.md 索引**（两宿主统一：当前节 + related，#32）。
 
 **两宿主的注入差异**：OpenCode 每 step 重算并 append 三个 SystemPart（能看到本会话新写的记忆）；DSH 用 `systemPrompt.section(order=12000)`，**每会话只算一次**（WeakMap by agent，字节恒定保缓存），代价是本会话新写的记忆下个会话才可见。
 

@@ -41,7 +41,7 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void
 ## ① 注入
 
 - `ctx.systemPrompt.section({ name: "memx:memory", order: 12000, interpolate: false, text })`。
-- 内容 = `readInjectionSourcesForSlug(cache, slug)` → 协议 + USER.md + **当前项目一节**（不是整份 MEMORY.md）。
+- 内容 = `readInjectionSourcesForSlug(cache, slug, cwd)` → 协议 + USER.md + **当前项目一节 + related**（不是整份 MEMORY.md；related = 其它节里按 cwd 末段 + 词边界命中的条目，见 `modules/injection.md`）。
 - **每会话只求值一次**：`WeakMap<agent, string>` 缓存；无 `agent`/`scope` 时不缓存（宁可重算，也不让 A 项目小节串给 B 项目）。
 - 文本里**无时间/计数/随机**——字节恒定是宿主缓存不失效的前提。
 - ⚠️ **不读 `inject.*` 闸门**（`enabled` / `includeAgents` / `excludeAgents` 只在 OpenCode 生效）。

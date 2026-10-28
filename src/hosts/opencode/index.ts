@@ -18,7 +18,7 @@ import { createSync } from "../../core/sync.ts";
 import type { SyncModule } from "../../core/sync.ts";
 import { describeGate, DEFAULT_AGENT_GATE } from "../../core/injection.ts";
 import type { AgentGate } from "../../core/injection.ts";
-import { InjectionSourceCache, readInjectionSources } from "../../core/pipeline/injection-source.ts";
+import { InjectionSourceCache, readInjectionSourcesForSlug } from "../../core/pipeline/injection-source.ts";
 import { SessionPipeline } from "../../core/pipeline/session.ts";
 import type { PipelineHost } from "../../core/pipeline/session.ts";
 import { applyContextHook } from "./context-hook.ts";
@@ -456,10 +456,12 @@ export default Plugin.define({
           const inj = diag.injection;
           if (inj) inj.hookFires++;
 
-          const outcome = applyContextHook(
-            event as unknown as ContextHookEvent,
-            { childSessions, gate: injectGate, readSources: () => readInjectionSources(injectCache) },
-          );
+          const outcome = applyContextHook(event as unknown as ContextHookEvent, {
+            childSessions,
+            gate: injectGate,
+            // 注入 = 当前节 + related（#32）；related 的键取工作目录末段
+            readSources: () => readInjectionSourcesForSlug(injectCache, currentSlug, ctx.location.directory ?? ""),
+          });
 
           if (outcome.kind === "child" || outcome.kind === "gated" || outcome.kind === "empty") {
             if (inj) {

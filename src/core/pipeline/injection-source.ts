@@ -12,14 +12,20 @@
 //
 // 位置说明（#17 A 步）：本文件原先在 `core/injection-source.ts`，与 `core/pipeline/` 的
 // 会话流水线同属"多宿主共用"的一层，故一并搬进 pipeline/。导入方（opencode 宿主、
-// 单测）跟着改路径，语义与缓存行为不变；新增的 `readInjectionSourcesForSlug` 是给
-// **只注入当前项目小节**的宿主（DSH）用的增量能力，opencode 仍读整份 MEMORY.md。
+// 单测）跟着改路径，语义与缓存行为不变。
+//
+// #32：注入范围从「OpenCode 整份 / DSH 单节」统一成「**当前节 + related**」——
+// 只取当前 slug 一节会丢跨节记忆（实测 58% 的 hook 在讲别的项目：slug 按 cwd 派生、
+// 内容按主题写，于是 `/memx` 下开会话看不到躺在 `agent-mobile` 节里的 memx 记忆）。
+// related = 其它节里按「项目目录末段 + 词边界」命中的条目（hook 优先，正文兜底），
+// 按索引顺序取前 10 条，纯确定性（无时间/计数/随机）→ 宿主注入字节恒定照旧成立。
 import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { PROTOCOL_FILE_NAME } from "../protocol-template.ts";
 import { getUserMdPath } from "../store/user-md.ts";
 import { getMemoryIndexPath, parseMemoryIndex, serializeMemoryIndex } from "../store/memory-md.ts";
+import type { MemoryIndexDoc, MemoryIndexEntry } from "../store/memory-md.ts";
 import type { InjectionSources } from "../injection.ts";
 
 interface CacheEntry {
@@ -81,45 +87,205 @@ export class InjectionSourceCache {
   }
 }
 
-/** 读齐三块来源（协议 / USER.md / MEMORY.md），缺的留 null。 */
-export function readInjectionSources(cache: InjectionSourceCache): InjectionSources {
-  return {
-    protocol: cache.read(getProtocolPath()),
-    user: cache.read(getUserMdPath()),
-    memory: cache.read(getMemoryIndexPath()),
-  };
+/** related 条目的注入上限（索引顺序前 N 条）。 */
+export const RELATED_INJECT_LIMIT = 10;
+
+/**
+ * 不能当匹配键的目录末段：它们描述的是**路径容器**，不是项目名。
+ *
+ * 典型形态 `/<user>/workspace/<project>`、`/root/project/<project>`：拿 `workspace`
+ * 或 `project` 去匹配，几乎每一节都会命中（等于把整份索引又注回来了，只是顺序更乱）。
+ * 大小写不敏感（比对前统一小写）。
+ */
+export const INJECTION_KEY_STOPWORDS: readonly string[] = [
+  "workspace",
+  "workspaces",
+  "projects",
+  "project",
+  "users",
+  "user",
+  "home",
+  "root",
+  "root-project",
+  "tmp",
+  "temp",
+  "src",
+  "code",
+  "repos",
+  "repo",
+  "dev",
+  "opt",
+  "var",
+  "desktop",
+  "documents",
+  "gubin",
+];
+
+/**
+ * 项目目录的**末段**做匹配键（`/Users/gubin/workspace/memx` → `memx`）。
+ *
+ * 为什么不是 slug：slug 是整条路径压平（`Users-gubin-workspace-memx`），实测只命中
+ * 1/13 的跨节条目；而末段 `memx` 命中 13/13（钩子是按主题写的，主题就是项目名）。
+ * 停用词 / 空目录 / 单字符 → null（宁可少注入，不可误注入）。
+ */
+export function injectionKeyForDirectory(directory: string | null | undefined): string | null {
+  if (typeof directory !== "string") return null;
+  const trimmed = directory.trim().replace(/[\\/]+$/, "");
+  if (trimmed === "") return null;
+  const segment = basename(trimmed);
+  if (segment === "" || segment === "/" || segment === "." || segment === "..") return null;
+  const key = segment.toLowerCase();
+  if (key.length < 2) return null;
+  if (INJECTION_KEY_STOPWORDS.includes(key)) return null;
+  return key;
 }
 
 /**
- * 从整份 MEMORY.md 里只摘出 `## <slug>` 这一节（标题 + 指针行），原样保留条目顺序。
+ * 词边界匹配（大小写不敏感）。
  *
- * 为什么要有这个函数：DSH 宿主的注入面是"当前项目一节"，而不是整份索引——索引里其他
- * 项目的条目对本会话只是噪声（且越长越挤占 system）。抽取是纯函数 + 不排序、不改写，
- * 所以同一份索引在任何时刻都渲染出同一段字节。
+ * `\w` 只含 ASCII 字母数字下划线：所以 `用memx提炼` / `memx仓库` 两侧都算边界（中文
+ * 不是 word 字符），而 `memx_pr_squash_only` 里的 `memx_` 不算命中（下划线是 word）。
+ * 短名会误报（`memx-worktrees` 命中 `memx`）—— 方向是"多注入一条"，不是"少注入"。
+ */
+export function matchesInjectionKey(text: string, key: string): boolean {
+  if (key === "" || text === "") return false;
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<!\\w)${escaped}(?!\\w)`, "i").test(text);
+}
+
+function filenameOf(filePath: string): string {
+  const parts = filePath.split("/");
+  return parts[parts.length - 1] ?? filePath;
+}
+
+function renderSection(slug: string, entries: MemoryIndexEntry[]): string {
+  return serializeMemoryIndex({ preamble: [], sections: [{ slug, entries }] }).trim();
+}
+
+/**
+ * 选 related 条目：其它节里命中匹配键的条目，**索引顺序前 limit 条**。
+ *
+ * - hook 命中就收，不再读正文（省一次读盘）；hook 不中才用 `readCard` 的正文兜底。
+ * - 按**文件名**去重：同一张卡被登记在两个节是存量事实（#32 实测），当前节已有的
+ *   卡片一律不再从 related 里重复注入。
+ * - 不排序、不看时间、不随机：同一份索引 + 同一个键永远选出同一批（注入字节恒定的前提）。
+ */
+export function selectRelatedEntries(
+  doc: MemoryIndexDoc,
+  slug: string,
+  key: string,
+  readCard?: (filePath: string) => string | null,
+  limit: number = RELATED_INJECT_LIMIT,
+): MemoryIndexEntry[] {
+  if (key === "" || limit <= 0) return [];
+
+  const seen = new Set<string>();
+  const current = doc.sections.find((s) => s.slug === slug);
+  for (const entry of current?.entries ?? []) seen.add(filenameOf(entry.filePath));
+
+  const picked: MemoryIndexEntry[] = [];
+  for (const section of doc.sections) {
+    if (section.slug === slug) continue;
+    for (const entry of section.entries) {
+      if (picked.length >= limit) return picked;
+      const filename = filenameOf(entry.filePath);
+      if (seen.has(filename)) continue;
+      if (!matchesInjectionKey(entry.hook, key)) {
+        const body = readCard?.(entry.filePath) ?? null;
+        if (body === null || !matchesInjectionKey(body, key)) continue;
+      }
+      seen.add(filename);
+      picked.push(entry);
+    }
+  }
+  return picked;
+}
+
+export interface MemoryInjectionInput {
+  indexContent?: string | null | undefined;
+  slug: string;
+  /** 会话工作目录（related 的匹配键从它的末段取）。 */
+  directory?: string | null | undefined;
+  /** 读卡片正文（hook 未命中时兜底）；缺省 = 不读正文，只按 hook 匹配。 */
+  readCard?: ((filePath: string) => string | null) | undefined;
+  limit?: number | undefined;
+}
+
+export interface MemoryInjection {
+  /** 合并后的注入文本；当前节与 related 都空 → null（调用方据此一个 part 都不加）。 */
+  text: string | null;
+  /** 当前节条目数 */
+  current: number;
+  /** related 条目数 */
+  related: number;
+  /** 本次匹配用的键；null = 拿不到可用的键（停用词/无目录），不找 related。 */
+  key: string | null;
+}
+
+/**
+ * 注入文本 = **当前节 + related**（#32）。纯函数：除 `readCard` 回调外没有任何 IO，
+ * 也不引入时间戳/计数/随机，所以同一份索引在同一 cwd 下每次渲染出同一段字节。
  *
  * 非受管行（`extras`：健康日志注释、用户手写说明）**不注入**：它们不是给模型的记忆，
  * 而且带时间戳的话会破坏"会话内字节恒定"。
  */
-export function memorySectionForSlug(indexContent: string | null | undefined, slug: string): string | null {
-  if (typeof indexContent !== "string" || indexContent.trim() === "") return null;
-  if (slug.trim() === "") return null;
-  const section = parseMemoryIndex(indexContent).sections.find((s) => s.slug === slug);
-  if (!section || section.entries.length === 0) return null;
-  const rendered = serializeMemoryIndex({
-    preamble: [],
-    sections: [{ slug: section.slug, entries: section.entries }],
-  }).trim();
-  return rendered === "" ? null : rendered;
+export function buildMemoryInjection(input: MemoryInjectionInput): MemoryInjection {
+  const key = injectionKeyForDirectory(input.directory);
+  const empty: MemoryInjection = { text: null, current: 0, related: 0, key };
+  if (typeof input.indexContent !== "string" || input.indexContent.trim() === "") return empty;
+
+  const doc = parseMemoryIndex(input.indexContent);
+  const slug = input.slug.trim();
+  const current = slug === "" ? undefined : doc.sections.find((s) => s.slug === slug);
+  const currentEntries = current?.entries ?? [];
+  const related =
+    key === null ? [] : selectRelatedEntries(doc, slug, key, input.readCard, input.limit ?? RELATED_INJECT_LIMIT);
+
+  if (currentEntries.length === 0 && related.length === 0) return empty;
+
+  const chunks: string[] = [];
+  if (currentEntries.length > 0) chunks.push(renderSection(slug, currentEntries));
+  if (related.length > 0) chunks.push(renderSection(`related: ${key}`, related));
+  return { text: chunks.join("\n\n"), current: currentEntries.length, related: related.length, key };
+}
+
+/** 把索引里的 `~/…` 卡片路径还原成绝对路径（索引存的是可移植写法）。 */
+export function expandHomePath(filePath: string): string {
+  if (filePath === "~") return homedir();
+  if (filePath.startsWith("~/")) return join(homedir(), filePath.slice(2));
+  return filePath;
 }
 
 /**
- * 只注入"协议 + 画像 + 当前 slug 一节"的变体（DSH 宿主用）。
- * 协议与画像的读法与 `readInjectionSources` 完全一致（同一个 cache、同一份文件）。
+ * `buildMemoryInjection` 的读盘壳：卡片正文与索引都走同一个 `InjectionSourceCache`
+ * （stat 缓存 → 每 step 只 stat，不重复 readFileSync）。
  */
-export function readInjectionSourcesForSlug(cache: InjectionSourceCache, slug: string): InjectionSources {
+export function memoryInjectionForScope(
+  cache: InjectionSourceCache,
+  indexContent: string | null | undefined,
+  slug: string,
+  directory: string | null | undefined,
+): MemoryInjection {
+  return buildMemoryInjection({
+    indexContent,
+    slug,
+    directory,
+    readCard: (filePath) => cache.read(expandHomePath(filePath)),
+  });
+}
+
+/**
+ * 两个宿主共用的一份读法：协议 + 画像 + （当前节 + related）。
+ * 注入范围不再分叉（OpenCode 从整份索引收敛到本节 + related，DSH 从单节放宽到 + related）。
+ */
+export function readInjectionSourcesForSlug(
+  cache: InjectionSourceCache,
+  slug: string,
+  directory: string | null | undefined,
+): InjectionSources {
   return {
     protocol: cache.read(getProtocolPath()),
     user: cache.read(getUserMdPath()),
-    memory: memorySectionForSlug(cache.read(getMemoryIndexPath()), slug),
+    memory: memoryInjectionForScope(cache, cache.read(getMemoryIndexPath()), slug, directory).text,
   };
 }

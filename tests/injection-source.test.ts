@@ -9,7 +9,7 @@ import { join } from "path";
 import {
   InjectionSourceCache,
   getProtocolPath,
-  readInjectionSources,
+  readInjectionSourcesForSlug,
 } from "../src/core/pipeline/injection-source.ts";
 
 const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-test-home-inject-${process.pid}`);
@@ -152,33 +152,62 @@ describe("InjectionSourceCache — mtime/size 双校验", () => {
   });
 });
 
-describe("readInjectionSources — 三块一起读", () => {
-  it("全在 → 三个字段都有值，键名与 buildInjectionParts 的来源一致", () => {
+describe("readInjectionSourcesForSlug — 三块一起读（当前节 + related）", () => {
+  const INDEX = [
+    `## work-proj-a`,
+    `- [本项目](${join(DIR, "projects", "work-proj-a", ".mem", "a.md")}) - 本项目专属钩子`,
+    "",
+    `## work-other`,
+    `- [跨节](${join(DIR, "projects", "work-other", ".mem", "b.md")}) - proj-a 的跨节钩子`,
+    "",
+  ].join("\n");
+
+  it("全在 → 三个字段都有值，memory = 当前节 + related", () => {
     writeFileSync(join(DIR, "memx-protocol.md"), "protocol body", "utf-8");
     writeFileSync(join(DIR, "USER.md"), "user body", "utf-8");
-    writeFileSync(join(DIR, "MEMORY.md"), "memory body", "utf-8");
-    const sources = readInjectionSources(new InjectionSourceCache());
-    expect(sources).toEqual({ protocol: "protocol body", user: "user body", memory: "memory body" });
+    writeFileSync(join(DIR, "MEMORY.md"), INDEX, "utf-8");
+    const sources = readInjectionSourcesForSlug(new InjectionSourceCache(), "work-proj-a", "/work/proj-a");
+    expect(sources.protocol).toBe("protocol body");
+    expect(sources.user).toBe("user body");
+    expect(sources.memory).toContain("## work-proj-a");
+    expect(sources.memory).toContain("本项目专属钩子");
+    // 目录末段 proj-a 命中其它节的钩子 → 作为 related 一并注入
+    expect(sources.memory).toContain("## related: proj-a");
+    expect(sources.memory).toContain("proj-a 的跨节钩子");
   });
 
   it("MEMORY.md 不存在（Track 2 还没跑过）→ memory 为 null，其余照常", () => {
     writeFileSync(join(DIR, "memx-protocol.md"), "protocol body", "utf-8");
     writeFileSync(join(DIR, "USER.md"), "user body", "utf-8");
-    const sources = readInjectionSources(new InjectionSourceCache());
+    const sources = readInjectionSourcesForSlug(new InjectionSourceCache(), "work-proj-a", "/work/proj-a");
     expect(sources.protocol).toBe("protocol body");
     expect(sources.user).toBe("user body");
     expect(sources.memory).toBeNull();
   });
 
   it("全缺 → 三块都是 null（上层据此一个 part 都不加）", () => {
-    const sources = readInjectionSources(new InjectionSourceCache());
+    const sources = readInjectionSourcesForSlug(new InjectionSourceCache(), "work-proj-a", "/work/proj-a");
     expect(sources).toEqual({ protocol: null, user: null, memory: null });
   });
 
-  it("readInjectionSources 的产物能直接喂给 buildInjectionParts（管道闭合）", async () => {
+  it("只读一次：三块都走同一个 cache（第二次调用不再重读 MEMORY.md）", () => {
     writeFileSync(join(DIR, "memx-protocol.md"), "protocol body", "utf-8");
+    writeFileSync(join(DIR, "USER.md"), "user body", "utf-8");
+    writeFileSync(join(DIR, "MEMORY.md"), INDEX, "utf-8");
+    const cache = new InjectionSourceCache();
+    const first = readInjectionSourcesForSlug(cache, "work-proj-a", "/work/proj-a");
+    expect(cache.wasCached(join(DIR, "MEMORY.md"))).toBe(true);
+    expect(readInjectionSourcesForSlug(cache, "work-proj-a", "/work/proj-a")).toEqual(first);
+  });
+
+  it("产物能直接喂给 buildInjectionParts（管道闭合）", async () => {
+    writeFileSync(join(DIR, "memx-protocol.md"), "protocol body", "utf-8");
+    writeFileSync(join(DIR, "MEMORY.md"), INDEX, "utf-8");
     const { buildInjectionParts } = await import("../src/core/injection.ts");
-    const built = buildInjectionParts(readInjectionSources(new InjectionSourceCache()));
-    expect(built.parts).toEqual([{ type: "text", text: "protocol body" }]);
+    const built = buildInjectionParts(
+      readInjectionSourcesForSlug(new InjectionSourceCache(), "work-proj-a", "/work/proj-a"),
+    );
+    expect(built.parts[0]).toEqual({ type: "text", text: "protocol body" });
+    expect(built.parts[1]!.text).toContain("## related: proj-a");
   });
 });

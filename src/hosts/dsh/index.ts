@@ -290,7 +290,8 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
   const buildInjectionText = (agent: DshAgent | undefined): string => {
     try {
       const slug = slugFor(agent);
-      const built = buildInjectionParts(readInjectionSourcesForSlug(injectionCache, slug));
+      // related 的匹配键取会话工作目录的末段（`/Users/x/workspace/memx` → `memx`）
+      const built = buildInjectionParts(readInjectionSourcesForSlug(injectionCache, slug, cwdFor(agent)));
       return built.parts.map((part) => part.text).join("\n\n");
     } catch (err) {
       recordFailure(err);

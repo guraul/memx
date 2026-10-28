@@ -74,7 +74,7 @@ OpenCode 壳（DSH 壳用 `turn/end`，见[宿主支持](#宿主支持)）：
 | | OpenCode v2 | DSH（DeepSeek Harness） |
 | :--- | :--- | :--- |
 | 状态 | ✅ `install.sh` 安装 | ✅ 由配套薄壳包 `dsh-plugin-memx`（独立仓）安装 |
-| 注入 | `context` hook **每个 model step 追加 3 个 `SystemPart`**（协议 → 画像 → 整份 `MEMORY.md`） | 一个 `systemPrompt.section`（`order: 12000`），**每会话只算一次**（协议 + 画像 + **仅当前项目那一节**） |
+| 注入 | `context` hook **每个 model step 追加 3 个 `SystemPart`**（协议 → 画像 → **当前项目一节 + related**） | 一个 `systemPrompt.section`（`order: 12000`），**每会话只算一次**（协议 + 画像 + **当前节 + related**） |
 | 工具 | `reflect` / `memory_write` / `forget` / `memx_status` | `memory_write` / `memory_search` / `forget` |
 | 提炼 LLM | 造子会话（`session.prompt`） | 一次性 `ctx.llm.stream` 调用（不造子会话） |
 | 自动捕获 | `session.execution.succeeded` + 会话游标 | `turn/end` 事件 + 会话级节流（无游标） |

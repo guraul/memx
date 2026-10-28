@@ -100,7 +100,7 @@ CLI 已退役），因此宿主自己不需要任何 markdown 解析。
 
 | 维度 | `src/hosts/opencode/` | `src/hosts/dsh/` |
 |------|----------------------|------------------|
-| 注入内容 | 协议 + USER.md + **整份 MEMORY.md** | 协议 + USER.md + **当前项目小节**（`memorySectionForSlug`） |
+| 注入内容 | 协议 + USER.md + **当前节 + related**（`buildMemoryInjection`） | 协议 + USER.md + **当前节 + related**（同一份 `buildMemoryInjection`） |
 | 注入时机 | `context` hook 每轮追 SystemPart | `systemPrompt.section`，`order: 12000`，`interpolate: false` |
 | 注入稳定性 | 每轮重算（可看到本会话新写的记忆） | **每会话只算一次**（WeakMap by agent），字节恒定以保缓存 |
 | 写入 | `memory_write` 工具 | 同左，同一份 `writeProjectMemory` |
@@ -126,7 +126,7 @@ CLI 已退役），因此宿主自己不需要任何 markdown 解析。
 
 ## 运行时行为
 
-1. **注入**：每个会话第一次装配时求值一次 `buildInjectionParts(readInjectionSourcesForSlug(...))`，
+1. **注入**：每个会话第一次装配时求值一次 `buildInjectionParts(readInjectionSourcesForSlug(cache, slug, cwd))`（当前节 + related，#32），
    之后同一 `agent` 对象拿到同一串字节。注入正文里**不含时间/计数/随机**——否则每轮字节漂移
    会让宿主缓存全失效。
 2. **工具**：`memory_write` 的参数与 opencode 那版逐字段对齐；`memory_search` / `forget` 与

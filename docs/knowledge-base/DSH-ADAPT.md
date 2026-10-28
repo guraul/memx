@@ -42,7 +42,7 @@ memx/                                   # 本仓
 ├── src/core/…                          # 原样复用，零改动
 │   └── pipeline/
 │       ├── session.ts                  # SessionPipeline（两宿主共用流水线）
-│       └── injection-source.ts         # readInjectionSourcesForSlug（只取当前项目一节）
+│       └── injection-source.ts         # readInjectionSourcesForSlug（当前节 + related）
 ├── src/hosts/opencode/…                # OpenCode 壳（695 行，只做接线）
 ├── src/hosts/dsh/                      # DSH 适配器（被薄壳包加载）
 │   ├── index.ts                        # name/inject/Config/apply：注入段 + 3 工具 + 轮末补记（743 行）
@@ -108,7 +108,7 @@ dsh plugin --profile web add /Users/gubin/workspace/self-dsh-plugins/dsh-plugin-
 
 ## 4. 运行时行为（实测）
 
-1. **注入**：每个会话第一次装配时求值一次 `buildInjectionParts(readInjectionSourcesForSlug(cache, slug))`，之后同一 `agent` 对象拿到同一串字节（WeakMap）。注入正文**不含时间/计数/随机**。
+1. **注入**：每个会话第一次装配时求值一次 `buildInjectionParts(readInjectionSourcesForSlug(cache, slug, cwd))`（当前节 + related，#32），之后同一 `agent` 对象拿到同一串字节（WeakMap）。注入正文**不含时间/计数/随机**。
 2. **工具**：`memory_write` 参数与 OpenCode 版逐字段对齐；`memory_search` / `forget` 走 core（`searchMemories` / `forgetMemory` + 索引写盘）。`slug` 缺省按会话 cwd 推导；`memory_search` 推导不出 → 全库（只读），`forget` 推导不出 → 直接失败。
 3. **轮末补记**：`turn/end` → `autoRefine === false` 跳过 → 同 turn 幂等 → 本轮有工具写入则跳过 → 无信号跳过 → 会话级节流 → 解析路由（配置优先，回落会话模型；取不到 → 跳过）→ `pipeline.refineMemory(true)`。`queueMicrotask` 起步，**不 await 阻塞事件分发**。
 4. **提示**：写入成功且拿得到 `createUserMessage` 时，`agent.inject` 排一条 `[memx] 已记住 N 条`（≤120 字）。
