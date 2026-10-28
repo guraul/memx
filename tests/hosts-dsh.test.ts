@@ -304,6 +304,33 @@ describe("注入（每会话一次、字节恒定）", () => {
     expect(evaluate({ agent: h.agent })).toBe(a);
     expect(evaluate({ agent: other })).toBe(b);
   });
+
+  it("#32 接线：目录末段命中其它节 → 当前节 + related 一起注入（且字节恒定）", () => {
+    writeFileSync(
+      join(DIR, "MEMORY.md"),
+      [
+        "## Users-gubin-workspace-memx",
+        `- [本项目](${join(DIR, "projects", "Users-gubin-workspace-memx", ".mem", "own.md")}) - 本项目专属钩子`,
+        "",
+        "## Users-gubin-workspace-agent-mobile",
+        `- [跨节](${join(DIR, "projects", "Users-gubin-workspace-agent-mobile", ".mem", "cross.md")}) - memx 注入通道实况`,
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    const h = makeHarness({ cwd: "/Users/gubin/workspace/memx" });
+    apply(h.ctx, {});
+    const evaluate = h.sections[0]!.text as (c: unknown) => string;
+
+    const text = evaluate({ agent: h.agent });
+    expect(text).toContain("## Users-gubin-workspace-memx");
+    expect(text).toContain("本项目专属钩子");
+    expect(text).toContain("## related: memx");
+    expect(text).toContain("memx 注入通道实况");
+
+    // 会话内字节恒定：同一 agent 再求值一次仍然是同一串
+    expect(evaluate({ agent: h.agent })).toBe(text);
+  });
 });
 
 describe("轮末补记", () => {

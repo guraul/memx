@@ -87,8 +87,8 @@ applyProposals / applyMemoryProposals：单遍应用（parse 一次 → 内存�
    ↓
 USER.md / MEMORY.md + .mem/*.md（写前备份留 5 版；tmp 写 + rename 原子替换）
    ↓
-注入：OpenCode 每 step 三块 append（协议 → 画像 → 整份索引）
-      DSH 每会话一次 section（协议 + 画像 + 当前项目一节）
+注入：两宿主同一份来源（协议 → 画像 → 当前节 + related）
+      OpenCode 每 step append；DSH 每会话一次 section（字节恒定）
    ↓（Track 2 写盘成功后，仅 OpenCode 壳接线）
 void sync.push()（PII 扫描 → 串行锁 → git；异步不 await，绝不阻塞写盘）
 ```
