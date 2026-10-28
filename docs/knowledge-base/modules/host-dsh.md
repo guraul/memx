@@ -21,7 +21,7 @@ memx 与 DSH（DeepSeek Harness）的唯一接缝：注册注入段、3 个工�
 
 | 文件 | 职责 |
 |------|------|
-| `src/hosts/dsh/index.ts`（743 行） | 具名导出 `name` / `inject` / `Config` / `apply`；注入段、3 工具、`session/event` 轮末补记、内存诊断 |
+| `src/hosts/dsh/index.ts`（753 行） | 具名导出 `name` / `inject` / `Config` / `apply`；注入段、3 工具、`session/event` 轮末补记、内存诊断 |
 | `src/hosts/dsh/llm.ts` | `createDshLLMClient(llm, route)` → `LLMClient`；`resolveRoute(provider, model)`（两者都非空才算可用） |
 | `src/hosts/dsh/types.ts` | 官方 d.ts 的最小子集（`DshContext` / `DshAgent` / `DshTools` / `DshLlm` / `DshSessionEvent` …） |
 | `src/hosts/dsh/README.md` | **DSH 侧最详细文档**：工具表、配置、与 OpenCode 对照、API 对照、已知限制 |
@@ -33,7 +33,7 @@ memx 与 DSH（DeepSeek Harness）的唯一接缝：注册注入段、3 个工�
 export const name = "memx";
 export const inject = ["systemPrompt", "tools", "workingDirectory", "llm", "agents"] as const;
 export const Config = { /* 手写 standard-schema：~standard.validate */ };
-export function apply(ctx: DshContext, config: DshMemxConfig = {}): void
+export function apply(ctx: DshContext, config: DshMemxConfig = {}): DshDiagnostics
 ```
 
 ⚠️ OpenCode 侧是"只 default 导出"，DSH 侧**必须具名导出**；两边不能互抄。
@@ -80,6 +80,7 @@ turn/end          → queueMicrotask（绝不 await）
 ## ④ 诊断与报警
 
 - 诊断**只在内存**（`DshDiagnostics`：injections / capturedTurns / toolWrites / notices / skipped.* + 流水线字段）；`persist` 是空实现。
+- `apply()` 返回这个诊断对象（只读出口，不改变任何行为）：宿主可观测，测试用它做**负向断言的 quiescent 信号**——`skipped.<reason>` 自增即代表该判定已执行且选择跳过，比固定 sleep 可靠（#35）。
 - 异常走 `ctx.logger.warn("[memx] …")` 落宿主日志；无 `memx_status`、无 doctor 面板、无 kv 行。
 - 报警落**同一份** `~/.opencode/memx-alerts.json`（两宿主共用账本）。
 

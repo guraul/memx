@@ -6,6 +6,7 @@
   "main": "src/hosts/opencode/index.ts",
   "scripts": {
     "test": "vitest run",
+    "test:concurrent": "bash scripts/test-concurrent.sh",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "doctor": "node --experimental-strip-types scripts/doctor.ts",

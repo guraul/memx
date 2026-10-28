@@ -22,6 +22,11 @@ import { MemxConfigSchema } from "../src/core/config.ts";
 
 const TEST_HOME = vi.hoisted(() => `/tmp/opencode-memx-sync-test-home-${process.pid}`);
 
+// #35：真实 git 端到端用例要连开十几个 `git` 子进程，单跑约 2–4s；4 进程并发（CI 低配机同理）
+// CPU 抢满后会顶穿 vitest 默认 5s 的 testTimeout——那是负载导致的假红，不是逻辑失败。
+// 与 tests/scripts-smoke.test.ts 同样处理：只放大本文件，其它文件保持 5s，真卡死仍会暴露。
+vi.setConfig({ testTimeout: 30_000 });
+
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return { ...actual, homedir: () => TEST_HOME };
