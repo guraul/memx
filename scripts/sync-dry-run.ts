@@ -33,9 +33,14 @@ try {
   if (report.piiHits.length === 0) {
     console.log(`PII 扫描: 清洁（${report.files.length} 个文件）`);
   } else {
-    console.log(`PII 扫描: ${report.piiHits.length} 处命中（命中即拒推）`);
+    const blockHits = report.piiHits.filter((h) => h.tier === "block");
+    const alertHits = report.piiHits.filter((h) => h.tier === "alert");
+    // issue #33：block 拒推；alert 只告警、照推并落持久留痕
+    console.log(
+      `PII 扫描: block ${blockHits.length} 处（命中即拒推）/ alert ${alertHits.length} 处（只告警，照推留痕）`,
+    );
     for (const h of report.piiHits) {
-      console.log(`  ${h.file}:${h.line} ${h.pattern}`);
+      console.log(`  [${h.tier}] ${h.file}:${h.line} ${h.pattern}`);
     }
   }
   if (report.remoteLog.length === 0) {

@@ -8,6 +8,7 @@ import {
   readSyncState,
   remoteUrl,
   scanSensitive,
+  PII_BLOCK_RULES,
   listToSync,
   listPendingDeletions,
   isSyncRepoPath,
@@ -180,11 +181,64 @@ describe("scanSensitive", () => {
     ]);
   });
 
-  it("命中只含 pattern+line 两个字段，绝不回显内容", () => {
+  it("命中只含 pattern+line+tier 三个字段，绝不回显内容", () => {
     const hits = scanSensitive("aws: AKIAIOSFODNN7EXAMPLE\n");
     expect(hits).toHaveLength(1);
-    expect(Object.keys(hits[0]!).sort()).toEqual(["line", "pattern"]);
+    expect(Object.keys(hits[0]!).sort()).toEqual(["line", "pattern", "tier"]);
     expect(JSON.stringify(hits)).not.toContain("AKIAIOSFODNN7EXAMPLE");
+  });
+});
+
+describe("PII 规则分层（issue #33）", () => {
+  it("block 层冻结为现有 8 条，且全部 tier=block", () => {
+    expect(PII_BLOCK_RULES.map((r) => r.pattern)).toEqual([
+      "openai-key",
+      "aws-access-key",
+      "github-token",
+      "github-pat",
+      "slack-token",
+      "jwt",
+      "private-key",
+      "env-assignment",
+    ]);
+    expect(PII_BLOCK_RULES.every((r) => r.tier === "block")).toBe(true);
+  });
+
+  it("alert 层：语义型密码陈述命中，tier=alert（不阻断）", () => {
+    const text = ["我的密码是 abc123", "password is hunter2", "密码：hunter2"].join("\n");
+    expect(scanSensitive(text)).toEqual([
+      { pattern: "password-statement", line: 1, tier: "alert" },
+      { pattern: "password-statement", line: 2, tier: "alert" },
+      { pattern: "password-statement", line: 3, tier: "alert" },
+    ]);
+  });
+
+  it("alert 层不把普通讨论当命中（密码管理器 / password is required）", () => {
+    const text = ["密码管理器很好用", "password is required", "口令长度至少 12 位"].join("\n");
+    expect(scanSensitive(text)).toEqual([]);
+  });
+});
+
+describe("同步状态向后兼容（issue #33 新字段）", () => {
+  it("旧 lastPiiScan 无分层字段 → blocked=hits / alerted=0 / alertHits=[]；piiAlertLog 缺省为空", () => {
+    const path = writeStateFile("pii-legacy", {
+      lastPushAt: null,
+      lastPullAt: null,
+      lastError: "",
+      consecutiveFailures: 0,
+      lastPiiScan: { at: "2026-01-01T00:00:00.000Z", files: 2, hits: 3 },
+      lastRemoteSha: null,
+    });
+    const state = readSyncState(path);
+    expect(state?.lastPiiScan).toEqual({
+      at: "2026-01-01T00:00:00.000Z",
+      files: 2,
+      hits: 3,
+      blocked: 3,
+      alerted: 0,
+      alertHits: [],
+    });
+    expect(state?.piiAlertLog).toEqual([]);
   });
 });
 
@@ -261,6 +315,58 @@ describe("push", () => {
     const list = alerts.list();
     expect(list.some((a) => a.code === "SYNC_PII_BLOCKED" && a.level === "critical")).toBe(true);
     expect(JSON.stringify(list)).not.toContain("sk-abc123XYZ7890abcdefg");
+  });
+
+  it("alert 层命中 → 照推 + 持久留痕，不回显内容（issue #33）", async () => {
+    writeMemoryFile("USER.md", "我的密码是 abc123\n");
+    const runner = new FakeRunner(pushOkResponder);
+    const alerts = makeAlerts("piialert");
+    const statePath = join(HOME, "state-pii-alert.json");
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts,
+      runner,
+      workdir: join(HOME, "workdir-pii-alert"),
+      statePath,
+    });
+    const result = await sync.push();
+    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("pushed");
+    // alert 层不阻断：git push 照常发生
+    expect(runner.called("push origin main")).toBe(true);
+    // 即时提醒（会随 AlertStore 7 天剪龄消失，所以不能只靠它）
+    expect(alerts.list().some((a) => a.code === "SYNC_PII_ALERTED" && a.level === "warn")).toBe(true);
+    // 持久管道：状态文件里的 lastPiiScan + piiAlertLog（append-only，不剪龄）
+    const state = readSyncState(statePath);
+    expect(state?.lastPiiScan).toMatchObject({ hits: 1, blocked: 0, alerted: 1 });
+    expect(state?.lastPiiScan?.alertHits).toEqual([{ file: "USER.md", pattern: "password-statement", line: 1 }]);
+    expect(state?.piiAlertLog).toHaveLength(1);
+    expect(state?.piiAlertLog[0]).toMatchObject({ file: "USER.md", pattern: "password-statement", line: 1 });
+    expect(JSON.stringify(state)).not.toContain("abc123");
+  });
+
+  it("block + alert 同时命中 → block 优先拒推，alert 命中仍留痕（issue #33）", async () => {
+    writeMemoryFile("USER.md", "my key sk-abc123XYZ7890abcdefg\n我的密码是 abc123\n");
+    const runner = new FakeRunner(() => ({ ok: true, stdout: "", stderr: "" }));
+    const alerts = makeAlerts("piialertblock");
+    const statePath = join(HOME, "state-pii-alert-block.json");
+    const sync = createSync({
+      config: SYNC_CONFIG,
+      alerts,
+      runner,
+      workdir: join(HOME, "workdir-pii-alert-block"),
+      statePath,
+    });
+    const result = await sync.push();
+    expect(result.ok).toBe(false);
+    expect(result.kind).toBe("pii-blocked");
+    // block 层仍是一票否决：一个 git 命令都不发
+    expect(runner.calls).toHaveLength(0);
+    const state = readSyncState(statePath);
+    expect(state?.lastPiiScan).toMatchObject({ hits: 2, blocked: 1, alerted: 1 });
+    // 即使本次被 block 拒推，alert 命中也已经落持久留痕
+    expect(state?.piiAlertLog).toHaveLength(1);
+    expect(JSON.stringify(state)).not.toContain("sk-abc123XYZ7890abcdefg");
   });
 
   it("非快进 → fetch + rebase + 重试一次（命令序列与顺序）", async () => {
@@ -630,7 +736,7 @@ describe("dryRun", () => {
     mkdirSync(workdir, { recursive: true });
     const report = buildDryRunReport({ config: SYNC_CONFIG, workdir });
     expect(report.piiHits).toHaveLength(1);
-    expect(report.piiHits[0]).toEqual({ file: "USER.md", pattern: "aws-access-key", line: 1 });
+    expect(report.piiHits[0]).toEqual({ file: "USER.md", pattern: "aws-access-key", line: 1, tier: "block" });
     expect(JSON.stringify(report.piiHits)).not.toContain("AKIAIOSFODNN7EXAMPLE");
   });
 

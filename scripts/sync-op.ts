@@ -3,7 +3,7 @@
 // 用法：pnpm sync:op status                       只读：config + 待同步清单 + PII + 近况
 //       pnpm sync:op pii                          只读：PII 自查（file:line + 规则名，绝不回显内容）
 //       pnpm sync:op -- pull  [--machine=prod]     拉取（远端优先；本地差异自动备份 .bak.<ts>）
-//       pnpm sync:op -- push  [--machine=prod]     推送（PII 命中即拒推）
+//       pnpm sync:op -- push  [--machine=prod]     推送（PII block 层命中即拒推；alert 层照推留痕）
 //       pnpm sync:op -- both  [--machine=prod]     先拉后推
 //
 // `--machine=<name>` = **显式覆盖** `{enabled:true, machineName:<name>}`，用于"配置尚未开启、
@@ -22,7 +22,7 @@ import { join } from "node:path";
 
 import { loadMemxConfig } from "../src/core/config.ts";
 import { createFileAlertStore } from "../src/core/alerts.ts";
-import { buildDryRunReport, createSync } from "../src/core/sync.ts";
+import { buildDryRunReport, createSync, readSyncState } from "../src/core/sync.ts";
 
 type Op = "status" | "pii" | "pull" | "push" | "both";
 
@@ -47,13 +47,28 @@ try {
   // pii 自查：配置等无关信息一律不打，只输出"扫描了多少 + 命中明细"，便于直接贴进排查记录
   if (op === "pii") {
     const report = buildDryRunReport({ config });
+    // issue #33：分层展示。block 拒推；alert 只告警、照推但留痕。
+    const blockHits = report.piiHits.filter((h) => h.tier === "block");
+    const alertHits = report.piiHits.filter((h) => h.tier === "alert");
     console.log(`PII 自查（只读；扫描本地镜像 ${report.files.length} 个文件，命中只报 file / rule / line，绝不回显内容）`);
-    if (report.piiHits.length === 0) {
+    console.log(`block 层（高精度，命中即拒推）: ${blockHits.length} 处`);
+    for (const h of blockHits) console.log(`  ${h.file}:${h.line}  ${h.pattern}`);
+    console.log(`alert 层（低置信，只告警、照推留痕）: ${alertHits.length} 处`);
+    for (const h of alertHits) console.log(`  ${h.file}:${h.line}  ${h.pattern}`);
+    // alert 命中的持久留痕（状态文件 append-only，不剪龄）：文件被改掉后仍能查到"什么时候推过什么"
+    const log = readSyncState()?.piiAlertLog ?? [];
+    if (log.length > 0) {
+      console.log(`历史留痕（状态文件，不剪龄）: ${log.length} 条`);
+      for (const e of log.slice(-20)) console.log(`  ${e.at}  ${e.file}:${e.line}  ${e.pattern}`);
+      if (log.length > 20) console.log("  …（仅显示最近 20 条；完整见 ~/.opencode/memx-sync-state.json）");
+    }
+    if (blockHits.length === 0 && alertHits.length === 0) {
       console.log("命中 0 处 → PII 闸门不会拦推送");
     } else {
-      console.log(`命中 ${report.piiHits.length} 处（命中即拒推）：`);
-      for (const h of report.piiHits) console.log(`  ${h.file}:${h.line}  ${h.pattern}`);
-      console.log("处置：先确认是真密钥还是词形误报；真密钥清理记忆内容，误报则调 PII_RULES（别直接删规则）。");
+      console.log(
+        "处置：block 层先确认是真密钥还是词形误报（真密钥清理记忆内容，误报调 PII_BLOCK_RULES）；" +
+          "alert 层照推不阻断，复核内容后决定是否清理。",
+      );
     }
     process.exit(0);
   }
@@ -66,10 +81,11 @@ try {
   // status 不做任何 git 动作（连 fetch 都不做）
   const report = buildDryRunReport({ config, prepare: !readOnly });
   if (!readOnly) console.log(`prepare: ${report.note}`);
-  console.log(`待同步 ${report.files.length} 个文件 / PII 命中 ${report.piiHits.length}`);
-  for (const h of report.piiHits) console.log(`  PII ${h.file}:${h.line} ${h.pattern}`);
-  if (report.piiHits.length > 0 && (op === "push" || op === "both")) {
-    console.log("PII 命中 → 拒绝推送");
+  console.log(`待同步 ${report.files.length} 个文件 / PII 命中 block=${report.piiHits.filter((h) => h.tier === "block").length} alert=${report.piiHits.filter((h) => h.tier === "alert").length}`);
+  for (const h of report.piiHits) console.log(`  PII [${h.tier}] ${h.file}:${h.line} ${h.pattern}`);
+  // 只有 block 层才拦截；alert 层照推（issue #33）
+  if (report.piiHits.some((h) => h.tier === "block") && (op === "push" || op === "both")) {
+    console.log("PII block 层命中 → 拒绝推送");
     process.exit(0);
   }
 

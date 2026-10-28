@@ -18,7 +18,7 @@
 | 锁 | `~/.opencode/.USER.md.lock` / `.MEMORY.md.lock` | 跨进程锁（正常路径不长期存在） | `store/lock.ts` |
 | 报警账本 | `~/.opencode/memx-alerts.json` | 报警事件数组（封顶 200、剪龄 7 天）——**报警单一事实源** | `core/alerts.ts`（宿主注入） |
 | 同步仓 | `~/.opencode/memx-sync-repo/` | Git workdir（镜像 USER.md / MEMORY.md / `.mem/**/*.md`） | `core/sync.ts`（仅 sync 启用时） |
-| 同步状态 | `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan` / `lastRemoteSha`（上次成功 pull 的远端 sha，供前置短路；旧文件无 = 未知） | `core/sync.ts` |
+| 同步状态 | `~/.opencode/memx-sync-state.json` | `lastPushAt` / `lastPullAt` / `consecutiveFailures` / `lastError` / `lastPiiScan`（分层计数 + alertHits）/ `piiAlertLog`（alert 层命中历史，不剪龄）/ `lastRemoteSha`（上次成功 pull 的远端 sha，供前置短路；旧文件无 = 未知） | `core/sync.ts` |
 | 同步锁 | `~/.opencode/.memx-sync.lock` | push/pull 串行闸门（ttl 10 分钟 / 等锁 5 分钟） | `core/sync.ts` |
 | 宿主入口 | `~/.config/opencode/plugins/memx.ts` | `export { default } from "<repo>/src/hosts/opencode/index";` | install.sh |
 | 宿主依赖声明 | `~/.config/opencode/package.json` | zod / @opencode/plugin / @opencode/client v2 | install.sh（v1→v2 名自愈） |

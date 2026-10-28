@@ -56,13 +56,35 @@ export function createNodeGitRunner(): GitRunner {
 const SYNC_IDENTITY_ARGS = ["-c", "user.name=memx-sync", "-c", "user.email=memx@localhost"] as const;
 
 // ---- PII 闸门：命中只报行号 + 规则名，绝不回显内容 ----
+// issue #33：规则分两层。block 层是高精度机器凭据形态，命中即拒推，**冻结**；
+// alert 层是语义型/低置信规则，只告警不阻断——命中照推，但明细落状态文件持久留痕。
+// 低置信为什么不能进 block：一次误报就 fail-closed 锁死整机同步（issue #10 实测锁了一整天）。
+
+export type PiiTier = "block" | "alert";
 
 export interface PiiHit {
   pattern: string;
   line: number;
+  tier: PiiTier;
 }
 
-const PII_RULES: ReadonlyArray<{ pattern: string; re: RegExp }> = [
+/** 带文件路径的命中（dry-run / push 结果用）。 */
+export interface PiiFileHit {
+  file: string;
+  pattern: string;
+  line: number;
+  tier: PiiTier;
+}
+
+export interface PiiRule {
+  pattern: string;
+  re: RegExp;
+  tier: PiiTier;
+}
+
+/** block 层（**冻结**，issue #33）：8 条高精度凭据形态永不下放到 alert 层。
+ *  新增形态只有同样高精度（几乎不可能误报）才允许进这一层。 */
+export const PII_BLOCK_RULES: ReadonlyArray<PiiRule> = [
   // 词边界 + 现实前缀/长度（issue #10）：旧写法 /sk-[A-Za-z0-9_-]{10,}/ 无边界，
   // 把 `risk-management-foo`、`task-spec-branch-name-verify` 中段出现的 `sk-…` 当成 key，
   // 一次词形误报就把整机同步 fail-closed 锁死。新规则三重约束：
@@ -75,15 +97,31 @@ const PII_RULES: ReadonlyArray<{ pattern: string; re: RegExp }> = [
   {
     pattern: "openai-key",
     re: /(^|[^A-Za-z0-9_-])sk-(?:(?:proj-|ant-)[A-Za-z0-9][A-Za-z0-9-]{5,}|(?=[A-Za-z0-9_-]{20,})[A-Za-z0-9_-]*(?=[A-Z0-9])[A-Za-z0-9_-]*)/,
+    tier: "block",
   },
-  { pattern: "aws-access-key", re: /AKIA[0-9A-Z]{16}/ },
-  { pattern: "github-token", re: /ghp_[A-Za-z0-9]{20,}/ },
-  { pattern: "github-pat", re: /github_pat_[A-Za-z0-9_]{20,}/ },
-  { pattern: "slack-token", re: /xox[baprs]-[A-Za-z0-9-]{10,}/ },
-  { pattern: "jwt", re: /eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/ },
-  { pattern: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
-  { pattern: "env-assignment", re: /^[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API[_-]?KEY)[A-Z0-9_]*\s*=\s*\S+/ },
+  { pattern: "aws-access-key", re: /AKIA[0-9A-Z]{16}/, tier: "block" },
+  { pattern: "github-token", re: /ghp_[A-Za-z0-9]{20,}/, tier: "block" },
+  { pattern: "github-pat", re: /github_pat_[A-Za-z0-9_]{20,}/, tier: "block" },
+  { pattern: "slack-token", re: /xox[baprs]-[A-Za-z0-9-]{10,}/, tier: "block" },
+  { pattern: "jwt", re: /eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/, tier: "block" },
+  { pattern: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, tier: "block" },
+  { pattern: "env-assignment", re: /^[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API[_-]?KEY)[A-Z0-9_]*\s*=\s*\S+/, tier: "block" },
 ];
+
+/** alert 层：低置信语义规则，**只告警不阻断**。命中照推，明细写进 `lastPiiScan` 与
+ *  `piiAlertLog`（状态文件，不剪龄，只封顶）——不能只依赖 7 天剪龄的 AlertStore。 */
+export const PII_ALERT_RULES: ReadonlyArray<PiiRule> = [
+  {
+    pattern: "password-statement",
+    // 「我的密码是 abc123」「password is hunter2」「密码：abc123」这类**陈述/赋值**形态。
+    // 值里要求至少一位数字：过滤「密码管理器」「password is required」这类讨论/说明。
+    // 这层本来就是低置信，宁可漏报，也不要把普通文档刷成告警。
+    re: /(?:密码|口令|passwd|password|passphrase)\s*(?:是|为|[:：=]|is)\s*(?=[^\s]*\d)[^\s]{3,}/i,
+    tier: "alert",
+  },
+];
+
+const PII_RULES: ReadonlyArray<PiiRule> = [...PII_BLOCK_RULES, ...PII_ALERT_RULES];
 
 export function scanSensitive(text: string): PiiHit[] {
   const hits: PiiHit[] = [];
@@ -91,7 +129,7 @@ export function scanSensitive(text: string): PiiHit[] {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     for (const rule of PII_RULES) {
-      if (rule.re.test(line)) hits.push({ pattern: rule.pattern, line: i + 1 });
+      if (rule.re.test(line)) hits.push({ pattern: rule.pattern, line: i + 1, tier: rule.tier });
     }
   }
   return hits;
@@ -193,18 +231,80 @@ function listFromWorkdir(workdir: string): SyncFileEntry[] {
 
 // ---- 状态文件：doctor / memx_status 的最近事实来源 ----
 
+/** 一次 PII 扫描的事实记录。`alertHits` 是 alert 层明细（只含 file/pattern/line，绝不回显内容），
+ *  随状态文件落盘，是「告警层留痕」的持久管道之一（另一条是 {@link SyncState.piiAlertLog}）。 */
+export interface PiiScanRecord {
+  at: string;
+  files: number;
+  /** 命中总数 = blocked + alerted */
+  hits: number;
+  /** block 层命中数（命中即拒推） */
+  blocked: number;
+  /** alert 层命中数（放行但留痕） */
+  alerted: number;
+  alertHits: Array<{ file: string; pattern: string; line: number }>;
+}
+
+/** alert 层命中的持久留痕（append-only、不剪龄、只封顶）。 */
+export interface PiiAlertRecord {
+  at: string;
+  file: string;
+  pattern: string;
+  line: number;
+}
+
 export interface SyncState {
   lastPushAt: string | null;
   lastPullAt: string | null;
   lastError: string;
   consecutiveFailures: number;
-  lastPiiScan: { at: string; files: number; hits: number } | null;
+  lastPiiScan: PiiScanRecord | null;
+  /** alert 层命中历史（issue #33）：**不随扫描覆盖**，也没有 7 天剪龄——低置信内容一旦被推出，
+   *  远端 git 历史是永久的，本地至少要留住"什么时候推过哪条规则"。封顶 200 条丢最旧。 */
+  piiAlertLog: PiiAlertRecord[];
   /** 上一次**成功** pull 记录的远端 branch sha（`git rev-parse origin/<branch>`）。
    *  下次 pull 用它做前置短路比对；旧状态文件没有该字段 → null = 未知 → 走真实 pull（向后兼容）。 */
   lastRemoteSha: string | null;
   /** 最近一次观测到的**未推提交数**（`git rev-list --count @{u}..HEAD`，issue #12 的可观测字段）。
    *  老状态文件没有该字段 → 0（向后兼容）。 */
   unsyncedCommits: number;
+}
+
+/** alert 留痕上限：只在条数上封顶，不做时间剪龄（与 AlertStore 的 7 天剪龄区分开）。 */
+const PII_ALERT_LOG_MAX = 200;
+
+function isPiiAlertDetail(value: unknown): value is { file: string; pattern: string; line: number } {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Partial<{ file: string; pattern: string; line: number }>;
+  return typeof v.file === "string" && typeof v.pattern === "string" && typeof v.line === "number";
+}
+
+function normalizePiiScan(raw: unknown): PiiScanRecord | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Partial<PiiScanRecord>;
+  if (typeof r.at !== "string" || typeof r.files !== "number" || typeof r.hits !== "number") return null;
+  return {
+    at: r.at,
+    files: r.files,
+    hits: r.hits,
+    // 旧状态只有 hits（分层之前所有规则都是 block 层）→ blocked=hits / alerted=0
+    blocked: typeof r.blocked === "number" ? r.blocked : r.hits,
+    alerted: typeof r.alerted === "number" ? r.alerted : 0,
+    alertHits: Array.isArray(r.alertHits) ? r.alertHits.filter(isPiiAlertDetail) : [],
+  };
+}
+
+function normalizePiiAlertLog(raw: unknown): PiiAlertRecord[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PiiAlertRecord[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Partial<PiiAlertRecord>;
+    const at = e.at;
+    if (typeof at !== "string" || !isPiiAlertDetail(e)) continue;
+    out.push({ at, file: e.file, pattern: e.pattern, line: e.line });
+  }
+  return out.slice(-PII_ALERT_LOG_MAX);
 }
 
 export function syncStatePath(): string {
@@ -227,10 +327,8 @@ export function readSyncState(path?: string): SyncState | null {
       lastPullAt: typeof raw.lastPullAt === "string" ? raw.lastPullAt : null,
       lastError: typeof raw.lastError === "string" ? raw.lastError : "",
       consecutiveFailures: typeof raw.consecutiveFailures === "number" ? raw.consecutiveFailures : 0,
-      lastPiiScan:
-        typeof raw.lastPiiScan === "object" && raw.lastPiiScan !== null
-          ? (raw.lastPiiScan as SyncState["lastPiiScan"])
-          : null,
+      lastPiiScan: normalizePiiScan(raw.lastPiiScan),
+      piiAlertLog: normalizePiiAlertLog(raw.piiAlertLog),
       lastRemoteSha: typeof raw.lastRemoteSha === "string" ? raw.lastRemoteSha : null,
       unsyncedCommits: typeof raw.unsyncedCommits === "number" ? raw.unsyncedCommits : 0,
     };
@@ -265,7 +363,7 @@ export interface DryRunReport {
   /** prepare 模式（--fetch）的说明：clone / 快进成功 / 为何没前进；未开 prepare 时为空串 */
   note: string;
   files: DryRunFileEntry[];
-  piiHits: Array<{ file: string; pattern: string; line: number }>;
+  piiHits: PiiFileHit[];
   remoteLog: string[];
 }
 
@@ -346,7 +444,7 @@ export function buildDryRunReport(opts: {
     return { ...f, added, removed };
   });
 
-  const piiHits: Array<{ file: string; pattern: string; line: number }> = [];
+  const piiHits: PiiFileHit[] = [];
   for (const f of files) {
     let text = "";
     try {
@@ -390,7 +488,7 @@ export interface SyncResult {
   ok: boolean;
   kind: "pushed" | "no-change" | "pulled" | "conflict" | "pii-blocked" | "error";
   message: string;
-  piiHits?: Array<{ file: string; pattern: string; line: number }>;
+  piiHits?: PiiFileHit[];
 }
 
 export interface SyncStatus {
@@ -452,6 +550,7 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   let lastError = persisted?.lastError ?? "";
   let consecutiveFailures = persisted?.consecutiveFailures ?? 0;
   let lastPiiScan = persisted?.lastPiiScan ?? null;
+  let piiAlertLog = persisted?.piiAlertLog ?? [];
   let lastRemoteSha = persisted?.lastRemoteSha ?? null;
   let unsyncedCommits = persisted?.unsyncedCommits ?? 0;
 
@@ -462,10 +561,26 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
       lastError,
       consecutiveFailures,
       lastPiiScan,
+      piiAlertLog,
       lastRemoteSha,
       unsyncedCommits,
     });
   };
+
+  /** alert 层命中落**持久管道**（issue #33）：状态文件 append-only、不剪龄，仅按条数封顶。
+   *  与 AlertStore 的 7 天剪龄分开——即时提醒会消失，这条留痕不会。
+   *  同 file+pattern+line 只记一次（同一处内容反复推不刷屏）；行号变化则算新记录。 */
+  function recordPiiAlerts(hits: Array<{ file: string; pattern: string; line: number }>, at: string): void {
+    if (hits.length === 0) return;
+    const seen = new Set(piiAlertLog.map((e) => `${e.file}\u0000${e.pattern}\u0000${e.line}`));
+    for (const h of hits) {
+      const key = `${h.file}\u0000${h.pattern}\u0000${h.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      piiAlertLog.push({ at, file: h.file, pattern: h.pattern, line: h.line });
+    }
+    if (piiAlertLog.length > PII_ALERT_LOG_MAX) piiAlertLog = piiAlertLog.slice(-PII_ALERT_LOG_MAX);
+  }
 
   // 同一事实不重复刷屏：定时拉在离线机器上每 30 分钟失败一次，不去重会把 200 条账本塞满同一行
   const alert = (level: "warn" | "critical", code: string, message: string): void => {
@@ -616,9 +731,10 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
   async function push(): Promise<SyncResult> {
     if (!active) return { ok: false, kind: "error", message: "sync 未启用（enabled=false 或 machineName 为空）" };
     try {
-      // PII 闸门先于任何 git 动作：命中即拒推，一个字节都不出门
+      // PII 闸门先于任何 git 动作：block 层命中即拒推，一个字节都不出门；
+      // alert 层只告警不阻断（issue #33），但命中明细必须落持久留痕。
       const files = listToSync();
-      const piiHits: Array<{ file: string; pattern: string; line: number }> = [];
+      const piiHits: PiiFileHit[] = [];
       for (const f of files) {
         let text = "";
         try {
@@ -628,12 +744,34 @@ export function createSync(opts: CreateSyncOpts): SyncModule {
         }
         for (const h of scanSensitive(text)) piiHits.push({ file: f.repoPath, ...h });
       }
-      lastPiiScan = { at: new Date().toISOString(), files: files.length, hits: piiHits.length };
-      if (piiHits.length > 0) {
-        lastError = `PII 闸门拦截：${piiHits.length} 处敏感信息命中`;
+      const blockHits = piiHits.filter((h) => h.tier === "block");
+      const alertHits = piiHits.filter((h) => h.tier === "alert");
+      const scannedAt = new Date().toISOString();
+      const alertDetails = alertHits.map((h) => ({ file: h.file, pattern: h.pattern, line: h.line }));
+      lastPiiScan = {
+        at: scannedAt,
+        files: files.length,
+        hits: piiHits.length,
+        blocked: blockHits.length,
+        alerted: alertHits.length,
+        alertHits: alertDetails,
+      };
+      // 先落持久留痕再动 git：即便下面的 clone/commit/push 失败，alert 命中也不会丢
+      if (alertDetails.length > 0) recordPiiAlerts(alertDetails, scannedAt);
+      save();
+      if (blockHits.length > 0) {
+        lastError = `PII 闸门拦截：${blockHits.length} 处敏感信息命中`;
         alert("critical", "SYNC_PII_BLOCKED", `${lastError}（${files.length} 个待推文件），已拒推`);
         save();
         return { ok: false, kind: "pii-blocked", message: lastError, piiHits };
+      }
+      if (alertHits.length > 0) {
+        // 只告警不阻断：内容照推，告警只是即时提醒；持久事实在 lastPiiScan / piiAlertLog
+        alert(
+          "warn",
+          "SYNC_PII_ALERTED",
+          `${alertHits.length} 处低置信 PII 命中（已放行；明细：pnpm sync:op pii）`,
+        );
       }
       return await withSyncLock(() => pushLocked(files));
     } catch (err) {
