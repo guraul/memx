@@ -244,7 +244,14 @@ function loadUserMessageFactory(): Promise<UserMessageFactory | null> {
   return userMessageFactory;
 }
 
-export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
+/**
+ * 挂载插件。
+ *
+ * 返回值是**只读诊断对象**（与 `host.persist` 落在内存里的那份同一个引用）：宿主观测用，
+ * 测试也用它在"负向断言"里等一个 quiescent 信号（`skipped.*` 自增 = 该判定已经执行完），
+ * 从而不必靠固定 sleep 猜轮末补记有没有跑完。**不改变任何行为**。
+ */
+export function apply(ctx: DshContext, config: DshMemxConfig = {}): DshDiagnostics {
   const diag = emptyDiagnostics();
   const alertStore = createFileAlertStore();
   const injectionCache = new InjectionSourceCache();
@@ -741,4 +748,6 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): void {
   } catch (err) {
     recordFailure(err);
   }
+
+  return diag;
 }

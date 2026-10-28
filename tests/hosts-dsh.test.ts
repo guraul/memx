@@ -148,21 +148,45 @@ function emitTurn(h: Harness, turn: number, assistant: string): void {
   h.emit("turn/end", turn, { reason: "success" });
 }
 
-const settle = (ms = 120): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 /**
- * 轮询等待条件成立（替代固定 sleep）：并发/满载下轮末补记可能晚于 120ms 完成。
- * 默认 3s 超时，失败信息带条件文本，便于定位是"没发生"还是"太慢"。
+ * 轮询等待条件成立（替代固定 sleep）：并发/满载下轮末补记可能晚于固定窗口完成。
+ * 默认 5s 超时，失败信息带条件文本，便于定位是"没发生"还是"太慢"。
  */
-async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+async function waitFor(predicate: () => boolean, label = "条件", timeoutMs = 5000): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) {
-      throw new Error("waitFor timeout: 条件在 3s 内未成立");
+      throw new Error(`waitFor timeout: ${label} 在 ${timeoutMs}ms 内未成立`);
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
 
+/**
+ * 负向断言的 quiescent 信号（#35）。
+ *
+ * `diag.skipped.<reason>` 只在该判定命中时自增，且判定一定在触发 `llm.stream` **之前** return。
+ * 所以"计数器到位"同时证明：① 这一轮的 turn/end 已经被处理（断言不是跑在事件分发之前）；
+ * ② 真的走到了这条判定并选择跳过。反过来若判定失效，计数器永远不涨 → waitFor 超时变红，
+ * 不会像固定 `settle(120)` 那样在判定执行前就断言成功（假绿）。
+ */
+async function expectSkipped(
+  diag: ReturnType<typeof apply>,
+  reason: keyof ReturnType<typeof apply>["skipped"],
+  expected = 1,
+): Promise<void> {
+  await waitFor(() => diag.skipped[reason] === expected, `skipped.${reason} === ${expected}`);
+}
+
+/**
+ * 正断言前的「等过节流窗口」：`throttleMinutes: 0.0001` 折合 6ms，两轮背靠背发事件时
+ * `Date.now()` 可能只差 0–1ms，第二轮会被自己的节流拦下（假红）。
+ * 只在**期望发生**的场景用——多等不会造成假绿。
+ */
+async function waitOutThrottleWindow(ms = 20): Promise<void> {
+  const start = Date.now();
+  await waitFor(() => Date.now() - start >= ms, `节流窗口 ${ms}ms`);
+}
 
 beforeAll(() => {
   mkdirSync(DIR, { recursive: true });
@@ -348,14 +372,14 @@ describe("轮末补记", () => {
 
   it("节流：10 分钟内的第二轮不再触发提炼", async () => {
     const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
-    apply(h.ctx, {});
+    const diag = apply(h.ctx, {});
 
     emitTurn(h, 1, `第一轮${SIGNAL}`);
     await waitFor(() => h.calls.length === 1);
     expect(h.calls.length).toBe(1);
 
     emitTurn(h, 2, `第二轮${SIGNAL}`);
-    await settle();
+    await expectSkipped(diag, "throttle");
     expect(h.calls.length).toBe(1);
   });
 
@@ -364,7 +388,8 @@ describe("轮末补记", () => {
     apply(h.ctx, { throttleMinutes: 0.0001 });
 
     emitTurn(h, 1, `第一轮${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 1);
+    await waitOutThrottleWindow();
     emitTurn(h, 2, `第二轮${SIGNAL}`);
     await waitFor(() => h.calls.length === 2);
 
@@ -373,7 +398,7 @@ describe("轮末补记", () => {
 
   it("本轮已有 memory_write → 跳过轮末补记", async () => {
     const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
-    apply(h.ctx, {});
+    const diag = apply(h.ctx, {});
 
     const tool = h.tools.find((t) => t.name === "memory_write")!;
 
@@ -388,17 +413,17 @@ describe("轮末补记", () => {
       message: { role: "assistant", content: [{ type: "text", text: `顺带一个信号${SIGNAL}` }] },
     });
     h.emit("turn/end", 1, { reason: "success" });
-    await settle();
+    await expectSkipped(diag, "written");
 
     expect(h.calls.length).toBe(0);
   });
 
   it("配置为空且会话没有模型 → 跳过提炼、不报错，并在诊断里留一条", async () => {
     const h = makeHarness({ agentOptions: undefined });
-    apply(h.ctx, {});
+    const diag = apply(h.ctx, {});
 
     emitTurn(h, 1, `信号${SIGNAL}`);
-    await settle();
+    await expectSkipped(diag, "noModel");
 
     expect(h.calls.length).toBe(0);
     expect(h.logs.some((l) => l.includes("取不到提炼模型"))).toBe(true);
@@ -406,17 +431,17 @@ describe("轮末补记", () => {
 
   it("autoRefine=false → 轮末不触发提炼（有信号也不调 llm.stream）", async () => {
     const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
-    apply(h.ctx, { autoRefine: false });
+    const diag = apply(h.ctx, { autoRefine: false });
 
     emitTurn(h, 1, `信号${SIGNAL}`);
-    await settle();
+    await expectSkipped(diag, "disabled");
 
     expect(h.calls.length).toBe(0);
   });
 
   it("autoRefine=false 只关自动补记：显式 memory_write 仍然写盘", async () => {
     const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
-    apply(h.ctx, { autoRefine: false });
+    const diag = apply(h.ctx, { autoRefine: false });
     const tool = h.tools.find((t) => t.name === "memory_write")!;
 
     const value = (await tool.execute({ text: "关了自动提炼也要能显式记住", name: "显式记住" }, { agent: h.agent })) as {
@@ -425,7 +450,7 @@ describe("轮末补记", () => {
     expect(value.ok).toBe(true);
 
     emitTurn(h, 1, `信号${SIGNAL}`);
-    await settle();
+    await expectSkipped(diag, "disabled");
     expect(h.calls.length).toBe(0);
     expect(readFileSync(join(DIR, "MEMORY.md"), "utf-8")).toContain("关了自动提炼也要能显式记住");
   });
@@ -454,9 +479,10 @@ describe("轮末补记", () => {
     );
 
     emitTurn(h, 1, `第一轮${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 1);
+    await waitOutThrottleWindow();
     emitTurn(h, 2, `第二轮${SIGNAL}`);
-    await settle();
+    await waitFor(() => h.calls.length === 2);
 
     // provider/model 拆包成功（否则会落到 session-p/session-m）；throttle 拆包成功（否则第二轮被 10 分钟节流）
     expect(h.calls.length).toBe(2);
@@ -467,10 +493,10 @@ describe("轮末补记", () => {
   it("宿主 volatile cell 的 autoRefine=false 同样能关掉补记", async () => {
     const cell = <T,>(value: T) => ({ get: () => value });
     const h = makeHarness({ agentOptions: { provider: "p", model: "m" } });
-    apply(h.ctx, { autoRefine: cell(false) } as unknown as Parameters<typeof apply>[1]);
+    const diag = apply(h.ctx, { autoRefine: cell(false) } as unknown as Parameters<typeof apply>[1]);
 
     emitTurn(h, 1, `信号${SIGNAL}`);
-    await settle();
+    await expectSkipped(diag, "disabled");
 
     expect(h.calls.length).toBe(0);
   });
@@ -479,7 +505,7 @@ describe("轮末补记", () => {
     let provider = "cfg-p1";
     let autoRefine = true;
     const h = makeHarness({ agentOptions: { provider: "session-p", model: "session-m" } });
-    apply(
+    const diag = apply(
       h.ctx,
       {
         provider: { get: () => provider },
@@ -496,6 +522,7 @@ describe("轮末补记", () => {
 
     // 模拟宿主 loader/volatile-update：cell 里的值原位变了
     provider = "cfg-p2";
+    await waitOutThrottleWindow();
     emitTurn(h, 2, `第二轮${SIGNAL}`);
     await waitFor(() => h.calls.length === 2);
     expect(h.calls.length).toBe(2);
@@ -504,7 +531,7 @@ describe("轮末补记", () => {
     // 关掉开关同样立即生效
     autoRefine = false;
     emitTurn(h, 3, `第三轮${SIGNAL}`);
-    await settle();
+    await expectSkipped(diag, "disabled");
     expect(h.calls.length).toBe(2);
   });
 

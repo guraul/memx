@@ -150,6 +150,8 @@ DSH 侧**没有** `pnpm run doctor` 的对应面板：诊断在内存 + 宿主�
 - CLI 走 `node --experimental-strip-types` 直载 `.ts`：**相对 import 必须带 `.ts` 扩展名**（缺了 tsc/vitest 都发现不了，运行时才 `ERR_MODULE_NOT_FOUND`）；`tests/scripts-smoke.test.ts` 真跑脚本兜这条，所以**加了 CLI 就要让它进冒烟测试**。
 - **提交前必过 typecheck + test**；不要 install、不要动 lockfile。
 - 测试 mock homedir 到独立 tmp home；**每测试文件用自己独立的 tmp home**（如 `/tmp/memx-test-home-<文件名>`）——共享 home 时并行线程下某文件的 afterAll 清理会把别的文件状态删掉，报假失败。撞上可疑竞态先 `rm -rf /tmp/memx-test-home*` 再跑一遍确认。
+- **并发安全，但仍建议单进程跑**（#35）：每文件的 tmp home 带 `process.pid`，4 进程同时跑全量也全绿（实测 4 进程 × 3 轮）。验证脚本 `bash scripts/test-concurrent.sh`（等价 `pnpm test:concurrent`）默认 4 进程 × 3 轮，`PROCS` / `ROUNDS` 可调；每进程用一次性 HOME（不碰真实库），任一进程失败即非零退出并打印**每进程的失败用例名**。CI 与本机同一份脚本；日常门禁仍跑单进程 `pnpm test`——并发只用于验证隔离性，会让负载翻倍而不更早暴露逻辑问题。
+- 负向断言（"不该发生"）**不要用固定 sleep**：等被测代码自己给出的 quiescent 信号（DSH 侧是 `apply()` 返回的 `diag.skipped.<reason>` 自增）再断言未发生，否则满载时会在判定执行前就断言成功，形成假绿。
 - 环境是 Node + vitest，**不是 bun**——别 import `bun:test`。
 
 ## 4. 调试流程
