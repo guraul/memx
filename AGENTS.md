@@ -29,15 +29,12 @@
 
 ## CODING GUIDELINES
 
-1. **编码前先思考** - 不要假设。明确陈述假设。如果不确定，请询问。
-2. **简洁优先** - 解决问题的最小代码量。不做推测性工作。如果写了200行可以是50行，请重写。
-3. **手术式修改** - 只触碰必须的部分。匹配现有风格。移除由你的修改导致的未使用代码。
-4. **目标驱动执行** - 定义成功标准。循环直到验证。
+见 `~/.dsh/AGENTS.md` §6（编码前思考 / 简洁优先 / 手术式修改 / 目标驱动执行 + 验证纪律）。
 
 ## 强制规定（完整红线清单见 CONVENTIONS.md §4）
 
 1. **提交前必过两项**：`pnpm run typecheck` 0 错误 + `pnpm test` 全绿（基线 **26 文件 / 416 用例**，低于即回归）。**不要 install、不要动 lockfile。**
-2. **包管理只用 pnpm**（全局规则）；不用 npm/yarn/bun/npx。
+2. **包管理器只用 pnpm**：见 `~/.dsh/AGENTS.md` §3。
 3. **两宿主导出契约相反，不能互抄**：`src/hosts/opencode/index.ts` **只 default 导出**（多导出任何命名函数都会被宿主当插件调用而 crash：`plugin config hook failed`；`~/.config/opencode/plugins/memx.ts` 的 re-export 同理）；`src/hosts/dsh/index.ts` **必须具名导出** `name` / `inject` / `Config` / `apply`（Cordis 不认 default）。
 4. **core 层零宿主依赖**：`src/core/` 禁止 import `@opencode-*` 或 `@deepseek-ai/*`；core 也不反向依赖宿主持有的实例（AlertStore 由宿主注入、面包屑字符串由宿主算好传入）。`src/hosts/dsh/**` 同样不得 import `@deepseek-ai/*`（结构类型手写在 `types.ts`）。
 5. **hosts 壳单向依赖 + 流水线只有一份**：OpenCode 侧 index → session-llm → context-shape，`session-llm.ts` 绝不能回头 import `index.ts`（成环），共享逻辑下沉 `context-shape.ts`；流水线语义（缓冲/节流/三态/写盘/报警）只在 `src/core/pipeline/session.ts`，宿主差异一律走 `PipelineHost` 窄口。
@@ -51,15 +48,10 @@
 13. **状态面板用 `pnpm run doctor`**，别用 `pnpm doctor`（pnpm 有同名内建命令，会静默跑成 pnpm 自检）。DSH 侧没有 doctor / `memx_status`，看宿主日志 `[memx] …`。
 14. **测试每文件用独立 tmp home**，绝不碰真实 `~/.opencode`；测试禁 `bun:test`。
 15. **判断插件真实状态先跑 doctor / 查 kv 表**——`memx_status` 回执只是固定字段（`alerts` 例外，以账本文件为准）。DSH 没有 kv：诊断只在内存 + 宿主日志，重启清零。
-16. **worktree 纪律（2026-10-17 用户明确「issue 关闭，相应的 worktree 也要清理」）**：
-    - ① **issue / PR 一旦关闭，必须立刻清理对应 worktree + 本地分支**：`git worktree remove --force <path>` → `git branch -D <branch>`（squash 合并后提交**不是** main 祖先，故用 `-D`）→ `git worktree prune` → `git worktree list` 确认只剩主工作区。
-    - ② **本仓的任务分支必须落在仓库外的 worktree 容器** `/Users/gubin/workspace/memx-worktrees/`，**绝不** checkout 在主仓 —— 本机 opencode **从主仓加载本插件源码**（`~/.config/opencode/plugins/memx.ts` → `src/hosts/opencode/index`），主仓切到未合并分支会让**插件加载到未合并代码**（已真实发生过一次）。
-    - ③ 建 worktree 一律**绝对路径 + 从主仓根执行**（在子目录里跑 `git worktree add .worktrees/X` 会嵌进错误的 worktree）；`scripts/pipeline/new-task.sh` 依赖 HTTPS fetch、在本机可能挂 → 先 `git fetch`（SSH）再手工 `git worktree add`。
-17. **读写记忆只走宿主工具（`memory_write` / `memory_search` / `forget`）或提炼单写者（#24 起 CLI 退役）**：DSH 与 opencode 两边都经宿主工具调 core——写 `writeProjectMemory`、检索 `searchMemories`、软删 `forgetMemory` + `writeMemoryIndex`（**同一写入口 + 同一把锁**）。原对外 CRUD 面 CLI（`mem` 脚本）已于 2026-10-23 删除（检索逻辑上提到 `src/core/store/memory-search.ts`）。
-    - **禁止直写 `~/.opencode/**` 的 markdown**：会绕过 `withFileLock` + 索引更新 + `.bak`，留下"**不在索引里的孤儿**"（2026-10-17 实测（当时的 `status` 子命令）报 `orphanFiles=3`：文件在磁盘、注入链看不到）与格式分叉。
-    - 读单条记忆就直接只读 `~/.opencode/projects/<slug>/.mem/<file>.md`；需要全文检索用 `memory_search`（大小写不敏感、返回 `file:line`）。
-    - 语义（规格如此，勿当 bug）：`memory_search` 缺省只查当前项目（不传 slug 才全库）；`forget` 是软删（文件进 `.mem/.trash/` + 移除索引条目），回执 `[memx] 已遗忘 N 条：…` / `[memx] 未匹配：<kw>`。
-    - 实现：`src/hosts/dsh/index.ts`（宿主工具）+ `src/core/store/memory-search.ts`（检索）；说明见 `docs/knowledge-base/OPERATIONS.md §3.1`（已退役说明）与 `src/hosts/dsh/README.md`「工具」。
+16. **worktree 纪律**：通用纪律见 `~/.dsh/AGENTS.md` §7。
+    - **本仓特有**：任务分支必须落在仓库外的 `/Users/gubin/workspace/memx-worktrees/`（本机 opencode 从主仓加载本插件源码，主仓切到未合并分支会让插件加载到未合并代码，已真实发生过一次）；`scripts/pipeline/new-task.sh` 依赖 HTTPS fetch、在本机可能挂 → 先 `git fetch`（SSH）再手工 `git worktree add`。
+17. **读写记忆**：使用规则见 `~/.dsh/AGENTS.md` §10。本仓实现：DSH 与 opencode 都经宿主工具调 core——写 `writeProjectMemory`、检索 `searchMemories`、软删 `forgetMemory` + `writeMemoryIndex`（**同一写入口 + 同一把锁**）。原对外 CRUD 面 CLI（`mem` 脚本）已于 2026-10-23 删除（检索逻辑上提到 `src/core/store/memory-search.ts`）。
+    - 实现位置：`src/hosts/dsh/index.ts`（宿主工具）+ `src/core/store/memory-search.ts`（检索）；说明见 `docs/knowledge-base/OPERATIONS.md §3.1`（已退役说明）与 `src/hosts/dsh/README.md`「工具」。
 18. **DSH 已实际安装并运行**：本仓 `src/hosts/dsh/` 是适配器，接线由独立仓的薄壳包 `dsh-plugin-memx`（`~/workspace/self-dsh-plugins/dsh-plugin-memx`）完成——它 link 进 DSH web profile、声明四个 `.volatile()` 配置字段、提供 Web 设置页「记忆」，并通过 TypeScript load hook 直接加载本仓 `src/hosts/dsh/index.ts`。**别再说"DSH 尚不能安装"**。三条已知缺口仍成立：`inject.*` 闸门未接、云同步未接、`turn/end` 未按 `reason` 过滤。⚠️ 薄壳包 `lib/index.js` 硬编码 `MEMX_ROOT=/Users/gubin/workspace/memx/`，搬仓/换 clone 必须同步改，否则加载旧代码。
 
 ## 常用命令（详情见 OPERATIONS.md）
