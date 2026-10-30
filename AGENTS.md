@@ -33,7 +33,7 @@
 
 ## 强制规定（完整红线清单见 CONVENTIONS.md §4）
 
-1. **提交前必过两项**：`pnpm run typecheck` 0 错误 + `pnpm test` 全绿（基线 **26 文件 / 416 用例**，低于即回归）。**不要 install、不要动 lockfile。**
+1. **提交前必过两项**：`pnpm run typecheck` 0 错误 + `pnpm test` 全绿（**当前基线** 31 文件 / 504 用例，低于即回归）。**不要 install、不要动 lockfile。**
 2. **包管理器只用 pnpm**：见 `~/.dsh/AGENTS.md` §3。
 3. **两宿主导出契约相反，不能互抄**：`src/hosts/opencode/index.ts` **只 default 导出**（多导出任何命名函数都会被宿主当插件调用而 crash：`plugin config hook failed`；`~/.config/opencode/plugins/memx.ts` 的 re-export 同理）；`src/hosts/dsh/index.ts` **必须具名导出** `name` / `inject` / `Config` / `apply`（Cordis 不认 default）。
 4. **core 层零宿主依赖**：`src/core/` 禁止 import `@opencode-*` 或 `@deepseek-ai/*`；core 也不反向依赖宿主持有的实例（AlertStore 由宿主注入、面包屑字符串由宿主算好传入）。`src/hosts/dsh/**` 同样不得 import `@deepseek-ai/*`（结构类型手写在 `types.ts`）。
@@ -57,7 +57,7 @@
 ## 常用命令（详情见 OPERATIONS.md）
 
 ```bash
-pnpm test            # vitest run（基线 26 文件 / 416 用例）
+pnpm test            # vitest run（**当前基线** 31 文件 / 504 用例）
 pnpm run typecheck   # tsc --noEmit
 pnpm run doctor      # 只读状态面板：alerts / memory files / opencode diag / sync（含 sync.unsyncedCommits）
 pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永不 push）
