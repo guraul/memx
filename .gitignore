@@ -7,3 +7,7 @@ docs/*
 
 # 共享 pipeline 包（本地 tgz 构建物）：锁文件钉不住它，不入库（全局 §3）
 /tools/pnpm-lock.yaml
+
+# pipeline 运行态：审核记录与请求产物（本机，不入库）
+.dsh-web/
+.tmp/
