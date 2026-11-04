@@ -4,3 +4,6 @@ docs/*
 !docs/knowledge-base/
 !docs/USER-GUIDE.md
 .DS_Store
+
+# 共享 pipeline 包（本地 tgz 构建物）：锁文件钉不住它，不入库（全局 §3）
+/tools/pnpm-lock.yaml

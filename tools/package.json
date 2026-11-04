@@ -1,0 +1,7 @@
+{
+  "name": "memx-tools",
+  "private": true,
+  "dependencies": {
+    "dsh-pipeline": "file:/Users/gubin/workspace/dsh-pipeline/dist/latest.tgz"
+  }
+}
