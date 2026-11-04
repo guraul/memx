@@ -1,0 +1,10 @@
+{
+  "repo": "guraul/memx",
+  "ci": [],
+  "highRisk": [
+    "src/core/**",
+    "src/hosts/**",
+    "package.json",
+    "pnpm-lock.yaml"
+  ]
+}
