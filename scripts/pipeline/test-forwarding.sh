@@ -151,22 +151,23 @@ expect_fail "prepare 缺 PR号" env DSH_PIPELINE_HOME="$PKG" PATH="$TMP/bin:$PAT
 expect_fail "publish 缺 --response" env DSH_PIPELINE_HOME="$PKG" PATH="$TMP/bin:$PATH" bash "$HERE/review.sh" publish 7
 
 echo "── ⑭ 自检：壳退出码非零时 expect 必须报红"
-# 这一条保护的是 expect 的 rc 闸门本身：桩包强制非零退出（STUB_RC=1），
-# 壳会转发失败、run() 记下非零退出码，成对断言必须因此报红。
-# 放在最后：子 shell 里的 LAST_RC / FAIL 不污染上面的结果。
-if ( LAST_RC=1; expect "自检：壳非零" "task 125" ) >/dev/null 2>&1; then
+# 先跑一次**成功**的 run：日志里因此确有期望子串「task 125 --root」，
+# 这样「报红」只可能来自 expect 的 rc 闸门——若闸门失效（缺省恒 0 或整段删掉），
+# 这里就会假绿，⑭ 才真正有判别力。
+run bash "$HERE/new-task.sh" 125 >/dev/null 2>&1
+if ( LAST_RC=1; expect "自检：壳非零" "task 125 --root" ) >/dev/null 2>&1; then
   echo "  ✗ ⑭ 自检失败：壳退出码非零，expect 仍判成功"
   FAIL=1
 else
-  echo "  ✓ ⑭ 壳非零时 expect 判失败"
+  echo "  ✓ ⑭ 壳非零时 expect 判失败（子串本身是匹配的，只能是 rc 闸门拦下）"
 fi
 
-# 再验一次真实路径：让桩包以 1 退出，壳必然失败，这次 run 的 LAST_RC 应为非零
+# 再验 run 侧：桩包以 1 退出时，run 必须记下非零退出码
 STUB_RC=1 run bash "$HERE/new-task.sh" 125 >/dev/null 2>&1
 if [[ "${LAST_RC}" -ne 0 ]]; then
-  echo "  ✓ ⑭ 桩包失败时壳退出码非零（$LAST_RC）"
+  echo "  ✓ ⑭ 桩包失败时 run 记下非零退出码（$LAST_RC）"
 else
-  echo "  ✗ ⑭ 桩包失败但壳仍退出 0"
+  echo "  ✗ ⑭ 桩包失败但 run 仍记 0"
   FAIL=1
 fi
 unset STUB_RC
