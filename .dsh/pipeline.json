@@ -1,5 +1,6 @@
 {
   "repo": "guraul/memx",
+  "worktreesDir": "~/workspace/memx-worktrees",
   "ci": [],
   "highRisk": [
     "src/core/**",
