@@ -3,6 +3,11 @@ dist/
 docs/*
 !docs/knowledge-base/
 !docs/USER-GUIDE.md
+# init 生成物：docs/pipeline 是 dsh-pipeline 的骨架，docs/archive 存历史文档，
+# 不放行就只能 `git add -f` 入库，且上游新增第三份文档时会被静默吞掉（#67）
+!docs/pipeline/
+!docs/pipeline/*.md
+!docs/archive/
 .DS_Store
 
 # 共享 pipeline 包（本地 tgz 构建物）：锁文件钉不住它，不入库（全局 §3）
