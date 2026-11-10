@@ -157,7 +157,7 @@ DSH 侧**没有** `pnpm run doctor` 的对应面板：诊断在内存 + 宿主�
 
 ## 4. 调试流程
 
-1. **先跑 `pnpm run doctor`**（只读面板：alerts / 记忆文件 / 记忆规模（顶距/龄期/trash）/ kv 诊断 / sync 五段）——多数问题一眼可见，且它不写盘不联网。
+1. **先跑 `pnpm run doctor`**（面板：alerts / 记忆文件 / 记忆规模（顶距/龄期/trash）/ kv 诊断 / sync 五段）——多数问题一眼可见；不联网、只读记忆文件，**唯一写入是顶距告警 append 报警账本**。
 2. **分清"哪一层没生效"**：信号没捕获 / 提炼没跑 / 写盘没落 / 注入没进。`memx_status` 的 captured → refinements → written → injections 四个计数就是四个关口。
 3. **查 kv 表拿真相**（`memx_status` 只是固定字段；alerts 以账本文件为准）：
    ```bash
