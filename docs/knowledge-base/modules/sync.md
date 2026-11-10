@@ -1,6 +1,7 @@
 # modules/sync.md — 多机云同步
 
-> 最后更新: 2026-10-28 · issue #10（PII 词边界）/ #12（未推提交不被 no-change 短路）/ #21（删除传播）/ #33（PII 规则分层）
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `src/core/sync.ts`, `src/core/config.ts`, `src/hosts/opencode/index.ts`, `scripts/sync-op.ts`, `scripts/sync-dry-run.ts`, `scripts/doctor.ts`, `tests/sync.test.ts`, `tests/scripts-smoke.test.ts`
 
 ## 职责
 

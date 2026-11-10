@@ -1,6 +1,7 @@
 # ARCHITECTURE.md — 架构与数据流
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `package.json`, `src/core/**`, `src/hosts/dsh/**`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/index.ts`, `scripts/doctor.ts`, `scripts/*`, `tests/scripts-smoke.test.ts`
 
 ## 1. 分层总览
 
@@ -127,13 +128,15 @@ hook 回调本身同步：文件读走 stat(mtimeMs+size) 缓存，配置走 30s
 | 跨进程文件锁（P0-4） | `core/store/lock.ts` | wx 独占创建 + mtime TTL 30s 夺锁 + 等锁超 5s 抛 `FileLockTimeoutError`；**只包 read-modify-write，绝不包 LLM** |
 | 健康日志迁出（P0-5） | `core/health/memory-health.ts` | auto-fix 结果只落 `diag.health` / alerts；**不再追加健康日志进 MEMORY.md**。唯一例外是**一行自替换报警面包屑**（见 §9.1） |
 | Track 1 去重自愈 | `core/store/user-md.ts` | `normalizeAnchor` 归一；append 前查全 doc 同文 active；落盘 `dedupeUserMd` 两遍扫描；命中写 `diag.lastWarnings`（`自愈：…`） |
+| 注入顶距预警（#30） | `core/health/memory-stats.ts` | 只读统计索引与各节字节占 `INJECT_MAX_BYTES` 的比例；顶距 <20% 时 `headroomAlert()` 返回 `HEADROOM_LOW`（doctor 每次运行 append，同 code+message 去重）；卡片龄期 / `.trash` 计数只展示不报警 |
+| created 一次性回填（#34） | `scripts/backfill-created.ts` + `store/memory-md.ts` 的 `patchCreatedDate` | 从 sync-repo 首次提交取日期（**排除引导/根提交**，判 unknown 不写），只补缺 `created` 的卡；无 frontmatter / 空 slug 遗留跳过；`--push` 必须（否则被下次 pull 覆盖） |
 | 报警单一事实源 | `core/alerts.ts` | 账本文件为准，`diag.alerts` 只写镜像；剪龄 7 天 + 封顶 200；成功即销账（`resolve(code)`） |
 | 检索只读 | `core/store/memory-search.ts` | 索引 slug ∪ 磁盘 slug（兜孤儿）；不写盘不加锁，最多看到上一版本 |
 | DSH 注入字节恒定 | `hosts/dsh/index.ts` | 每 agent 一次求值 + WeakMap 缓存；文本里**无时间/计数/随机** |
 
 ## 7. 诊断体系
 
-- **OpenCode 首选 `pnpm run doctor`**（`scripts/doctor.ts`）：只读面板四段（alerts / memory files / opencode diag / sync），不联网不写盘、退出码恒 0。⚠️ 不要用 `pnpm doctor`（pnpm 内建同名命令会静默接管）。
+- **OpenCode 首选 `pnpm run doctor`**（`scripts/doctor.ts`）：面板五段（alerts / memory files / memory stats / opencode diag / sync），不联网、只读记忆文件；**唯一写入是顶距告警 append 报警账本**，退出码恒 0。⚠️ 不要用 `pnpm doctor`（pnpm 内建同名命令会静默接管）。
 - **OpenCode 结构化诊断在 `ctx.storage`**（sqlite kv），键为 `"diag:" + deriveSlug(目录)`：
   - **键按目录隔离**：`ctx.storage` 的键是全局的，所有实例写同一行会互相覆盖；slug 隔离后同目录多实例仍会打架（`opencode run --server` 也会实例化插件）——排查优先看 serve 日志。
   - 首次出现时用旧全局 `diag` 值做一次性种子迁移。

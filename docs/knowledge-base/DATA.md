@@ -1,6 +1,7 @@
 # DATA.md — 数据存储与查询指南
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `src/core/protocol-template.ts`, `src/core/memory-types.ts`, `src/core/memory-write.ts`, `src/core/store/user-md.ts`, `src/core/store/memory-md.ts`, `src/core/store/lock.ts`, `src/core/alerts.ts`, `src/core/sync.ts`, `scripts/sync-protocol.ts`
 
 ## 1. 数据实体清单
 
@@ -110,7 +111,7 @@ Rewriting auth middleware for compliance.
 
 ## 4. 诊断查询（排查"它怎么又没记住"）
 
-**第一步永远先跑 `pnpm run doctor`**——只读面板四段（alerts / memory files / opencode diag / sync），不联网、不写盘、退出码恒 0。⚠️ 别用 `pnpm doctor`（pnpm 有同名内建命令，会静默跑成 pnpm 自检）。
+**第一步永远先跑 `pnpm run doctor`**——面板五段（alerts / memory files / memory stats / opencode diag / sync），不联网、只读记忆文件；**唯一写入是顶距告警 append 报警账本**，退出码恒 0。⚠️ 别用 `pnpm doctor`（pnpm 有同名内建命令，会静默跑成 pnpm 自检）。
 
 `memx_status` 工具只打固定字段；`evtCounts` / `lastCapture` / `rawContext` / `health` 只在 kv 行里（**`alerts` 例外**：以账本文件 `memx-alerts.json` 为准，kv 里那份是只写镜像）：
 

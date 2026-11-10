@@ -1,6 +1,7 @@
 # modules/host-dsh.md — DSH 宿主壳
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `src/hosts/dsh/**`, `src/hosts/dsh/index.ts`, `src/hosts/dsh/llm.ts`, `src/hosts/dsh/types.ts`, `src/hosts/dsh/README.md`, `src/core/pipeline/session.ts`, `tests/hosts-dsh.test.ts`, `package.json`
 
 ## 职责
 

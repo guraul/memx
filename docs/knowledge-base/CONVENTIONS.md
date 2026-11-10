@@ -1,6 +1,7 @@
 # CONVENTIONS.md — 约定、陷阱与修改红线
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `package.json`, `pnpm-lock.yaml`, `src/core/**`, `src/hosts/dsh/**`, `scripts/*`, `tests/scripts-smoke.test.ts`
 > 本文件承接旧版 AGENTS.md 的全部 Quirks（§1-§3），红线独立成 §4。**都是实机打出来的，不要凭生成的 .d.ts 想当然。**
 
 ## 1. 宿主契约陷阱（OpenCode v2.0.26 实测）
@@ -54,7 +55,7 @@
 |---|------|
 | 31 | tsconfig：`exactOptionalPropertyTypes`（可选字段不能显式赋 undefined，用 `!= null`）+ `noUncheckedIndexedAccess`（数组取值 `[0] ?? fallback`）+ strict |
 | 32 | 测试禁 `bun:test`（环境是 Node + vitest）；测试绝不碰真实 `~/.opencode`，每文件独立 tmp home（路径带 `process.pid`，两个进程并发跑也不互删目录） |
-| 33 | 基线：`pnpm test` **26 文件 / 416 用例** + `pnpm run typecheck` 0 错误，低于即回归；不要 install、不要动 lockfile |
+| 33 | 基线：`pnpm test` 全绿 + `pnpm run typecheck` 0 错误；**条数与 main 同跑对比，不写死数字**（用例随 PR 增减）；不要 install、不要动 lockfile |
 | 34 | `.opencodeignore` 是仓库约定文件（gitignore 风格），无宿主支持但 agent 应遵守 |
 | 35 | 信号捕获是 HTML 注释解析（<5ms）：Stage 1（事件路径）**绝不调 LLM** |
 | 36 | 所有 hook try-catch：插件错误绝不抛回宿主 |
@@ -101,6 +102,10 @@
 | 删掉可自愈报警的 `resolve` 调用 | 账本与 MEMORY.md 面包屑永远挂着旧账 |
 | 把 `diag.alerts` 当业务出口直接写 | 事实源在 `memx-alerts.json`；doctor / 面包屑 / `memx_status` 全读账本 |
 | pull 覆盖前去掉 `.bak.` 备份 | 静默吞掉本地未推的改动（首合并、推送失败后尤其危险） |
+| PII 规则混层（低置信进 block / 高精度凭据下放 alert） | 低置信进 block 会一次误报 fail-closed 锁死整机同步（#10 实测锁了一整天）；高精度凭据下放 alert 会漏推敏感内容（#33 分层：block 8 条拒推，alert 只留痕） |
+| 同名不同义直接覆盖原卡 | 旧内容永久丢失；正确做法是 fork `<slug>--<内容 hash>` 新卡 + 原卡记 `**Superseded by:**`（#31） |
+| `deriveSlug` 把「有目录但归一为空」与「入参为空」混为一谈 | 前者是合法根目录 → `root`（#36），后者是「宿主取不到 cwd」哨兵 → `""`；混淆会把无目录写盘静默记成根目录记忆 |
+| related 选条引入时间/计数/随机/`sort` | 破坏注入字节恒定 → DSH 缓存全失效（#32 纯确定性） |
 | 删除传播的基线判据放宽 | 见 modules/sync.md；朴素写法会误删"本地新增未推"的记忆（现场：7 条 forget 复活两天） |
 
 ## 5. 已知未接线 / 文档漂移（改配置或引用前先知道）

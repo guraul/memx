@@ -1,6 +1,7 @@
 # modules/host-opencode.md — OpenCode 宿主壳
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `src/hosts/opencode/index.ts`, `src/hosts/opencode/session-llm.ts`, `src/hosts/opencode/context-shape.ts`, `src/hosts/opencode/context-hook.ts`, `src/core/pipeline/session.ts`
 
 ## 职责
 

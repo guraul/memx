@@ -1,6 +1,7 @@
 # DSH-ADAPT.md — DSH 宿主适配（已落地并安装）
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `src/core/**`, `src/hosts/dsh/**`, `src/hosts/dsh/index.ts`
 > 性质：**两步都已落地，且已真机安装运行**。适配器在本仓 `src/hosts/dsh/`；接线薄壳包 `dsh-plugin-memx` 在**独立仓** `~/workspace/self-dsh-plugins/dsh-plugin-memx`，已 link 进 `~/.dsh/profiles/web`。能力矩阵来自本机 DSH 0.2.1-rc.2 实测。
 
 ## 0. 结论

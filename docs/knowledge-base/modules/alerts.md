@@ -1,6 +1,7 @@
 # modules/alerts.md — 报警账本
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `src/core/alerts.ts`, `src/core/health/memory-stats.ts`, `src/core/memory-write.ts`, `src/core/pipeline/session.ts`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/index.ts`, `scripts/alerts.ts`, `scripts/doctor.ts`, `tests/alerts.test.ts`
 
 ## 职责
 

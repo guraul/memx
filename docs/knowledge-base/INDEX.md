@@ -1,6 +1,7 @@
 # INDEX.md — 项目知识库索引总览
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `package.json`, `install.sh`, `tsconfig.json`, `src/core/pipeline/session.ts`, `src/hosts/opencode/index.ts`, `src/hosts/dsh/index.ts`, `src/core/protocol-template.ts`, `scripts/doctor.ts`, `src/core/config.ts`, `src/core/sync.ts`
 
 ## 使用说明
 
@@ -50,7 +51,7 @@
 | OpenCode 4 工具：reflect / memory_write / forget / memx_status | hosts | `src/hosts/opencode/index.ts`（`ctx.tool.transform`） |
 | DSH 3 工具：memory_write / memory_search / forget | hosts | `src/hosts/dsh/index.ts`（`ctx.tools.register`） |
 | DSH 接线 + 设置页（独立仓，已安装） | 外部 | `~/workspace/self-dsh-plugins/dsh-plugin-memx`（load hook 加载本仓 DSH 壳；Web 设置页「记忆」） |
-| doctor 只读面板（alerts/记忆文件/kv/sync 四段） | scripts | `scripts/doctor.ts`（`pnpm run doctor`） |
+| doctor 只读面板（alerts/记忆文件/记忆规模/kv/sync 五段） | scripts | `scripts/doctor.ts`（`pnpm run doctor`） |
 | 同步 dry-run 预览 | scripts | `scripts/sync-dry-run.ts`（`pnpm sync:dry-run`） |
 | 同步手工操作（status/pii/pull/push/both） | scripts | `scripts/sync-op.ts`（`pnpm sync:op`） |
 | 报警账本手工清理 | scripts | `scripts/alerts.ts`（`pnpm alerts:clear`） |
@@ -68,7 +69,7 @@
 | 运行时校验 | zod | ^4.4.3 | 信号/提案/配置 schema；LLM 返回强制校验 |
 | 语言 | typescript | ^7.0.2（dev） | strict + exactOptionalPropertyTypes + noUncheckedIndexedAccess；noEmit，宿主直接加载 TS |
 | 运行环境 | Node.js | ≥22.6（@types/node ^26.1.2） | ESM；CLI 脚本走 `node --experimental-strip-types` 直载 `.ts` |
-| 测试 | vitest | ^4.1.10（dev） | 基线 **26 文件 / 416 用例** |
+| 测试 | vitest | ^4.1.10（dev） | 与 main 同跑对比（不写死条数） |
 | 包管理 | pnpm | 仓库只维护 pnpm-lock.yaml（npm 残留的 `package-lock.json` 已于 2026-10-23 删除） | install.sh 强制 pnpm（无 pnpm 退出） |
 
 ## 仓库拓扑
@@ -92,6 +93,7 @@ memx/
 │   │   ├── refine/               # prompts / memory-prompts / refinement / memory-refinement / refine-outcome
 │   │   ├── store/                # user-md / memory-md / memory-search / markdown-lines / lock
 │   │   ├── health/memory-health.ts
+│   │   ├── health/memory-stats.ts    # 顶距/龄期/.trash 只读统计（#30）
 │   │   └── llm/throttle.ts
 │   └── hosts/
 │       ├── opencode/             # OpenCode 宿主壳
@@ -105,12 +107,15 @@ memx/
 │           ├── types.ts          # 官方 d.ts 的最小子集（零宿主 import）
 │           └── README.md         # DSH 侧详细说明（工具/配置/API 对照/已知限制）
 ├── scripts/                      # 阶段 4 CLI（node --experimental-strip-types 直载 .ts）
-│   ├── doctor.ts                 # 只读状态面板（四段，退出码恒 0）
+│   ├── doctor.ts                 # 只读状态面板（五段，退出码恒 0）
 │   ├── sync-dry-run.ts           # 同步预览（永不 push）
 │   ├── sync-op.ts                # 同步手工操作（与插件同一条 createSync 代码路径）
 │   ├── alerts.ts                 # 报警账本清理（--code / --dry-run）
-│   └── sync-protocol.ts          # 协议落盘（幂等）
-├── tests/                        # 26 文件 / 416 用例；每文件独立 tmp home；fixtures/
+│   ├── backfill-created.ts       # created 一次性回填（--dry-run / --push，#34）
+│   ├── test-concurrent.sh        # 并发测试（4 进程 × 3 轮）
+│   ├── sync-protocol.ts          # 协议落盘（幂等）
+│   └── pipeline/                 # dsh-pipeline 生成的入口 shim（勿手改）
+├── tests/                        # 每文件独立 tmp home；fixtures/；条数与 main 同跑对比
 ├── install.sh                    # 6 步安装器（只装 OpenCode 半边）
 ├── docs/knowledge-base/          # 本知识库
 ├── docs/USER-GUIDE.md            # 面向普通用户的说明
