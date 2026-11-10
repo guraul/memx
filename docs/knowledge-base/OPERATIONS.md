@@ -1,6 +1,7 @@
 # OPERATIONS.md — 安装、配置、测试与调试
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `package.json`, `pnpm-lock.yaml`, `install.sh`, `scripts/*`, `src/hosts/dsh/**`, `src/hosts/dsh/types.ts`, `src/core/health/memory-stats.ts`, `src/core/store/memory-search.ts`, `tests/scripts-smoke.test.ts`, `tests/hosts-dsh.test.ts`
 
 ## 1. 安装（install.sh，6 步幂等，**只装 OpenCode 半边**）
 
@@ -156,7 +157,7 @@ DSH 侧**没有** `pnpm run doctor` 的对应面板：诊断在内存 + 宿主�
 
 ## 4. 调试流程
 
-1. **先跑 `pnpm run doctor`**（只读面板：alerts / 记忆文件规模 / kv 诊断 / sync 四段）——多数问题一眼可见，且它不写盘不联网。
+1. **先跑 `pnpm run doctor`**（只读面板：alerts / 记忆文件 / 记忆规模（顶距/龄期/trash）/ kv 诊断 / sync 五段）——多数问题一眼可见，且它不写盘不联网。
 2. **分清"哪一层没生效"**：信号没捕获 / 提炼没跑 / 写盘没落 / 注入没进。`memx_status` 的 captured → refinements → written → injections 四个计数就是四个关口。
 3. **查 kv 表拿真相**（`memx_status` 只是固定字段；alerts 以账本文件为准）：
    ```bash

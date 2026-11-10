@@ -1,6 +1,7 @@
 # modules/store.md — 写盘层（USER.md / MEMORY.md / .mem）
 
-> 最后更新: 2026-10-25 · commit `c232168`
+> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 覆盖路径: `src/core/store/*.ts`, `src/core/memory-write.ts`, `scripts/*`, `tests/user-md.test.ts`
 
 ## 职责
 
