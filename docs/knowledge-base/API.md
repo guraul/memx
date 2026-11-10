@@ -53,11 +53,11 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 
 | 命令 | 子命令 / 参数 | 行为 | 退出码 | 文件 |
 |------|--------------|------|--------|------|
-| `pnpm run doctor` | 无 | 只读面板五段：alerts / memory files / memory stats / opencode diag / sync | 恒 0 | `scripts/doctor.ts` |
+| `pnpm run doctor` | 无 | 面板五段：alerts / memory files / memory stats / opencode diag / sync（只读记忆文件；唯一写入是顶距告警 append 报警账本） | 恒 0 | `scripts/doctor.ts` |
 | `pnpm sync:dry-run` | `-- --fetch` | 只读预览：待同步清单 + 双向行数 + PII + 远端 log；**永不 push** | 恒 0 | `scripts/sync-dry-run.ts` |
 | `pnpm sync:op` | `status` / `pii` / `pull` / `push` / `both`，可加 `--machine=<name>` | 手工同步通道（与插件同一 `createSync`）；`pii` 只列 file/行号/规则名 | 恒 0 | `scripts/sync-op.ts` |
 | `pnpm alerts:clear` | `--code=<CODE>` / `--dry-run` | 清理报警账本（不传 code = 清全部） | 恒 0 | `scripts/alerts.ts` |
-| `pnpm run backfill:created` | `--dry-run` / `--push` | created 一次性回填（数据源 = sync-repo git 首次提交）；`--push` 推送失败退 1 | 0 / 1 | `scripts/backfill-created.ts` |
+| `pnpm run backfill:created` | `--dry-run` / `--push` | created 一次性回填（数据源 = sync-repo git 首次提交，排除引导/根提交）；`--push` 推送失败退 1 | 0 / 1 | `scripts/backfill-created.ts` |
 | `pnpm test:concurrent` | `PROCS` / `ROUNDS` 环境变量 | 并发测试（默认 4 进程 × 3 轮，每进程一次性 HOME）；任一进程失败非零 | 0 / 非零 | `scripts/test-concurrent.sh` |
 | `node --experimental-strip-types scripts/sync-protocol.ts [目标路径]` | 目标路径（缺省 `~/.opencode/memx-protocol.md`） | 幂等落盘协议文本 | 0 | `scripts/sync-protocol.ts` |
 

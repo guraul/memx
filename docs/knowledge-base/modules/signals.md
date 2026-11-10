@@ -1,7 +1,7 @@
 # modules/signals.md — 信号捕获
 
 > 最后更新: 2026-10-25 | commit: `c232168`
-> 覆盖路径: `src/core/signals/*.ts`, `src/core/pipeline/session.ts`, `src/core/protocol-template.ts`, `src/hosts/opencode/context-shape.ts`, `tests/signal-capture.test.ts`
+> 覆盖路径: `src/core/signals/*.ts`, `src/core/pipeline/session.ts`, `src/core/protocol-template.ts`, `src/hosts/opencode/context-shape.ts`, `tests/signal-capture.test.ts`, `tests/memory-capture.test.ts`, `tests/hosts-context.test.ts`
 
 ## 职责
 

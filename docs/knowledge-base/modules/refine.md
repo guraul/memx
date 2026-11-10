@@ -1,7 +1,7 @@
 # modules/refine.md — LLM 批量提炼
 
 > 最后更新: 2026-10-25 | commit: `c232168`
-> 覆盖路径: `src/core/refine/*.ts`, `src/core/pipeline/session.ts`, `src/hosts/dsh/llm.ts`, `src/hosts/opencode/session-llm.ts`, `tests/refinement.test.ts`, `tests/hosts-context.test.ts`
+> 覆盖路径: `src/core/refine/*.ts`, `src/core/pipeline/session.ts`, `src/hosts/dsh/llm.ts`, `src/hosts/opencode/session-llm.ts`, `tests/refinement.test.ts`, `tests/memory-refinement.test.ts`, `tests/hosts-context.test.ts`
 
 ## 职责
 

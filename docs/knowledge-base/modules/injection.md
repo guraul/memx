@@ -1,7 +1,7 @@
 # modules/injection.md — system prompt 注入
 
 > 最后更新: 2026-11-10 | commit: `eca01f0`
-> 覆盖路径: `src/core/injection.ts`, `src/core/pipeline/injection-source.ts`, `src/core/protocol-template.ts`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/context-hook.ts`, `tests/injection.test.ts`
+> 覆盖路径: `src/core/injection.ts`, `src/core/pipeline/injection-source.ts`, `src/core/protocol-template.ts`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/context-hook.ts`, `tests/injection.test.ts`, `tests/injection-source.test.ts`, `tests/injection-related.test.ts`, `tests/context-hook.test.ts`, `tests/hosts-dsh.test.ts`, `tests/hosts-opencode-inject.test.ts`
 
 ## 职责
 
