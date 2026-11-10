@@ -1,7 +1,7 @@
 # modules/store.md — 写盘层（USER.md / MEMORY.md / .mem）
 
 > 最后更新: 2026-11-10 | commit: `eca01f0`
-> 覆盖路径: `src/core/store/*.ts`, `src/core/memory-write.ts`, `scripts/*`, `tests/user-md.test.ts`
+> 覆盖路径: `src/core/store/*.ts`, `src/core/memory-write.ts`, `scripts/backfill-created.ts`, `tests/user-md.test.ts`
 
 ## 职责
 
@@ -104,7 +104,7 @@ Track 2 写盘的同一把锁内跑 `runHealthMaintenance()`：死链（索引�
 ## 依赖关系
 
 - 依赖：`core/types.ts` / `core/memory-types.ts`、`markdown-lines.ts`、`lock.ts`。
-- 被依赖：`pipeline/session.ts`（写盘）、`memory-write.ts`、`health/memory-health.ts`、`store/memory-search.ts`、两个宿主壳、`scripts/*`。
+- 被依赖：`pipeline/session.ts`（写盘）、`memory-write.ts`、`health/memory-health.ts`、`store/memory-search.ts`、两个宿主壳、`scripts/backfill-created.ts`（回填）。
 
 ## 修改注意事项与红线
 

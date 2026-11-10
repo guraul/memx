@@ -1,7 +1,7 @@
 # DATA.md — 数据存储与查询指南
 
 > 最后更新: 2026-11-10 | commit: `eca01f0`
-> 覆盖路径: `src/core/protocol-template.ts`, `scripts/sync-protocol.ts`
+> 覆盖路径: `src/core/protocol-template.ts`, `src/core/memory-types.ts`, `src/core/memory-write.ts`, `src/core/store/user-md.ts`, `src/core/store/memory-md.ts`, `src/core/store/lock.ts`, `src/core/alerts.ts`, `src/core/sync.ts`, `scripts/sync-protocol.ts`
 
 ## 1. 数据实体清单
 

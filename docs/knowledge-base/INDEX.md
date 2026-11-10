@@ -93,7 +93,7 @@ memx/
 │   │   ├── refine/               # prompts / memory-prompts / refinement / memory-refinement / refine-outcome
 │   │   ├── store/                # user-md / memory-md / memory-search / markdown-lines / lock
 │   │   ├── health/memory-health.ts
-│   ├── health/memory-stats.ts    # 顶距/龄期/.trash 只读统计（#30）
+│   │   ├── health/memory-stats.ts    # 顶距/龄期/.trash 只读统计（#30）
 │   │   └── llm/throttle.ts
 │   └── hosts/
 │       ├── opencode/             # OpenCode 宿主壳
