@@ -7,8 +7,9 @@
 // 正文放进 `event.system`（packages/core/src/session/model-request.ts:110-116），我们只**追加**，
 // 绝不替换。
 //
-// 三块内容按固定顺序各占一个 SystemPart：协议 → Track 1 画像 → Track 2 记忆索引。
-// 缺文件 = 静默跳过（不报错、不塞占位符）；三块都缺 = 一个 part 都不加。
+// 四块内容按固定顺序各占一个 SystemPart：协议 → 智能体人设 → Track 1 画像 → Track 2 记忆索引。
+// 人设在前、事实在后：后出现的更能压住模型，人设失效退场时其余三块的优先级自然更高。
+// 缺文件 = 静默跳过（不报错、不塞占位符）；四块都缺 = 一个 part 都不加。
 
 /** 每块内容各自的行数上限。取 200 与 USER.md 写盘侧的 `isOverLimit(content, 200)` 对齐，
  *  写入端本来就会把画像压回这个量级，所以正常路径不会触发截断。 */
@@ -27,13 +28,21 @@ export const DEFAULT_INJECT_LIMITS: InjectionLimits = {
   maxBytes: INJECT_MAX_BYTES,
 };
 
-export type InjectionSourceId = "protocol" | "user" | "memory";
+export type InjectionSourceId = "protocol" | "persona" | "user" | "memory";
 
-/** 注入顺序即此数组顺序（协议在前：模型得先知道怎么发信号，才谈得上按画像作答）。 */
-export const INJECTION_SOURCE_ORDER: readonly InjectionSourceId[] = ["protocol", "user", "memory"] as const;
+/** 注入顺序即此数组顺序（协议在前：模型得先知道怎么发信号，才谈得上按画像作答；
+ *  人设紧跟协议、压在画像与索引之前：人设只约束语气，事实块后出现才压得住）。 */
+export const INJECTION_SOURCE_ORDER: readonly InjectionSourceId[] = [
+  "protocol",
+  "persona",
+  "user",
+  "memory",
+] as const;
 
 export interface InjectionSources {
   protocol?: string | null | undefined;
+  /** 智能体人设（PERSONA.md，全局一份）。缺省 = 没装人设，静默不注入。 */
+  persona?: string | null;
   user?: string | null | undefined;
   memory?: string | null | undefined;
 }
@@ -147,7 +156,7 @@ export function capSourceText(
 }
 
 /**
- * 把三块来源装配成注入用的 SystemPart 列表。
+ * 把四块来源装配成注入用的 SystemPart 列表。
  * 缺失 / 非字符串 / 只有空白 = 静默跳过（不报错、不塞占位符）。
  */
 export function buildInjectionParts(
@@ -179,6 +188,9 @@ export interface AgentGate {
   enabled: boolean;
   includeAgents: string[] | "all";
   excludeAgents: string[];
+  /** false = 只关人设块（其余三块照注入）；缺省/undefined = 开。
+   *  总开关仍是 `enabled`：它关掉时一个字节都不注入。 */
+  persona?: boolean;
 }
 
 export const DEFAULT_AGENT_GATE: AgentGate = { enabled: true, includeAgents: "all", excludeAgents: [] };

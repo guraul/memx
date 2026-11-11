@@ -13,7 +13,8 @@
     "sync:dry-run": "node --experimental-strip-types scripts/sync-dry-run.ts",
     "sync:op": "node --experimental-strip-types scripts/sync-op.ts",
     "alerts:clear": "node --experimental-strip-types scripts/alerts.ts",
-    "backfill:created": "node --experimental-strip-types scripts/backfill-created.ts"
+    "backfill:created": "node --experimental-strip-types scripts/backfill-created.ts",
+    "persona:sync": "node --experimental-strip-types scripts/sync-persona.ts"
   },
   "keywords": [
     "opencode",

@@ -1,6 +1,6 @@
 // memx · 注入内容的文件读取层（stat 校验缓存）。
 //
-// `context` hook **每个 step 触发一次**（一轮回复可能十几次）。三个文件每次
+// `context` hook **每个 step 触发一次**（一轮回复可能十几次）。四个文件每次
 // readFileSync 是白烧 IO，且长会话里 IO 抖动会直接体现在首 token 延迟上。
 // 这里用 statSync 的 mtimeMs + size 双校验：只 stat，不满足变化就复用上次的文本。
 // 文件缺失也缓存（记 mtimeMs=-1），这样"每秒十几次 stat 一个不存在的文件"也不会变成
@@ -37,8 +37,18 @@ interface CacheEntry {
 
 const MISSING = -1;
 
+/** 智能体人设的运行时文件名（固定值，刻意不作配置项；真源 `personas/whale-girl.md`，
+ *  由 `scripts/sync-persona.ts` 幂等复制过来）。不叫 AGENT.md：macOS 大小写不敏感会与
+ *  AGENTS.md 撞名，且 AGENTS.md / CLAUDE.md 会被宿主当指令自动加载。 */
+export const PERSONA_FILE_NAME = "PERSONA.md";
+
 export function getProtocolPath(): string {
   return join(homedir(), ".opencode", PROTOCOL_FILE_NAME);
+}
+
+/** 人设路径：`~/.opencode/PERSONA.md`（全局一份，不按项目分）。 */
+export function getPersonaPath(): string {
+  return join(homedir(), ".opencode", PERSONA_FILE_NAME);
 }
 
 export class InjectionSourceCache {
@@ -275,8 +285,11 @@ export function memoryInjectionForScope(
 }
 
 /**
- * 两个宿主共用的一份读法：协议 + 画像 + （当前节 + related）。
+ * 两个宿主共用的一份读法：协议 + 人设 + 画像 + （当前节 + related）。
  * 注入范围不再分叉（OpenCode 从整份索引收敛到本节 + related，DSH 从单节放宽到 + related）。
+ *
+ * 人设缺失 = 返回 null，不报警、不写日志——没装人设是常态，不是故障；
+ * 它与 protocol/user 一样走同一个 `InjectionSourceCache`（stat 校验，每 step 只 stat）。
  */
 export function readInjectionSourcesForSlug(
   cache: InjectionSourceCache,
@@ -285,6 +298,7 @@ export function readInjectionSourcesForSlug(
 ): InjectionSources {
   return {
     protocol: cache.read(getProtocolPath()),
+    persona: cache.read(getPersonaPath()),
     user: cache.read(getUserMdPath()),
     memory: memoryInjectionForScope(cache, cache.read(getMemoryIndexPath()), slug, directory).text,
   };
