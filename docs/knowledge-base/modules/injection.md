@@ -1,31 +1,34 @@
 # modules/injection.md — system prompt 注入
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
-> 覆盖路径: `src/core/injection.ts`, `src/core/pipeline/injection-source.ts`, `src/core/protocol-template.ts`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/context-hook.ts`, `tests/injection.test.ts`, `tests/injection-source.test.ts`, `tests/injection-related.test.ts`, `tests/context-hook.test.ts`, `tests/hosts-dsh.test.ts`, `tests/hosts-opencode-inject.test.ts`
+> 最后更新: 2026-11-11 | commit: `0a18a09`
+> 覆盖路径: `src/core/injection.ts`, `src/core/pipeline/injection-source.ts`, `src/core/protocol-template.ts`, `personas/whale-girl.md`, `scripts/sync-persona.ts`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/context-hook.ts`, `tests/injection.test.ts`, `tests/injection-source.test.ts`, `tests/injection-related.test.ts`, `tests/context-hook.test.ts`, `tests/persona-injection.test.ts`, `tests/hosts-dsh.test.ts`, `tests/hosts-opencode-inject.test.ts`
 
 ## 职责
 
-把三块内容（协议 / USER.md / MEMORY.md 索引）送进宿主已组装好的 system prompt，并管理 agent 闸门与截断。**两宿主的送法不同**：OpenCode 每 step **追加** SystemPart；DSH 每会话**注册一段** section。
+把四块内容（协议 / 智能体人设 PERSONA.md / USER.md / MEMORY.md 索引）送进宿主已组装好的 system prompt，并管理 agent 闸门与截断。**两宿主的送法不同**：OpenCode 每 step **追加** SystemPart；DSH 每会话**注册一段** section。
 
 ## 关键文件
 
 | 文件 | 职责 |
 |------|------|
 | `src/core/injection.ts` | 装配纯函数：来源顺序、200 行/25KB 上限、截断提示行、`shouldInjectAgent` 闸门真值表、`describeGate` |
-| `src/core/pipeline/injection-source.ts` | 三块来源读取 + `stat(mtimeMs+size)` 缓存（缺失也缓存，mtimeMs=-1）+ `InjectionSourceCache` + `buildMemoryInjection`（**当前节 + related**）/ `readInjectionSourcesForSlug` |
-| `src/hosts/opencode/context-hook.ts` | hook 判定与装配（子会话整体替换 vs 其余 append）——机制见 ARCHITECTURE.md §5 |
+| `src/core/pipeline/injection-source.ts` | 四块来源读取 + `stat(mtimeMs+size)` 缓存（缺失也缓存，mtimeMs=-1）+ `InjectionSourceCache` + `buildMemoryInjection`（**当前节 + related**）/ `readInjectionSourcesForSlug`；`PERSONA_FILE_NAME` 与 `getPersonaPath()` |
+| `src/hosts/opencode/context-hook.ts` | hook 判定与装配（子会话整体替换 vs 其余 append；`inject.persona=false` 在这里掐人设块）——机制见 ARCHITECTURE.md §5 |
 | `src/hosts/dsh/index.ts` | `ctx.systemPrompt.section({ order: 12000, interpolate: false })`；每会话一次求值 + WeakMap 缓存 |
 | `src/core/protocol-template.ts` | 协议文本常量（注入内容之一） |
+| `personas/whale-girl.md` + `scripts/sync-persona.ts` | 人设**真源**（社区二创，只约束语气）→ 幂等复制到 `~/.opencode/PERSONA.md`（`pnpm run persona:sync`） |
 
 ## 注入内容与顺序
 
-`INJECTION_SOURCE_ORDER`：**协议（memx-protocol.md）→ 画像（USER.md）→ 索引（MEMORY.md）**。每块独立一个 SystemPart（OpenCode）；DSH 把三块 join 成一段 section 文本。
+`INJECTION_SOURCE_ORDER`：**协议（memx-protocol.md）→ 人设（PERSONA.md）→ 画像（USER.md）→ 索引（MEMORY.md）**。每块独立一个 SystemPart（OpenCode）；DSH 把四块 join 成一段 section 文本。
 
+- **为什么人设排在协议之后、画像之前**：人设在前、事实在后——后出现的更能压住模型；人设命中失效条件静默退场时，画像与索引仍在原位，事实块的优先级自然更高。
+- **人设失效条件（准确度第一）**：`PERSONA.md` 不存在 / 空白 → 该块静默不注入（没装人设是常态，不是故障，不报警不写日志）；`inject.persona=false` → 只关人设，其余三块照注入；总开关 `inject.enabled=false` → 一个字节都不注入。人设只约束语气，不约束事实。
 - 上限各 **200 行或 25KB（先到先算，UTF-8 字节安全截断）**；常量 `INJECT_MAX_LINES` / `INJECT_MAX_BYTES` 在 injection.ts，**刻意不做成配置项**（写盘侧已把画像压在 200 行内，这是兜底而非日常旋钮）。
 - 截断时追加可见提示行：`[memx: truncated — showing first 200 of 512 lines ...]`——要避免的失败模式是静默截断。
 - Track 2 注入的是 **MEMORY.md 索引**，不是 `.mem` 全文（模型按 description 判断是否需要再读文件）。
 - **索引范围两宿主统一（#32）**：都注入 **当前节 + related**（`buildMemoryInjection`）。只取当前节会丢跨节记忆（实测 58% 的 hook 在讲别的项目），整份注入又会顶到 200 行上限。
-- 三块都缺 → hook 整个什么都不做（`kind: "empty"`）。
+- 四块都缺 → hook 整个什么都不做（`kind: "empty"`）。
 
 ## 当前节 + related（#32）
 
@@ -42,18 +45,19 @@
 | 维度 | OpenCode | DSH |
 |------|----------|-----|
 | 时机 | 每个 model step（context hook） | 每个会话第一次装配（section `text(context)` 求值一次） |
-| 文本 | 三块各一个 SystemPart，追加 | 三块 join 成一段，`order: 12000`、`interpolate: false` |
+| 文本 | 四块各一个 SystemPart，追加 | 四块 join 成一段，`order: 12000`、`interpolate: false` |
 | 稳定性 | 每 step 重算（能看到本会话新写） | 每会话恒定字节（WeakMap by agent） |
-| 闸门 | 走 `inject.*` | **不读 `inject.*`**（已知缺口） |
+| 闸门 | 走 `inject.*`（含 `persona`） | **不读 `inject.*`**（已知缺口，`persona` 同样不读） |
 
-DSH 的恒定字节是**缓存不失效的前提**：注入正文里不许出现时间/计数/随机。代价是本会话新写的记忆下个会话才可见（拍板语义）。
+DSH 的恒定字节是**缓存不失效的前提**：注入正文里不许出现时间/计数/随机。代价是本会话新写的记忆下个会话才可见（拍板语义）——**人设同理**：会话内改 `PERSONA.md` 不即时生效，下一会话才看到；不要为它破 WeakMap 缓存。
 
 ## agent 闸门（仅 OpenCode 生效）
 
-配置 `memx.config.json` 的 `inject.{enabled, includeAgents, excludeAgents}`：
+配置 `memx.config.json` 的 `inject.{enabled, includeAgents, excludeAgents, persona}`：
 
 - `enabled=false`：一个字节都不注入（协议 hook 照常工作）。
 - 生效集合 = `includeAgents`（`"all"` 或数组）减去 `excludeAgents`（永远压过 include）。
+- `persona=false`：**只关人设块**，协议 / 画像 / 索引照注入（文件名固定 `PERSONA.md`，不作配置项）。
 - **仓库里不硬编码任何 agent 名**（memx 必须宿主无关）——该排除谁由消费方填（例如会把 system prompt 原样回显的 agent 会把协议泄给用户）。
 - 生效中的闸门显示在诊断 `inject.gate`；配置 30 秒 TTL 后台重读（hook 每 step 同步触发，不能在里面 await），改配置无需重启宿主。
 
@@ -65,8 +69,8 @@ DSH 的恒定字节是**缓存不失效的前提**：注入正文里不许出现
 
 ## 依赖关系
 
-- 依赖：`core/protocol-template.ts`、`store/user-md.ts` / `store/memory-md.ts` 的读取函数、`config.ts`（闸门配置）。
-- 被依赖：`hosts/opencode/context-hook.ts`（append 三块）、`hosts/dsh/index.ts`（一段 section）、`core/pipeline/injection-source.ts`（来源读取）。
+- 依赖：`core/protocol-template.ts`、`store/user-md.ts` / `store/memory-md.ts` 的读取函数、`config.ts`（闸门配置）、`personas/whale-girl.md`（人设真源）。
+- 被依赖：`hosts/opencode/context-hook.ts`（append 四块）、`hosts/dsh/index.ts`（一段 section）、`core/pipeline/injection-source.ts`（来源读取）。
 
 ## 修改注意事项与红线
 
@@ -76,7 +80,8 @@ DSH 的恒定字节是**缓存不失效的前提**：注入正文里不许出现
 4. 上限常量不是配置项——真出现需要调的负载再暴露成配置（改动需同步 README 注入上限一节）。
 5. **DSH 的 section 文本必须字节恒定**：别加时间戳、计数、"最后更新"；也别改成每轮重算（缓存全失效）。
 6. 注入范围是「当前节 + related」，**不要退回整份 MEMORY.md**（顶距/噪声）也**不要退回单节**（丢跨节记忆）。related 的选条必须保持纯确定性：不许加时间、计数、随机或 `sort`。
+7. **人设只约束语气，不约束事实**：别拿 `PERSONA.md` 承载事实断言，也别为「开/关人设事实结论一致」写单元断言——语义测不了，那样只会得到假断言（设计文档「非目标」）；语义靠人工验收。
 
 ## 测试
 
-`tests/injection.test.ts`（顺序/上限/截断提示/闸门真值表）/ `injection-source.test.ts`（stat 缓存 + 三块读取）/ `injection-related.test.ts`（related 命中、停用词、同名去重、确定性、正文兜底、cap 联动）/ `context-hook.test.ts`（OpenCode 两分支互斥与退化）/ `hosts-dsh.test.ts`、`hosts-opencode-inject.test.ts`（两宿主接线 + 字节恒定）。
+`tests/injection.test.ts`（顺序/上限/截断提示/闸门真值表）/ `injection-source.test.ts`（stat 缓存 + 四块读取）/ `persona-injection.test.ts`（人设四条结构断言：顺序、缺块退场、`inject.persona=false` 只关人设、200 行截断提示只落人设块 + 同步脚本幂等）/ `injection-related.test.ts`（related 命中、停用词、同名去重、确定性、正文兜底、cap 联动）/ `context-hook.test.ts`（OpenCode 两分支互斥与退化）/ `hosts-dsh.test.ts`、`hosts-opencode-inject.test.ts`（两宿主接线 + 字节恒定）。

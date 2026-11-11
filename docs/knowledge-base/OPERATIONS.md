@@ -1,6 +1,6 @@
 # OPERATIONS.md — 安装、配置、测试与调试
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-11 | commit: `0a18a09`
 > 覆盖路径: `package.json`, `pnpm-lock.yaml`, `install.sh`, `scripts/*`, `src/hosts/dsh/**`, `src/hosts/dsh/types.ts`, `src/core/health/memory-stats.ts`, `src/core/store/memory-search.ts`, `tests/scripts-smoke.test.ts`, `tests/hosts-dsh.test.ts`
 
 ## 1. 安装（install.sh，6 步幂等，**只装 OpenCode 半边**）
@@ -33,6 +33,7 @@ bash install.sh            # 默认装到 ~/workspace/memx；bash install.sh <�
 | `inject.enabled` | boolean | false→**true** | 是否注入 |
 | `inject.includeAgents` | `"all"` \| string[] | `"all"` | 生效集合 |
 | `inject.excludeAgents` | string[] | `[]` | 永远压过 include |
+| `inject.persona` | boolean | true | 是否注入智能体人设块（`PERSONA.md`）；false 只关人设，其余三块照注入 |
 | `maxSignalsPerSession` | number | 20 | ⚠️ **已解析但无消费方**（缓冲上限硬编码 20，见 CONVENTIONS.md） |
 | `autoBackupCount` | number | 5 | ⚠️ **已解析但无消费方**（备份 5 版硬编码） |
 
