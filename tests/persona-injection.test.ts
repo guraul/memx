@@ -10,7 +10,7 @@
 // 隔离：homedir 指向本文件自己的临时目录（规则 14：每文件独立 tmp home）；
 // 同步脚本用子进程跑，显式传目标路径，绝不碰真实 ~/.opencode/PERSONA.md。
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -224,9 +224,31 @@ describe("scripts/sync-persona.ts 幂等", () => {
     expect(first.stdout).toContain("已写入");
     expect(readFileSync(target, "utf8")).toBe(readFileSync(PERSONA_SOURCE, "utf8"));
 
+    const mtimeBefore = statSync(target).mtimeMs;
     const second = run();
     expect(second.status).toBe(0);
     expect(second.stdout).toContain("无变化");
+    expect(readFileSync(target, "utf8")).toBe(readFileSync(PERSONA_SOURCE, "utf8"));
+    // 幂等的验收口径是「不写、不改 mtime」——只断言文案不够，宿主的 stat 缓存靠 mtime 判断。
+    expect(statSync(target).mtimeMs).toBe(mtimeBefore);
+  });
+
+  it("本地手改过 → 默认跳过，不覆盖用户内容；--force 才用真源覆盖", () => {
+    writeFileSync(target, "本地手改的人设\n", "utf8");
+    const mtimeBefore = statSync(target).mtimeMs;
+
+    const kept = run();
+    expect(kept.status).toBe(0);
+    expect(kept.stdout).toContain("本地已有改动");
+    expect(readFileSync(target, "utf8")).toBe("本地手改的人设\n");
+    expect(statSync(target).mtimeMs).toBe(mtimeBefore);
+
+    const forced = spawnSync(
+      process.execPath,
+      ["--experimental-strip-types", script, target, "--force"],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    expect(forced.status).toBe(0);
     expect(readFileSync(target, "utf8")).toBe(readFileSync(PERSONA_SOURCE, "utf8"));
   });
 });

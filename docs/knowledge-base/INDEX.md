@@ -181,7 +181,7 @@ dsh/index.ts ──→ dsh/llm.ts ──→ core/refine/refinement.ts（仅 LLMC
 同一条触发/捕获管道 → `SessionPipeline.refineMemory` → `refineMemory()`（独立提示词/缓冲/三态计数）→ `withFileLock` → `memory-md.applyMemoryProposals` 单遍应用（`.mem/*.md` 卡片 + 索引 upsert + `.trash/` 软删）→ 同锁内 `runHealthMaintenance()`（死链/孤儿，auto-fix ≤3）→ 写索引前套一层 `applyAlertBreadcrumb`（有 warn/critical 时在首行插一行 `<!-- memx:` 面包屑）→ 注入的是 **MEMORY.md 索引**（两宿主统一：当前节 + related，#32）。
 
 **Track 3（智能体人设，全局一份、只约束语气）**：
-真源 `personas/whale-girl.md` → `scripts/sync-persona.ts`（`pnpm run persona:sync`）幂等复制到 `~/.opencode/PERSONA.md` → 注入时排在协议之后、画像之前（`INJECTION_SOURCE_ORDER`：protocol → persona → user → memory）。人设只管"怎么说话"不管事实：文件缺失 / 空白、`inject.persona=false` 都静默退场，`inject.enabled=false` 则四块全不注入。
+真源 `personas/whale-girl.md` → `scripts/sync-persona.ts`（`pnpm run persona:sync`；只在缺失时写、本地改过不覆盖）复制到 `~/.opencode/PERSONA.md` → 注入时排在协议之后、画像之前（`INJECTION_SOURCE_ORDER`：protocol → persona → user → memory）。人设只管"怎么说话"不管事实：文件缺失 / 空白、`inject.persona=false` 都静默退场，`inject.enabled=false` 则四块全不注入。
 
 **两宿主的注入差异**：OpenCode 每 step 重算并 append 四个 SystemPart（能看到本会话新写的记忆）；DSH 用 `systemPrompt.section(order=12000)`，**每会话只算一次**（WeakMap by agent，字节恒定保缓存），代价是本会话新写的记忆下个会话才可见。
 

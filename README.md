@@ -160,10 +160,12 @@ If you prefer to do it step by step:
    }
    ```
 
-4. Write the signal protocol file (single source of truth is `src/core/protocol-template.ts`; never hand-edit the output). The script imports with an explicit `.ts` extension, so it needs **Node ≥ 22.6** (native strip types):
+4. Write the signal protocol file (single source of truth is `src/core/protocol-template.ts`; never hand-edit the output) and the agent persona file (single source of truth is `personas/whale-girl.md`). Both scripts import with an explicit `.ts` extension, so they need **Node ≥ 22.6** (native strip types):
    ```bash
    node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # idempotent: no rewrite when identical
+   node scripts/sync-persona.ts  ~/.opencode/PERSONA.md         # writes only if absent; keeps local edits
    ```
+   `PERSONA.md` is the optional third track — a tone-only persona injected ahead of `USER.md`. Skip step 4's second command if you do not want a persona: a missing file is silently skipped, never an error. To replace a hand-edited persona with the repo version, add `--force`.
 
 5. *(optional, forward-compat)* Add an `instructions` field to `~/.config/opencode/opencode.json`:
    ```json
@@ -172,11 +174,12 @@ If you prefer to do it step by step:
      "instructions": [
        "~/.opencode/USER.md",
        "~/.opencode/MEMORY.md",
-       "~/.opencode/memx-protocol.md"
+       "~/.opencode/memx-protocol.md",
+       "~/.opencode/PERSONA.md"
      ]
    }
    ```
-   On opencode v2.0.26 this array is **not read by the host** — injection already works without it (step 1–4 are sufficient, because the plugin appends the same three files itself). `install.sh` adds any missing entries idempotently and leaves every other key alone.
+   On opencode v2.0.26 this array is **not read by the host** — injection already works without it (step 1–4 are sufficient, because the plugin appends the same four files itself). `install.sh` adds any missing entries idempotently and leaves every other key alone.
 
 6. Make sure your reply rendering strips HTML comments — otherwise users see raw `<!-- STYLE_SIGNAL: ... -->` text. (The host does *not* strip them from the system prompt; that is a UI-layer concern.)
 
@@ -195,12 +198,13 @@ Customize via `~/.opencode/memx.config.json`:
 | `inject.enabled` | `boolean` | `true` | Whether the `context` hook injects memx content into the system prompt at all |
 | `inject.includeAgents` | `string[] \| "all"` | `"all"` | `"all"` = every agent; an array = only those agents |
 | `inject.excludeAgents` | `string[]` | `[]` | Always wins over `includeAgents` |
+| `inject.persona` | `boolean` | `true` | Inject the `PERSONA.md` tone block. `false` drops only that block; protocol / profile / index still inject. OpenCode only — DSH does not read `inject.*` |
 
 Injection gate: `enabled=false` injects nothing. Otherwise the effective set is `includeAgents` minus `excludeAgents`. memx hardcodes no agent name anywhere — which agents to exclude is the consumer's decision (for example, an agent that echoes its system prompt verbatim would leak the protocol to the user). The effective gate is shown as `inject.gate` in diagnostics. Config changes take effect within 30s without restarting the host.
 
 ### Injection Caps
 
-Each of the three injected sources is capped independently at **200 lines or 25KB**, whichever comes first. When a source is truncated, a visible line is appended to the injected text —
+Each of the four injected sources is capped independently at **200 lines or 25KB**, whichever comes first. When a source is truncated, a visible line is appended to the injected text —
 
 ```
 [memx: truncated — showing first 200 of 512 lines (18400 of 30000 bytes); 200-line cap]

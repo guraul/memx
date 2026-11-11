@@ -193,7 +193,12 @@ export interface AgentGate {
   persona?: boolean;
 }
 
-export const DEFAULT_AGENT_GATE: AgentGate = { enabled: true, includeAgents: "all", excludeAgents: [] };
+export const DEFAULT_AGENT_GATE: AgentGate = {
+  enabled: true,
+  includeAgents: "all",
+  excludeAgents: [],
+  persona: true,
+};
 
 /**
  * 真值表（exclude 永远压过 include）：
@@ -216,5 +221,7 @@ export function shouldInjectAgent(gate: AgentGate, agent: string | undefined | n
 export function describeGate(gate: AgentGate): string {
   const include = gate.includeAgents === "all" ? "all" : `[${gate.includeAgents.join(",")}]`;
   const exclude = gate.excludeAgents.length > 0 ? `-[${gate.excludeAgents.join(",")}]` : "";
-  return `${gate.enabled ? "on" : "off"} include=${include}${exclude}`;
+  // persona 单列：总开关 on 但人设被单独关掉时，注入块数会少一块，面板上要看得出原因。
+  const persona = gate.persona === false ? " persona=off" : "";
+  return `${gate.enabled ? "on" : "off"} include=${include}${exclude}${persona}`;
 }

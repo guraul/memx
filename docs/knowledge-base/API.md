@@ -60,7 +60,7 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 | `pnpm run backfill:created` | `--dry-run` / `--push` | created 一次性回填（数据源 = sync-repo git 首次提交，排除引导/根提交）；`--push` 推送失败退 1 | 0 / 1 | `scripts/backfill-created.ts` |
 | `pnpm test:concurrent` | `PROCS` / `ROUNDS` 环境变量 | 并发测试（默认 4 进程 × 3 轮，每进程一次性 HOME）；任一进程失败非零 | 0 / 非零 | `scripts/test-concurrent.sh` |
 | `node --experimental-strip-types scripts/sync-protocol.ts [目标路径]` | 目标路径（缺省 `~/.opencode/memx-protocol.md`） | 幂等落盘协议文本 | 0 | `scripts/sync-protocol.ts` |
-| `pnpm run persona:sync` | `-- [目标路径]`（缺省 `~/.opencode/PERSONA.md`） | 幂等复制人设真源 `personas/whale-girl.md`；内容相同打印「无变化」 | 0 | `scripts/sync-persona.ts` |
+| `pnpm run persona:sync` | `[--force] [目标路径]`（缺省 `~/.opencode/PERSONA.md`） | 复制人设真源 `personas/whale-girl.md`：目标不存在才写、内容相同打印「无变化」、**本地已改过则默认跳过**（`--force` 才覆盖） | 0 | `scripts/sync-persona.ts` |
 
 ⚠️ 状态面板必须用 `pnpm run doctor`，**别用 `pnpm doctor`**（pnpm 内建同名命令会静默接管）。
 

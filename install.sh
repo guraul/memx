@@ -150,8 +150,9 @@ echo ""
 # 协议正文只存在于 src/core/protocol-template.ts，这里跑同步脚本落盘（内容一致则不重写）。
 # 协议必须独立于 USER.md：USER.md 是 memx 每次提炼都会重写的数据文件，协议放在那里会被抹掉
 # （历史上真发生过：首次成功写盘就把协议块冲掉，之后所有信号捕获静默失效）。
-echo "[5/6] Writing signal protocol file..."
+echo "[5/6] Writing signal protocol and persona files..."
 PROTOCOL_MD="$OCP_DATA_DIR/memx-protocol.md"
+PERSONA_MD="$OCP_DATA_DIR/PERSONA.md"
 if command -v node >/dev/null 2>&1; then
   # 同步脚本用 .ts 扩展名 import，需 Node 22.6+（原生 strip types）；旧版给明确指引而不是崩
   if node "$REPO_PATH/scripts/sync-protocol.ts" "$PROTOCOL_MD"; then
@@ -161,6 +162,15 @@ if command -v node >/dev/null 2>&1; then
     echo "     node --experimental-strip-types $REPO_PATH/scripts/sync-protocol.ts $PROTOCOL_MD"
     exit 1
   fi
+  # 人设（注入第三轨）：目标不存在才写；已存在且内容不同则跳过——PERSONA.md 是用户会手改的文件，
+  # 安装器不能把本地改动覆盖掉。要用真源覆盖请显式跑 `pnpm run persona:sync -- --force`。
+  if node "$REPO_PATH/scripts/sync-persona.ts" "$PERSONA_MD"; then
+    echo "  -> $PERSONA_MD"
+  else
+    echo "  !! Failed to write $PERSONA_MD. Run manually:"
+    echo "     node --experimental-strip-types $REPO_PATH/scripts/sync-persona.ts $PERSONA_MD"
+    exit 1
+  fi
 else
   echo "  !! node not found on PATH; cannot generate $PROTOCOL_MD. Install Node 22.6+ and re-run."
   exit 1
@@ -168,14 +178,15 @@ fi
 echo ""
 
 # Step 6: Register instructions in opencode.json
-# 三个条目各司其职：前两个是累积数据（画像 / 记忆），第三个是协议（怎么发信号）。
+# 四个条目各司其职：前两个是累积数据（画像 / 记忆），第三个是协议（怎么发信号），
+# 第四个是人设（怎么说话）。
 # 幂等：已存在的条目不重复添加，别的条目不重排；opencode.json 不存在则新建；坏 JSON 直接报错
 # 退出，绝不覆盖用户配置。
 #
-# ⚠️ 诚实说明：**在 opencode v2.0.26 上这三个条目是 no-op**。宿主唯一的指令组装插件
+# ⚠️ 诚实说明：**在 opencode v2.0.26 上这四个条目是 no-op**。宿主唯一的指令组装插件
 # (packages/core/src/config/plugin/instruction.ts) 只从 AGENTS.md 发现指令，没有任何代码消费
 # 归一化后的 `config.instructions` —— 也就是说这里写的东西一行都不会进模型的 system prompt。
-# 真正把协议 + USER.md + MEMORY.md 送进 system prompt 的是**插件自己的 `context` hook**
+# 真正把协议 + 人设 + USER.md + MEMORY.md 送进 system prompt 的是**插件自己的 `context` hook**
 # (src/hosts/opencode/context-hook.ts)。这些条目留着只为向前兼容（哪天宿主支持了就能白捡），
 # 现在删掉它们对功能没有任何影响。
 echo "[6/6] Configuring instructions in opencode.json (forward-compat, inert on v2.0.26)..."
@@ -183,7 +194,7 @@ OCP_JSON="$OCP_CONFIG_DIR/opencode.json"
 
 if ! command -v node >/dev/null 2>&1; then
   echo "  !! node not found on PATH; cannot edit $OCP_JSON. Add manually:"
-  echo '     "instructions": ["~/.opencode/USER.md", "~/.opencode/MEMORY.md", "~/.opencode/memx-protocol.md"]'
+  echo '     "instructions": ["~/.opencode/USER.md", "~/.opencode/MEMORY.md", "~/.opencode/memx-protocol.md", "~/.opencode/PERSONA.md"]'
   exit 1
 fi
 
@@ -210,6 +221,7 @@ const managed = [
   "~/.opencode/USER.md",          // Track 1 累积画像
   "~/.opencode/MEMORY.md",        // Track 2 记忆索引
   "~/.opencode/memx-protocol.md", // 信号协议（两条轨）
+  "~/.opencode/PERSONA.md",       // Track 3 智能体人设（只约束语气）
 ];
 const added = [];
 for (const entry of managed) {

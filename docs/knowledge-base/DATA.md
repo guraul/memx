@@ -14,7 +14,7 @@
 | 记忆卡片 | `~/.opencode/projects/<slug>/.mem/*.md` | 单条记忆（frontmatter + Why/How to apply） | `store/memory-md.ts` / `memory-write.ts` |
 | 回收站 | `~/.opencode/projects/<slug>/.mem/.trash/<file>.<ts>` | deprecate/forget 的软删件 | deprecate / forget |
 | 协议产物 | `~/.opencode/memx-protocol.md` | 信号协议（真源 `src/core/protocol-template.ts`） | `scripts/sync-protocol.ts`（幂等） |
-| 智能体人设 | `~/.opencode/PERSONA.md` | 注入第三轨，全局一份、只约束语气（真源 `personas/whale-girl.md`，社区二创非官方） | `scripts/sync-persona.ts`（幂等，`pnpm run persona:sync`） |
+| 智能体人设 | `~/.opencode/PERSONA.md` | 注入第三轨，全局一份、只约束语气（真源 `personas/whale-girl.md`，社区二创非官方） | `scripts/sync-persona.ts`（`pnpm run persona:sync`：只在缺失时写，本地改过不覆盖，`--force` 才覆盖） |
 | 配置 | `~/.opencode/memx.config.json` | 运行配置（每次提炼即时重读） | 用户手写 |
 | 备份 | `~/.opencode/*.bak.<ts>` | USER.md / MEMORY.md 各留 5 版 | 写盘前自动 |
 | 锁 | `~/.opencode/.USER.md.lock` / `.MEMORY.md.lock` | 跨进程锁（正常路径不长期存在） | `store/lock.ts` |

@@ -16,7 +16,7 @@
 | `src/hosts/opencode/context-hook.ts` | hook 判定与装配（子会话整体替换 vs 其余 append；`inject.persona=false` 在这里掐人设块）——机制见 ARCHITECTURE.md §5 |
 | `src/hosts/dsh/index.ts` | `ctx.systemPrompt.section({ order: 12000, interpolate: false })`；每会话一次求值 + WeakMap 缓存 |
 | `src/core/protocol-template.ts` | 协议文本常量（注入内容之一） |
-| `personas/whale-girl.md` + `scripts/sync-persona.ts` | 人设**真源**（社区二创，只约束语气）→ 幂等复制到 `~/.opencode/PERSONA.md`（`pnpm run persona:sync`） |
+| `personas/whale-girl.md` + `scripts/sync-persona.ts` | 人设**真源**（社区二创，只约束语气）→ 复制到 `~/.opencode/PERSONA.md`（`pnpm run persona:sync`：缺失才写、本地改过默认跳过、`--force` 覆盖；tmp+rename 原子写） |
 
 ## 注入内容与顺序
 
