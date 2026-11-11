@@ -146,10 +146,10 @@ hook 回调本身同步：文件读走 stat(mtimeMs+size) 缓存，配置走 30s
 
 ## 8. 注入与缓存
 
-- 三块内容顺序：协议 → 画像 → 索引；各 200 行 / 25KB 上限（先到先算），截断追加可见提示行 `[memx: truncated — ...]`，绝不静默截断。
-- OpenCode：三块各占一个 SystemPart，append 在尾部，落在宿主 `cache:"auto"` 的断点之内——**注入本身不伤缓存**；失效只发生在 USER.md/MEMORY.md 被改写时。
-- DSH：一个 section（`order: 12000`，`interpolate: false`），文本 = 三块 join；**每会话只算一次**，字节恒定是缓存前提。代价：本会话新写的记忆本会话不可见（下个会话生效）。
-- 注入范围闸门 `inject.{enabled,includeAgents,excludeAgents}`：`enabled=false` 一个字节不注入；生效集合 = include 减 exclude；**代码里不硬编码任何 agent 名**。⚠️ **该闸门目前只在 OpenCode 壳生效，DSH 壳未接**（已知缺口，见 [CONVENTIONS.md](CONVENTIONS.md) §5）。
+- 四块内容顺序：协议 → 人设（`PERSONA.md`，可缺）→ 画像 → 索引；各 200 行 / 25KB 上限（先到先算），截断追加可见提示行 `[memx: truncated — ...]`，绝不静默截断。
+- OpenCode：四块各占一个 SystemPart（缺文件的块直接不出），append 在尾部，落在宿主 `cache:"auto"` 的断点之内——**注入本身不伤缓存**；失效只发生在 USER.md / MEMORY.md / PERSONA.md 被改写时。
+- DSH：一个 section（`order: 12000`，`interpolate: false`），文本 = 四块 join；**每会话只算一次**，字节恒定是缓存前提。代价：本会话新写的记忆 / 新改的人设本会话不可见（下个会话生效）。
+- 注入范围闸门 `inject.{enabled,includeAgents,excludeAgents,persona}`：`enabled=false` 一个字节不注入；生效集合 = include 减 exclude；`persona=false` 只关人设块；**代码里不硬编码任何 agent 名**。⚠️ **该闸门（含 `persona`）目前只在 OpenCode 壳生效，DSH 壳未接**（已知缺口，见 [CONVENTIONS.md](CONVENTIONS.md) §5）。
 
 ## 9. 阶段 4 架构
 
