@@ -1,6 +1,6 @@
 # API.md — 对外接口清单
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-11 | commit: `0a18a09`
 > 覆盖路径: `package.json`, `src/hosts/opencode/index.ts`, `src/hosts/dsh/index.ts`, `src/core/protocol-template.ts`, `scripts/doctor.ts`, `scripts/sync-op.ts`, `scripts/sync-dry-run.ts`, `scripts/alerts.ts`, `scripts/sync-protocol.ts`, `scripts/*.ts`
 
 ## 0. 边界说明
@@ -60,6 +60,7 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 | `pnpm run backfill:created` | `--dry-run` / `--push` | created 一次性回填（数据源 = sync-repo git 首次提交，排除引导/根提交）；`--push` 推送失败退 1 | 0 / 1 | `scripts/backfill-created.ts` |
 | `pnpm test:concurrent` | `PROCS` / `ROUNDS` 环境变量 | 并发测试（默认 4 进程 × 3 轮，每进程一次性 HOME）；任一进程失败非零 | 0 / 非零 | `scripts/test-concurrent.sh` |
 | `node --experimental-strip-types scripts/sync-protocol.ts [目标路径]` | 目标路径（缺省 `~/.opencode/memx-protocol.md`） | 幂等落盘协议文本 | 0 | `scripts/sync-protocol.ts` |
+| `pnpm run persona:sync` | `[--force] [目标路径]`（缺省 `~/.opencode/PERSONA.md`） | 复制人设真源 `personas/whale-girl.md`：目标不存在才写、内容相同打印「无变化」、**本地已改过则默认跳过**（`--force` 才覆盖） | 0 | `scripts/sync-persona.ts` |
 
 ⚠️ 状态面板必须用 `pnpm run doctor`，**别用 `pnpm doctor`**（pnpm 内建同名命令会静默接管）。
 
@@ -67,7 +68,7 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 
 | 文件 | 读方 | 生效语义 |
 |------|------|----------|
-| `~/.opencode/memx.config.json` | core `config.ts`（两宿主都读） | `refinementModel` / `inject.*` / `throttleMinutes` 即时重读；**`sync` 段只在 OpenCode setup 读一次**，改完重启 |
+| `~/.opencode/memx.config.json` | core `config.ts`（两宿主都读） | `refinementModel` / `inject.*`（`enabled` / `includeAgents` / `excludeAgents` / **`persona`**） / `throttleMinutes` 即时重读；**`sync` 段只在 OpenCode setup 读一次**，改完重启 |
 | DSH cordis 配置（`provider` / `model` / `autoRefine` / `throttleMinutes`） | `hosts/dsh/index.ts`（薄壳包 `dsh-plugin-memx` 声明字段） | 四个都是 volatile 字段，**每次轮末现读**；在 Web 设置页「设置 → 记忆」或 profile 的 `cordis.patch.yml` 改 |
 | `~/.config/opencode/plugins/memx.ts` | OpenCode 宿主 | 只 re-export default；改完重启 |
 
@@ -81,8 +82,8 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 |------|------|----------|
 | `SessionPipeline` | `core/pipeline/session.ts` | `refineStyle(force?)` / `refineMemory(force?)` / `flushAll(force)`；宿主提供 `PipelineHost`（loadConfig / createLLM / recordAlert / persist / decorateIndex / onMemoryWritten） |
 | `LLMClient` | `core/refine/refinement.ts` | `chat({ system, messages, temperature?, maxTokens?, model? }): Promise<string>` |
-| `buildInjectionParts` | `core/injection.ts` | `(sources) => { parts, ... }`；顺序协议→画像→索引，200 行/25KB 上限 |
-| `readInjectionSourcesForSlug` / `buildMemoryInjection` / `selectRelatedEntries` | `core/pipeline/injection-source.ts` | 两宿主共用的一份读法：协议 + 画像 + **当前节 + related**（related 为纯函数：目录末段 + 词边界、停用词、文件名去重、前 10 条） |
+| `buildInjectionParts` | `core/injection.ts` | `(sources) => { parts, ... }`；顺序协议→人设→画像→索引，200 行/25KB 上限 |
+| `readInjectionSourcesForSlug` / `buildMemoryInjection` / `selectRelatedEntries` | `core/pipeline/injection-source.ts` | 两宿主共用的一份读法：协议 + 人设（`PERSONA.md`，缺则 null）+ 画像 + **当前节 + related**（related 为纯函数：目录末段 + 词边界、停用词、文件名去重、前 10 条） |
 | `writeProjectMemory` | `core/memory-write.ts` | `(slug, input, breadcrumb?) => MemoryWriteOutcome`（锁内单遍） |
 | `searchMemories` | `core/store/memory-search.ts` | `(keyword, slug?) => SearchHit[]`，只读、不加锁 |
 | `forgetMemory` / `writeMemoryIndex` / `applyMemoryProposals` | `core/store/memory-md.ts` | 软删 / 索引写盘 / 单遍应用 |
@@ -98,3 +99,4 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 | `ctx.storage` 的 kv 键 | 宿主内部存储；`memx_status` 只打固定字段，键按 `diag:<slug>` 隔离（见 [DATA.md](DATA.md) §4） |
 | DSH `diag` 对象 | 只在内存，宿主重启即清零，不是持久接口 |
 | `~/.opencode/memx-protocol.md` | 协议产物，真源是 `src/core/protocol-template.ts` |
+| `~/.opencode/PERSONA.md` | 人设运行时副本（注入四块之一），真源是 `personas/whale-girl.md`，由 `scripts/sync-persona.ts` 幂等复制 |

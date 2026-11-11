@@ -16,6 +16,8 @@ const MemxInjectSchema = z.object({
   includeAgents: z.union([z.literal("all"), z.array(z.string())]).optional().default("all"),
   /** 永远压过 includeAgents。 */
   excludeAgents: z.array(z.string()).optional().default([]),
+  /** 人设块（PERSONA.md）开关。false = 只关人设，协议/画像/索引照注入；文件名固定不作配置项。 */
+  persona: z.boolean().optional().default(true),
 });
 
 /** 多机云同步（阶段 4 第二半）：默认关；machineName 为空同样视为不启动。 */
@@ -32,7 +34,12 @@ export const MemxConfigSchema = z.object({
   maxSignalsPerSession: z.number().int().positive().optional().default(20),
   autoBackupCount: z.number().int().positive().optional().default(5),
   throttleMinutes: z.number().int().positive().optional().default(10),
-  inject: MemxInjectSchema.optional().default({ enabled: true, includeAgents: "all", excludeAgents: [] }),
+  inject: MemxInjectSchema.optional().default({
+    enabled: true,
+    includeAgents: "all",
+    excludeAgents: [],
+    persona: true,
+  }),
   sync: MemxSyncConfigSchema.optional().default({
     enabled: false,
     repo: "guraul/memx-sync",

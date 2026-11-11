@@ -152,7 +152,7 @@ describe("InjectionSourceCache — mtime/size 双校验", () => {
   });
 });
 
-describe("readInjectionSourcesForSlug — 三块一起读（当前节 + related）", () => {
+describe("readInjectionSourcesForSlug — 四块一起读（当前节 + related）", () => {
   const INDEX = [
     `## work-proj-a`,
     `- [本项目](${join(DIR, "projects", "work-proj-a", ".mem", "a.md")}) - 本项目专属钩子`,
@@ -162,7 +162,7 @@ describe("readInjectionSourcesForSlug — 三块一起读（当前节 + related�
     "",
   ].join("\n");
 
-  it("全在 → 三个字段都有值，memory = 当前节 + related", () => {
+  it("全在 → 协议/画像/索引都有值，memory = 当前节 + related（没装人设 → persona 为 null）", () => {
     writeFileSync(join(DIR, "memx-protocol.md"), "protocol body", "utf-8");
     writeFileSync(join(DIR, "USER.md"), "user body", "utf-8");
     writeFileSync(join(DIR, "MEMORY.md"), INDEX, "utf-8");
@@ -185,12 +185,12 @@ describe("readInjectionSourcesForSlug — 三块一起读（当前节 + related�
     expect(sources.memory).toBeNull();
   });
 
-  it("全缺 → 三块都是 null（上层据此一个 part 都不加）", () => {
+  it("全缺 → 四块都是 null（上层据此一个 part 都不加）", () => {
     const sources = readInjectionSourcesForSlug(new InjectionSourceCache(), "work-proj-a", "/work/proj-a");
-    expect(sources).toEqual({ protocol: null, user: null, memory: null });
+    expect(sources).toEqual({ protocol: null, persona: null, user: null, memory: null });
   });
 
-  it("只读一次：三块都走同一个 cache（第二次调用不再重读 MEMORY.md）", () => {
+  it("只读一次：四块都走同一个 cache（第二次调用不再重读 MEMORY.md）", () => {
     writeFileSync(join(DIR, "memx-protocol.md"), "protocol body", "utf-8");
     writeFileSync(join(DIR, "USER.md"), "user body", "utf-8");
     writeFileSync(join(DIR, "MEMORY.md"), INDEX, "utf-8");

@@ -1,6 +1,6 @@
 # memx - 项目说明
 
-**Updated:** 2026-10-25
+**Updated:** 2026-11-11
 
 双宿主双轨记忆插件（OpenCode v2 + DSH；Track 1 用户风格 + Track 2 项目记忆），阶段 4 追加报警账本、doctor 只读面板与多机云同步；#17 追加 DSH 宿主壳与宿主无关流水线。项目知识库已按模块拆分到 `docs/knowledge-base/`，本文件只承担**路由**与**强制规定**两个职责。功能细节、数据格式、钩子机制、陷阱一律查阅知识库，不要在本文重复。
 
@@ -15,6 +15,7 @@
 | 改提炼（提示词 / 三态 / LLM 调用） | `docs/knowledge-base/modules/refine.md` |
 | 改写盘格式 / 单遍应用 / 去重自愈 / 检索 / 锁 / 备份 | `docs/knowledge-base/modules/store.md` |
 | 改注入内容 / 上限 / agent 闸门 / DSH 按项目节注入 | `docs/knowledge-base/modules/injection.md` |
+| 改人设（`personas/whale-girl.md` / `PERSONA.md` / 注入顺序 / `inject.persona` 开关） | `docs/knowledge-base/modules/injection.md` |
 | 改报警账本 / 面包屑 / 销账 / doctor 面板 | `docs/knowledge-base/modules/alerts.md` |
 | 改多机云同步 / PII 闸门 / 删除传播 / 手工通道 / dry-run | `docs/knowledge-base/modules/sync.md` |
 | 改 OpenCode 壳（事件循环 / 5 个工具 / 诊断 / 同步接线） | `docs/knowledge-base/modules/host-opencode.md` |

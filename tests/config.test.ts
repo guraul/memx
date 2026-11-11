@@ -38,16 +38,16 @@ describe("loadMemxConfig throttleMinutes", () => {
 describe("loadMemxConfig inject（注入闸门）", () => {
   const write = (cfg: unknown) => writeFileSync(configPath, JSON.stringify(cfg), "utf-8");
 
-  it("缺省 → 全开：enabled=true / includeAgents='all' / excludeAgents=[]", async () => {
+  it("缺省 → 全开：enabled=true / includeAgents='all' / excludeAgents=[] / persona=true", async () => {
     rmSync(configPath, { force: true });
     const config = await loadMemxConfig();
-    expect(config.inject).toEqual({ enabled: true, includeAgents: "all", excludeAgents: [] });
+    expect(config.inject).toEqual({ enabled: true, includeAgents: "all", excludeAgents: [], persona: true });
   });
 
   it("空 inject 对象 → 同样落到全开默认值（部分字段缺失不炸）", async () => {
     write({ inject: {} });
     const config = await loadMemxConfig();
-    expect(config.inject).toEqual({ enabled: true, includeAgents: "all", excludeAgents: [] });
+    expect(config.inject).toEqual({ enabled: true, includeAgents: "all", excludeAgents: [], persona: true });
   });
 
   it("读 enabled=false", async () => {
@@ -75,7 +75,7 @@ describe("loadMemxConfig inject（注入闸门）", () => {
   it("坏配置（includeAgents 既不是 'all' 也不是数组）→ 回落全默认，不抛", async () => {
     write({ inject: { includeAgents: 42 } });
     const config = await loadMemxConfig();
-    expect(config.inject).toEqual({ enabled: true, includeAgents: "all", excludeAgents: [] });
+    expect(config.inject).toEqual({ enabled: true, includeAgents: "all", excludeAgents: [], persona: true });
   });
 
   it("inject 坏掉不会连累别的字段（throttleMinutes 仍读得到）", async () => {

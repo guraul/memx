@@ -74,7 +74,7 @@ OpenCode 壳（DSH 壳用 `turn/end`，见[宿主支持](#宿主支持)）：
 | | OpenCode v2 | DSH（DeepSeek Harness） |
 | :--- | :--- | :--- |
 | 状态 | ✅ `install.sh` 安装 | ✅ 由配套薄壳包 `dsh-plugin-memx`（独立仓）安装 |
-| 注入 | `context` hook **每个 model step 追加 3 个 `SystemPart`**（协议 → 画像 → **当前项目一节 + related**） | 一个 `systemPrompt.section`（`order: 12000`），**每会话只算一次**（协议 + 画像 + **当前节 + related**） |
+| 注入 | `context` hook **每个 model step 追加 4 个 `SystemPart`**（协议 → 人设 → 画像 → **当前项目一节 + related**） | 一个 `systemPrompt.section`（`order: 12000`），**每会话只算一次**（协议 + 人设 + 画像 + **当前节 + related**） |
 | 工具 | `reflect` / `memory_write` / `forget` / `memx_status` | `memory_write` / `memory_search` / `forget` |
 | 提炼 LLM | 造子会话（`session.prompt`） | 一次性 `ctx.llm.stream` 调用（不造子会话） |
 | 自动捕获 | `session.execution.succeeded` + 会话游标 | `turn/end` 事件 + 会话级节流（无游标） |
@@ -127,7 +127,7 @@ bash install.sh
 
 > **信号协议从 `USER.md` 搬到了独立文件**。协议正文现在只存在于 `src/core/protocol-template.ts`，由 `scripts/sync-protocol.ts` 落盘，由**插件自己的 `context` hook** 注入。**不要**再把协议块手写进 `~/.opencode/USER.md`——那是 memx 每次提炼都会重写的数据文件，协议放里面会被抹掉。
 >
-> **内容到底怎么到模型眼前**：OpenCode 壳注册 `session.hook("context", …)`，把三块内容**追加**到宿主已组装好的 system prompt 后面（`agent.system` + 合并后的 `AGENTS.md` 正文）：`memx-protocol.md`（怎么发信号）→ `USER.md`（Track 1 画像）→ `MEMORY.md`（Track 2 索引）。缺文件静默跳过；三块都缺则整个 hook 什么都不做。提炼用的**子会话永远不被注入**——那一支仍整体替换 system 并锁 temperature 0.2。（DSH 壳改成一个 `systemPrompt.section`，见[宿主支持](#宿主支持)。）
+> **内容到底怎么到模型眼前**：OpenCode 壳注册 `session.hook("context", …)`，把四块内容**追加**到宿主已组装好的 system prompt 后面（`agent.system` + 合并后的 `AGENTS.md` 正文）：`memx-protocol.md`（怎么发信号）→ `PERSONA.md`（Track 3 人设，只约束语气）→ `USER.md`（Track 1 画像）→ `MEMORY.md`（Track 2 索引）。缺文件静默跳过；四块都缺则整个 hook 什么都不做。提炼用的**子会话永远不被注入**——那一支仍整体替换 system 并锁 temperature 0.2。（DSH 壳改成一个 `systemPrompt.section`，见[宿主支持](#宿主支持)。）
 >
 > `opencode.json` 的 `instructions` 数组在 **opencode v2.0.26 上是死字段**：宿主唯一的指令组装插件（`packages/core/src/config/plugin/instruction.ts`）只加载 `AGENTS.md`，没有任何代码消费归一化后的 `config.instructions`。所以 `install.sh` 写的那几条今天完全是 no-op，留着只为将来宿主若支持了能白捡。
 
@@ -163,6 +163,7 @@ bash install.sh
 4. 写出信号协议文件（协议正文的唯一真源是 `src/core/protocol-template.ts`，不要手改产物；脚本用 `.ts` 扩展名 import，需要 **Node ≥ 22.6** 原生 strip types）：
    ```bash
    node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md   # 幂等，内容一致不重写
+   node scripts/sync-persona.ts  ~/.opencode/PERSONA.md         # 只在文件不存在时写入，保留手改
    ```
 
 5. （可选，仅为向前兼容）在 `~/.config/opencode/opencode.json` 加 `instructions` 字段：
@@ -195,12 +196,13 @@ bash install.sh
 | `inject.enabled` | `boolean` | `true` | `context` hook 是否注入 memx 内容到 system prompt |
 | `inject.includeAgents` | `string[] \| "all"` | `"all"` | `"all"` = 全部 agent；数组 = 只有列出的 |
 | `inject.excludeAgents` | `string[]` | `[]` | 永远压过 `includeAgents` |
+| `inject.persona` | `boolean` | `true` | 是否注入 `PERSONA.md` 人设块。`false` 只掐这一块，协议 / 画像 / 索引照注入。**仅 OpenCode 生效**——DSH 不读 `inject.*` |
 
 闸门语义：`enabled=false` 时一个字节都不注入；否则生效集合 = `includeAgents` 减去 `excludeAgents`。**仓库里不硬编码任何 agent 名**（memx 必须宿主无关）——该排除哪些 agent 由消费方决定（例如会把 system prompt 原样回显的 agent 会把协议泄给用户）。生效中的闸门显示在诊断的 `inject.gate`。改配置 30 秒内生效，不必重启宿主。
 
 ### 注入上限
 
-三块内容各自独立封顶：**200 行或 25KB，先到先算**。一旦截断，注入文本末尾会追加一行可见提示：
+四块内容各自独立封顶：**200 行或 25KB，先到先算**。一旦截断，注入文本末尾会追加一行可见提示：
 
 ```
 [memx: truncated — showing first 200 of 512 lines (18400 of 30000 bytes); 200-line cap]

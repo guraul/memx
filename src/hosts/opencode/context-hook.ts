@@ -30,7 +30,7 @@ export interface ContextHookDeps {
   childSessions: ReadonlyMap<string, string>;
   /** 生效中的 agent 闸门（同步快照，配置在别处按 TTL 刷新）。 */
   gate: AgentGate;
-  /** 取三块来源内容（内部自带 stat 缓存）。 */
+  /** 取四块来源内容（内部自带 stat 缓存）。 */
   readSources: () => InjectionSources;
 }
 
@@ -39,7 +39,7 @@ export type ContextHookOutcome =
   | { kind: "child"; system: string }
   /** 非子会话但被 agent 闸门挡下：什么都没改 */
   | { kind: "gated" }
-  /** 三块来源全缺：什么都没改 */
+  /** 来源全缺：什么都没改 */
   | { kind: "empty" }
   /** 追加成功 */
   | { kind: "injected"; parts: number; facts: SourceFact[]; totalBytes: number; agent: string | undefined };
@@ -61,7 +61,10 @@ export function applyContextHook(event: ContextHookEvent, deps: ContextHookDeps)
 
   let built;
   try {
-    built = buildInjectionParts(deps.readSources());
+    const sources = deps.readSources();
+    // `inject.persona=false`：只掐掉人设块，协议 / 画像 / 索引照注入（总开关 enabled 在上面的闸门里）。
+    // 复制一份再改，绝不就地改 readSources 返回的对象——调用方可能缓存了同一份。
+    built = buildInjectionParts(deps.gate.persona === false ? { ...sources, persona: null } : sources);
   } catch {
     return { kind: "empty" };
   }
