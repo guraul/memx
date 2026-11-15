@@ -1,6 +1,6 @@
 # API.md — 对外接口清单
 
-> 最后更新: 2026-11-11 | commit: `0a18a09`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `package.json`, `src/hosts/opencode/index.ts`, `src/hosts/dsh/index.ts`, `src/core/protocol-template.ts`, `scripts/doctor.ts`, `scripts/sync-op.ts`, `scripts/sync-dry-run.ts`, `scripts/alerts.ts`, `scripts/sync-protocol.ts`, `scripts/*.ts`
 
 ## 0. 边界说明
@@ -83,6 +83,7 @@ memx **没有 HTTP / RPC 服务**，不监听端口，**也没有鉴权层**（�
 | `SessionPipeline` | `core/pipeline/session.ts` | `refineStyle(force?)` / `refineMemory(force?)` / `flushAll(force)`；宿主提供 `PipelineHost`（loadConfig / createLLM / recordAlert / persist / decorateIndex / onMemoryWritten） |
 | `LLMClient` | `core/refine/refinement.ts` | `chat({ system, messages, temperature?, maxTokens?, model? }): Promise<string>` |
 | `buildInjectionParts` | `core/injection.ts` | `(sources) => { parts, ... }`；顺序协议→人设→画像→索引，200 行/25KB 上限 |
+| `INJECTION_SOURCE_ORDER` / `shouldInjectAgent` / `describeGate` / `DEFAULT_AGENT_GATE` | `core/injection.ts` | 注入顺序常量与 agent 闸门（真值表 + 默认值含 `persona: true`）；`describeGate` 输出 `on include=… [persona=off]`——人设被单独关掉时，诊断面板要看得出注入块少了一块 |
 | `readInjectionSourcesForSlug` / `buildMemoryInjection` / `selectRelatedEntries` | `core/pipeline/injection-source.ts` | 两宿主共用的一份读法：协议 + 人设（`PERSONA.md`，缺则 null）+ 画像 + **当前节 + related**（related 为纯函数：目录末段 + 词边界、停用词、文件名去重、前 10 条） |
 | `writeProjectMemory` | `core/memory-write.ts` | `(slug, input, breadcrumb?) => MemoryWriteOutcome`（锁内单遍） |
 | `searchMemories` | `core/store/memory-search.ts` | `(keyword, slug?) => SearchHit[]`，只读、不加锁 |

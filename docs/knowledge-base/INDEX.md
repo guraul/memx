@@ -1,6 +1,6 @@
 # INDEX.md — 项目知识库索引总览
 
-> 最后更新: 2026-11-11 | commit: `0a18a09`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `package.json`, `install.sh`, `tsconfig.json`, `src/core/pipeline/session.ts`, `src/hosts/opencode/index.ts`, `src/hosts/dsh/index.ts`, `src/core/protocol-template.ts`, `scripts/doctor.ts`, `src/core/config.ts`, `src/core/sync.ts`
 
 ## 使用说明
@@ -42,7 +42,7 @@
 | 记忆库健康检查（死链/孤儿，auto-fix ≤3） | core | `src/core/health/memory-health.ts` |
 | 报警账本（单一事实源 + 剪龄 + 销账） | core | `src/core/alerts.ts` |
 | 多机云同步（Git 镜像 + PII 闸门 + 删除传播） | core | `src/core/sync.ts` |
-| 注入来源读取（当前节 + related；停用词 / 词边界 / 前 10 条） | core | `src/core/pipeline/injection-source.ts` |
+| 注入来源读取（人设 + 当前节 + related；停用词 / 词边界 / 前 10 条） | core | `src/core/pipeline/injection-source.ts` |
 | system prompt 注入装配（四块、200 行/25KB 上限、agent 闸门） | core | `src/core/injection.ts` |
 | context hook 判定（子会话整体替换 vs 其余 append） | hosts | `src/hosts/opencode/context-hook.ts` |
 | 信号协议唯一真源（v1.2.0） | core | `src/core/protocol-template.ts` |
@@ -56,6 +56,7 @@
 | 同步手工操作（status/pii/pull/push/both） | scripts | `scripts/sync-op.ts`（`pnpm sync:op`） |
 | 报警账本手工清理 | scripts | `scripts/alerts.ts`（`pnpm alerts:clear`） |
 | 协议落盘脚本（幂等写 memx-protocol.md） | scripts | `scripts/sync-protocol.ts`（install.sh 第 5 步调用） |
+| 人设落盘脚本（幂等写 `PERSONA.md`，缺失才写、本地改过默认跳过） | scripts | `scripts/sync-persona.ts`（`pnpm run persona:sync`；install.sh 第 5 步调用，`--force` 才覆盖） |
 
 > ⚠️ 历史文档里的 `src/cli/` **不存在**；对外 CRUD CLI（`mem` 脚本）已于 #24 退役，全部落 `scripts/`。
 
@@ -114,7 +115,9 @@ memx/
 │   ├── backfill-created.ts       # created 一次性回填（--dry-run / --push，#34）
 │   ├── test-concurrent.sh        # 并发测试（4 进程 × 3 轮）
 │   ├── sync-protocol.ts          # 协议落盘（幂等）
+│   ├── sync-persona.ts           # 人设落盘（缺失才写；本地改过默认跳过，--force 才覆盖）
 │   └── pipeline/                 # dsh-pipeline 生成的入口 shim（勿手改）
+├── personas/                     # 人设真源（whale-girl.md → sync 到 ~/.opencode/PERSONA.md）
 ├── tests/                        # 每文件独立 tmp home；fixtures/；条数与 main 同跑对比
 ├── install.sh                    # 6 步安装器（只装 OpenCode 半边）
 ├── docs/knowledge-base/          # 本知识库
@@ -206,6 +209,7 @@ dsh/index.ts ──→ dsh/llm.ts ──→ core/refine/refinement.ts（仅 LLMC
 | 改记忆文件格式 | `store/memory-md.ts`（writeMemoryFile/parse/serialize）+ `health/memory-health.ts` + `store/memory-search.ts` |
 | 改提炼模型 | OpenCode：`~/.opencode/memx.config.json` 的 `refinementModel`（即时生效）；DSH：cordis 配置的 `provider`/`model`（空 = 跟随会话） |
 | 改协议文本 | `protocol-template.ts`（递增 PROTOCOL_VERSION）→ 重跑 `scripts/sync-protocol.ts` |
+| 改人设语气 / 口癖 | `personas/whale-girl.md` → `pnpm run persona:sync`（本地改过要用 `--force` 才能被真源覆盖）→ 顺序与上限看 `core/injection.ts`，注入语义看 `modules/injection.md` |
 | 改报警行为/格式 | `core/alerts.ts`（store 语义 / 面包屑 / 面板）+ `core/pipeline/session.ts` 的 `recordAlert` 调用 + 两个宿主壳 |
 | 改同步行为 | `core/sync.ts`（镜像范围 / PII 规则 / 删除传播 / 重试与备份 / 锁）+ `core/config.ts` 的 sync 段 + opencode/index.ts 的触发点 |
 | 加/改 CLI 命令 | `scripts/*.ts` + `package.json` scripts + `tests/scripts-smoke.test.ts`（真跑才算过） |

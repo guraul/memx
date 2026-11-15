@@ -1,6 +1,6 @@
 # DSH-ADAPT.md — DSH 宿主适配（已落地并安装）
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `src/core/**`, `src/hosts/dsh/**`, `src/hosts/dsh/index.ts`
 > 性质：**两步都已落地，且已真机安装运行**。适配器在本仓 `src/hosts/dsh/`；接线薄壳包 `dsh-plugin-memx` 在**独立仓** `~/workspace/self-dsh-plugins/dsh-plugin-memx`，已 link 进 `~/.dsh/profiles/web`。能力矩阵来自本机 DSH 0.2.1-rc.2 实测。
 
@@ -43,7 +43,7 @@ memx/                                   # 本仓
 ├── src/core/…                          # 原样复用，零改动
 │   └── pipeline/
 │       ├── session.ts                  # SessionPipeline（两宿主共用流水线）
-│       └── injection-source.ts         # readInjectionSourcesForSlug（当前节 + related）
+│       └── injection-source.ts         # readInjectionSourcesForSlug（人设 + 当前节 + related）
 ├── src/hosts/opencode/…                # OpenCode 壳（695 行，只做接线）
 ├── src/hosts/dsh/                      # DSH 适配器（被薄壳包加载）
 │   ├── index.ts                        # name/inject/Config/apply：注入段 + 3 工具 + 轮末补记（743 行）
@@ -109,7 +109,7 @@ dsh plugin --profile web add /Users/gubin/workspace/self-dsh-plugins/dsh-plugin-
 
 ## 4. 运行时行为（实测）
 
-1. **注入**：每个会话第一次装配时求值一次 `buildInjectionParts(readInjectionSourcesForSlug(cache, slug, cwd))`（当前节 + related，#32），之后同一 `agent` 对象拿到同一串字节（WeakMap）。注入正文**不含时间/计数/随机**。
+1. **注入**：每个会话第一次装配时求值一次 `buildInjectionParts(readInjectionSourcesForSlug(cache, slug, cwd))`（协议 + 人设 + 画像 + 当前节 + related，#32），之后同一 `agent` 对象拿到同一串字节（WeakMap）。注入正文**不含时间/计数/随机**。
 2. **工具**：`memory_write` 参数与 OpenCode 版逐字段对齐；`memory_search` / `forget` 走 core（`searchMemories` / `forgetMemory` + 索引写盘）。`slug` 缺省按会话 cwd 推导；`memory_search` 推导不出 → 全库（只读），`forget` 推导不出 → 直接失败。
 3. **轮末补记**：`turn/end` → `autoRefine === false` 跳过 → 同 turn 幂等 → 本轮有工具写入则跳过 → 无信号跳过 → 会话级节流 → 解析路由（配置优先，回落会话模型；取不到 → 跳过）→ `pipeline.refineMemory(true)`。`queueMicrotask` 起步，**不 await 阻塞事件分发**。
 4. **提示**：写入成功且拿得到 `createUserMessage` 时，`agent.inject` 排一条 `[memx] 已记住 N 条`（≤120 字）。
@@ -127,7 +127,7 @@ dsh plugin --profile web add /Users/gubin/workspace/self-dsh-plugins/dsh-plugin-
 
 ## 6. 剩余缺口与风险（诚实清单）
 
-1. **`inject.*` 闸门未接**：DSH 直接注册 section，不读 `enabled` / `includeAgents` / `excludeAgents`。
+1. **`inject.*` 闸门未接**：DSH 直接注册 section，不读 `enabled` / `includeAgents` / `excludeAgents` / `persona`（新增的 `persona` 同样不读——DSH 侧关不掉人设块，只能删 `~/.opencode/PERSONA.md`）。
 2. **`turn/end` 不过滤 `reason`**：aborted / cancelled 轮次也进补记判定（有信号才提炼）。
 3. **云同步未接**：`sync.push/pull` 只在 OpenCode 壳接线；DSH 写盘不触发同步。
 4. **无诊断面板**：没有 `memx_status` / doctor 等价物；设置页只改配置，不显示计数。诊断只在内存 + 宿主日志 `[memx] …`，重启清零。

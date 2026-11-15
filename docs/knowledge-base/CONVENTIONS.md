@@ -1,6 +1,6 @@
 # CONVENTIONS.md — 约定、陷阱与修改红线
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `package.json`, `pnpm-lock.yaml`, `src/core/**`, `src/hosts/dsh/**`, `scripts/*`, `tests/scripts-smoke.test.ts`
 > 本文件承接旧版 AGENTS.md 的全部 Quirks（§1-§3），红线独立成 §4。**都是实机打出来的，不要凭生成的 .d.ts 想当然。**
 
@@ -30,10 +30,10 @@
 | 15 | **DSH 无 `session.deleted`**（连"删会话"操作都没有） | 本层不维护跨会话游标，也不需要清理逻辑；不要为了"对齐 OpenCode"硬造游标 |
 | 16 | **`turn/end` 目前不过滤 `reason`** | aborted / cancelled / error 的轮次也会进补记判定（有信号才提炼，所以多数时候无害）。收紧成只认 `reason.kind === "completed"` 前，别假设"没写盘=没信号" |
 | 17 | **注入每会话只求值一次**（WeakMap by agent） | 本会话新写的记忆本会话不可见（下个会话生效）——这是拍板语义，为的是字节恒定保缓存。**别改成每轮重算**：缓存全失效，且"同一会话内 system 变长变短"会打乱宿主断点 |
-| 18 | **装配上下文缺 `agent`/`scope` 时不缓存** | 没有会话键就没有安全缓存粒度，此时每次重算（slug 也取不到 → 只出协议 + 画像）。宁可多算，也不让 A 项目的小节串给 B 项目 |
+| 18 | **装配上下文缺 `agent`/`scope` 时不缓存** | 没有会话键就没有安全缓存粒度，此时每次重算（slug 也取不到 → 只出协议 + 人设 + 画像；人设与画像本来就不分项目，缺的只是项目小节）。宁可多算，也不让 A 项目的小节串给 B 项目 |
 | 19 | **DSH 侧无 kv、无 doctor、无 `memx_status`** | 诊断只在进程内存（`DshDiagnostics`）+ 宿主日志 `[memx] …`；重启清零。查"为什么没写"看 `skipped.*` 六类计数 |
 | 20 | **`ctx.llm.stream` 的文本有两种投影**：`text-delta` 增量与 `block-end` 整块 | 只会来一种；都给就优先增量（整块是同一段文本的重复投影）。`dsh/llm.ts` 已按此合并，别把两者相加 |
-| 21 | **`inject.*` 闸门只在 OpenCode 壳生效** | DSH 壳直接注册 section，不读 `enabled` / `includeAgents` / `excludeAgents`（已知缺口，见 §5）。别以为改了配置 DSH 就跟着变 |
+| 21 | **`inject.*` 闸门只在 OpenCode 壳生效** | DSH 壳直接注册 section，不读 `enabled` / `includeAgents` / `excludeAgents` / `persona`（已知缺口，见 §5）。别以为改了配置 DSH 就跟着变——**在 DSH 侧关 `inject.persona` 不会有任何效果**，人设照样注入 |
 | 22 | **不要照搬 OpenCode 的防御性补丁** | `codemode:false`、`childSessionIds`、`event.tools={}`、`toModelRef` 字符串省略分支在 DSH 全部无对应物——搬过去只是噪音 |
 | 23 | **DSH 提炼路由不猜** | `provider`/`model` 空 → 取会话 `agent.options`；仍取不到就**跳过本轮并记 `skipped.noModel`**，不回落其它 provider |
 
@@ -87,6 +87,8 @@
 | 单遍应用退回逐条重写 | 行号漂移改错条目 |
 | 健康日志写回 MEMORY.md | 见 §2-27；注释被序列化吃掉 |
 | 把协议块写进 USER.md | 提炼重写 USER.md 时冲掉协议 → 信号断供（install.sh / sync-protocol 是唯一落盘路径） |
+| 把人设真源写进 `USER.md`，或把 `PERSONA.md` 改名成 `AGENTS.md` / `CLAUDE.md` | 人设是**只约束语气**的独立第三轨（与 USER.md 画像、MEMORY.md 事实平级），混进 USER.md 会被提炼重写冲掉；改名则撞上宿主的指令自动加载（`AGENTS.md` / `CLAUDE.md` 会被当指令读），且 macOS 大小写不敏感会与 `AGENTS.md` 撞名——文件名 `PERSONA.md` 是固定值，**刻意不作配置项** |
+| `sync-persona.ts` 改成无条件覆盖 | `PERSONA.md` 是用户会手改的文件，安装器无条件覆盖会静默冲掉本地改动；语义必须是「缺失才写 → 内容相同不写不改 mtime → 本地改过默认跳过，`--force` 才覆盖」，且写入走 tmp + rename |
 | 提炼子会话被注入或触发 | 见 §2-29 / §1-8 |
 | 缓冲/失败处理混淆空数组与坏输出 | 见 §2-28 |
 | memory_write 去掉 `codemode:false`（OpenCode 侧） | 回执 chip 渲染不出（App 按工具名认） |
@@ -114,7 +116,7 @@
 |----|------|
 | DSH 薄壳包 | **已落地并安装**：独立仓 `~/workspace/self-dsh-plugins/dsh-plugin-memx`，已 link 进 `~/.dsh/profiles/web`（`dependencies` + `bundles` + `cordis.patch.yml` 的 `id: memx`）。改本仓 `src/hosts/dsh/**` 后重启 dsh web 即可（薄壳包直接加载源码） |
 | 薄壳包路径硬编码 | `dsh-plugin-memx/lib/index.js` 的 `MEMX_ROOT` 固定为 `/Users/gubin/workspace/memx/`；搬仓 / 多 checkout 必须同步改，否则静默加载旧代码 |
-| DSH 的 `inject.*` 闸门 | **未接**：`enabled` / `includeAgents` / `excludeAgents` 只对 OpenCode 生效 |
+| DSH 的 `inject.*` 闸门 | **未接**：`enabled` / `includeAgents` / `excludeAgents` / `persona` 只对 OpenCode 生效（DSH 侧改 `inject.persona` 无效果） |
 | DSH `turn/end` 的 reason 过滤 | **未做**：aborted / cancelled 轮次也进补记判定（有信号才提炼） |
 | DSH 诊断持久化 | **无**：只在内存 + 宿主日志，重启清零；没有 `memx_status` / doctor 面板 |
 | DSH 同步 | **未接**：`sync.push/pull` 只在 OpenCode 壳接线；DSH 写盘不触发云同步 |
