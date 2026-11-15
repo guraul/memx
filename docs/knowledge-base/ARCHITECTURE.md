@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — 架构与数据流
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `package.json`, `src/core/**`, `src/hosts/dsh/**`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/index.ts`, `scripts/doctor.ts`, `scripts/*`, `tests/scripts-smoke.test.ts`
 
 ## 1. 分层总览
@@ -88,7 +88,7 @@ applyProposals / applyMemoryProposals：单遍应用（parse 一次 → 内存�
    ↓
 USER.md / MEMORY.md + .mem/*.md（写前备份留 5 版；tmp 写 + rename 原子替换）
    ↓
-注入：两宿主同一份来源（协议 → 画像 → 当前节 + related）
+注入：两宿主同一份来源（协议 → 人设 → 画像 → 当前节 + related）
       OpenCode 每 step append；DSH 每会话一次 section（字节恒定）
    ↓（Track 2 写盘成功后，仅 OpenCode 壳接线）
 void sync.push()（PII 扫描 → 串行锁 → git；异步不 await，绝不阻塞写盘）
@@ -216,6 +216,6 @@ pull 流程：锁内 fetch → 前置短路（ls-remote sha 未变 → 只刷 la
 
 ### 9.3 CLI 与冒烟测试
 
-- CLI 全在 `scripts/`，由 `package.json` scripts 暴露：`pnpm run doctor` / `pnpm sync:dry-run` / `pnpm sync:op` / `pnpm alerts:clear`；`sync-protocol.ts` 直接 `node --experimental-strip-types` 调用。
+- CLI 全在 `scripts/`，由 `package.json` scripts 暴露：`pnpm run doctor` / `pnpm sync:dry-run` / `pnpm sync:op` / `pnpm alerts:clear` / `pnpm run persona:sync`；`sync-protocol.ts` 与 `sync-persona.ts` 由 install.sh 直接 `node --experimental-strip-types` 调用。
 - 走 `node --experimental-strip-types` **直接加载 `.ts`**——因此**相对 import 必须带 `.ts` 扩展名**（缺了 tsc/vitest 都发现不了，运行时才 `ERR_MODULE_NOT_FOUND`）。
 - `tests/scripts-smoke.test.ts` 真跑脚本兜这条：值导入缺扩展名只有真跑才炸。

@@ -1,6 +1,6 @@
 # OPERATIONS.md — 安装、配置、测试与调试
 
-> 最后更新: 2026-11-11 | commit: `0a18a09`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `package.json`, `pnpm-lock.yaml`, `install.sh`, `scripts/*`, `src/hosts/dsh/**`, `src/hosts/dsh/types.ts`, `src/core/health/memory-stats.ts`, `src/core/store/memory-search.ts`, `tests/scripts-smoke.test.ts`, `tests/hosts-dsh.test.ts`
 
 ## 1. 安装（install.sh，6 步幂等，**只装 OpenCode 半边**）
@@ -17,8 +17,8 @@ bash install.sh            # 默认装到 ~/workspace/memx；bash install.sh <�
 | 2 | `pnpm install` | 无 pnpm → 提示 `corepack enable pnpm` 后重跑，**不用 npm/yarn/bun** |
 | 3 | 写 `~/.config/opencode/plugins/memx.ts`：`export { default } from "<repo>/src/hosts/opencode/index";` | 只 default 导出 |
 | 4 | 确保 `~/.config/opencode/package.json` 有 v2 三件套（`@opencode-ai/plugin` v1 名自动改写；坏 JSON 报错不覆盖） | — |
-| 5 | `node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md`（幂等；需 **Node ≥22.6**） | — |
-| 6 | 幂等补 `opencode.json` 的 `instructions` 三条（**v2.0.26 上是死字段 no-op**，仅向前兼容） | — |
+| 5 | `node scripts/sync-protocol.ts ~/.opencode/memx-protocol.md` + `node scripts/sync-persona.ts ~/.opencode/PERSONA.md`（两条都幂等；需 **Node ≥22.6**）。人设**缺失才写**、本地改过默认跳过，要用真源覆盖显式加 `--force` | — |
+| 6 | 幂等补 `opencode.json` 的 `instructions` 四条（USER.md / MEMORY.md / memx-protocol.md / PERSONA.md；**v2.0.26 上是死字段 no-op**，仅向前兼容） | — |
 
 装后验证：**重启 OpenCode**（插件启动时加载）→ `/status` 显示 memx → 跑 `memx_status` 看 `inject.*`（`hookFires` 触发数 vs `injections` 真注入数）→ 确认 UI 渲染层会剥离 HTML 注释（宿主不从 system prompt 剥注释，这是渲染层的事）。
 
@@ -87,6 +87,7 @@ pnpm sync:dry-run    # 同步只读预览（加 `-- --fetch` 先取远端；永�
 pnpm sync:op -- status|pull|push|both [--machine=<name>]
 pnpm sync:op pii     # 只读 PII 自查：命中明细 file / 行号 / 规则名（绝不回显内容）
 pnpm alerts:clear [--code=SYNC_ERROR] [--dry-run]
+pnpm run persona:sync [-- --force]   # 人设落盘：缺失才写、本地改过默认跳过（--force 才用真源覆盖）
 ```
 
 ### 3.0 doctor 的 memory stats 段（#30）

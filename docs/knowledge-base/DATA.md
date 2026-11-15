@@ -1,7 +1,7 @@
 # DATA.md — 数据存储与查询指南
 
-> 最后更新: 2026-11-11 | commit: `0a18a09`
-> 覆盖路径: `src/core/protocol-template.ts`, `src/core/memory-types.ts`, `src/core/memory-write.ts`, `src/core/store/user-md.ts`, `src/core/store/memory-md.ts`, `src/core/store/lock.ts`, `src/core/alerts.ts`, `src/core/sync.ts`, `scripts/sync-protocol.ts`, `personas/whale-girl.md`, `scripts/sync-persona.ts`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
+> 覆盖路径: `src/core/protocol-template.ts`, `src/core/memory-types.ts`, `src/core/memory-write.ts`, `src/core/store/*.ts`, `src/core/alerts.ts`, `src/core/sync.ts`, `scripts/sync-protocol.ts`, `scripts/sync-persona.ts`, `personas/whale-girl.md`
 
 ## 1. 数据实体清单
 
@@ -137,6 +137,7 @@ sqlite3 ~/.local/share/opencode/opencode.db \
 | 报警（`recordAlert`） | `memx-alerts.json`（事实源）+ kv `diag.alerts`（镜像，仅 OpenCode）+ MEMORY.md 首行面包屑 | doctor / `memx_status` / **模型**（面包屑随索引被注入） |
 | 云同步 push | `memx-sync-repo/` → 远端 Git 仓（USER.md / MEMORY.md / `.mem/**`） | 其他机器的 pull；状态被 doctor 读取 |
 | 云同步 pull | 本地记忆文件（远端优先；本地差异先存 `.bak.<ts>`） | 下一 step / 下一会话的注入 |
+| `install.sh` 第 5 步 / `pnpm run persona:sync` | `~/.opencode/PERSONA.md`（缺失才写；本地改过默认跳过，`--force` 才用真源覆盖） | 注入第三轨的人设块；**不在云同步镜像内**（`walkMirror` 只认 USER.md / MEMORY.md / `.mem/**`） |
 | 主 AI（❗非 memx 行为） | 可能自行写 AGENTS.md 等文件 | 宿主指令组装——**这是所有权缺口，协议 v1.2.0 规则 9 是软约束** |
 
 **多宿主并发**：文件锁（mtime TTL + 锁内重读）已覆盖"两个进程同时读改写同一文件"；DSH 与 OpenCode **已实际共享** `~/.opencode/`（core 里 18 处硬编码路径默认值一致）。注意两宿主的注入缓存语义不同：OpenCode 每 step 重算，DSH 每会话只算一次——所以 DSH 会话里看不到本会话刚写的记忆，这是设计语义，不是丢失。

@@ -1,6 +1,6 @@
 # modules/injection.md — system prompt 注入
 
-> 最后更新: 2026-11-11 | commit: `0a18a09`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `src/core/injection.ts`, `src/core/pipeline/injection-source.ts`, `src/core/protocol-template.ts`, `personas/whale-girl.md`, `scripts/sync-persona.ts`, `src/hosts/dsh/index.ts`, `src/hosts/opencode/context-hook.ts`, `tests/injection.test.ts`, `tests/injection-source.test.ts`, `tests/injection-related.test.ts`, `tests/context-hook.test.ts`, `tests/persona-injection.test.ts`, `tests/hosts-dsh.test.ts`, `tests/hosts-opencode-inject.test.ts`
 
 ## 职责
@@ -64,7 +64,7 @@ DSH 的恒定字节是**缓存不失效的前提**：注入正文里不许出现
 ## 性能与缓存
 
 - 文件读走 stat(mtimeMs+size) 缓存；诊断写盘节流 5s。
-- 注入追加在尾部 → 落在宿主 `cache:"auto"` 断点（最后一个 distinct system part）之内，**注入不伤缓存**；失效只在 USER.md/MEMORY.md 被改写时发生。
+- 注入追加在尾部 → 落在宿主 `cache:"auto"` 断点（最后一个 distinct system part）之内，**注入不伤缓存**；失效只在 USER.md / MEMORY.md / PERSONA.md 被改写时发生。
 - 诊断计数：`hookFires`（hook 触发总数）vs `injections`（真正追加次数）。`hookFires > 0` 但 `injections == 0` → 先看 `inject.gate` 与 `inject.empty`。
 
 ## 依赖关系

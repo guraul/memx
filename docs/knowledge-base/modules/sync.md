@@ -1,6 +1,6 @@
 # modules/sync.md — 多机云同步
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `src/core/sync.ts`, `src/core/config.ts`, `src/hosts/opencode/index.ts`, `scripts/sync-op.ts`, `scripts/sync-dry-run.ts`, `scripts/doctor.ts`, `tests/sync.test.ts`, `tests/scripts-smoke.test.ts`
 
 ## 职责
@@ -91,6 +91,8 @@
 ## 镜像范围（`walkMirror` / `listToSync`）
 
 包含：`USER.md`、`MEMORY.md`、`projects/<slug>/.mem/**/*.md`（递归）。
+
+**不含 `PERSONA.md` 与 `memx-protocol.md`**：两者是安装产物（真源在本仓 `personas/whale-girl.md` / `src/core/protocol-template.ts`），由 install.sh 第 5 步 / `pnpm run persona:sync` 幂等落盘，不参与多机同步——每台机器各自装一次即可，镜像它们只会互相覆盖本地手改。
 
 排除：`.trash/`（文件名带时间戳，跨机互推必冲突）、`*.bak.*`（备份不进镜像）。
 

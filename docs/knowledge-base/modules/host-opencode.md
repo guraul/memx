@@ -1,6 +1,6 @@
 # modules/host-opencode.md — OpenCode 宿主壳
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `src/hosts/opencode/index.ts`, `src/hosts/opencode/session-llm.ts`, `src/hosts/opencode/context-shape.ts`, `src/hosts/opencode/context-hook.ts`, `src/core/pipeline/session.ts`
 
 ## 职责
@@ -13,7 +13,7 @@ memx 与 OpenCode v2 的唯一接缝：事件订阅、捕获编排、5 个工具
 |------|------|
 | `src/hosts/opencode/index.ts` | `Plugin.define({id:"memx", setup})`（695 行，原 883 行）：事件循环、游标管理、诊断写盘、报警装配（`recordAlert` / `applyAlertBreadcrumb`）、同步接线（`createSync` + 定时拉 + 三个 push 触发点）、5 工具、flushAll、dispose、`PipelineHost` 装配 |
 | `src/core/pipeline/session.ts` | 宿主无关流水线 `SessionPipeline`（`refineStyle` / `refineMemory` / `flushAll`）+ `PipelineHost` 窄口——两宿主共用 |
-| `src/hosts/opencode/context-hook.ts` | `session.hook("context")` 判定与装配（纯逻辑，抽出只为可测） |
+| `src/hosts/opencode/context-hook.ts` | `session.hook("context")` 判定与装配（纯逻辑，抽出只为可测）；`inject.persona=false` 在这里把人设块掐掉——**复制一份 sources 再改，绝不就地改 `readSources()` 返回的对象**（调用方可能缓存同一份） |
 | `src/hosts/opencode/session-llm.ts` | `createSessionLLMClient`：子会话五步法 + `toModelRef` |
 | `src/hosts/opencode/context-shape.ts` | v2 消息形状：`toMessages` / `planCapture` / `extractTurns`（index 与 session-llm 共享，防环） |
 
@@ -83,9 +83,9 @@ v2 工具结果形状（2026-10-12 真机实测）：结果在 **`state.content:
 2. index → session-llm → context-shape 单向依赖；`session-llm.ts` 绝不回头 import index.ts。
 3. slug 在 setup 时算一次（`currentSlug`），诊断键、projects 目录共用；目录即身份。
 4. 改 src 后**必须重启 OpenCode**（插件启动时加载一次）；`memx.config.json` 改动即时生效——**例外：`sync` 段只在 setup 读一次，改完必须重启**。
-5. 所有 hook 保持 try-catch；context hook 的退化路径见 modules/injection.md。
+5. 所有 hook 保持 try-catch；context hook 的退化路径见 modules/injection.md。四块注入里 `inject.persona=false` 只掐人设块（协议 / 画像 / 索引照注入），总开关 `enabled=false` 才是全部不注入。
 6. **同步的 push/pull 永远不 await**（在写盘路径上）；**报警永远走 `recordAlert`**（不要直接 push `diag.alerts`）。
 
 ## 测试
 
-`context-hook.test.ts`（hook 两分支与退化）/ `session-llm.test.ts`（子会话 LLMClient 适配）/ `hosts-context.test.ts`（`context-shape` 的 `toMessages` / `planCapture`）/ `hosts-opencode.search.test.ts`（#29：入口 `index.ts` 的插件级测试——最小 ctx stub 直调 `setup()`，覆盖 `memory_search` 的命中 / 空结果 / core 抛错三类回执 + 20 条上限 + 空 cwd 退化全库）/ `alerts.test.ts` / `sync.test.ts` / `scripts-smoke.test.ts`。`@opencode/plugin` 不真实加载；其余工具回执仍只在 DSH 侧由 `hosts-dsh.test.ts` 覆盖。
+`context-hook.test.ts`（hook 两分支与退化）/ `session-llm.test.ts`（子会话 LLMClient 适配）/ `hosts-context.test.ts`（`context-shape` 的 `toMessages` / `planCapture`）/ `hosts-opencode.search.test.ts`（#29：入口 `index.ts` 的插件级测试——最小 ctx stub 直调 `setup()`，覆盖 `memory_search` 的命中 / 空结果 / core 抛错三类回执 + 20 条上限 + 空 cwd 退化全库）/ `persona-injection.test.ts`（四块顺序、缺块退场、`inject.persona=false` 只关人设、200 行截断提示、同步脚本幂等）/ `alerts.test.ts` / `sync.test.ts` / `scripts-smoke.test.ts`。`@opencode/plugin` 不真实加载；其余工具回执仍只在 DSH 侧由 `hosts-dsh.test.ts` 覆盖。

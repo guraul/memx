@@ -1,6 +1,6 @@
 # modules/host-dsh.md — DSH 宿主壳
 
-> 最后更新: 2026-11-10 | commit: `eca01f0`
+> 最后更新: 2026-11-15 | commit: `6b0fd0f`
 > 覆盖路径: `src/hosts/dsh/**`, `src/hosts/dsh/index.ts`, `src/hosts/dsh/llm.ts`, `src/hosts/dsh/types.ts`, `src/hosts/dsh/README.md`, `src/core/pipeline/session.ts`, `tests/hosts-dsh.test.ts`, `package.json`
 
 ## 职责
@@ -42,10 +42,10 @@ export function apply(ctx: DshContext, config: DshMemxConfig = {}): DshDiagnosti
 ## ① 注入
 
 - `ctx.systemPrompt.section({ name: "memx:memory", order: 12000, interpolate: false, text })`。
-- 内容 = `readInjectionSourcesForSlug(cache, slug, cwd)` → 协议 + USER.md + **当前项目一节 + related**（不是整份 MEMORY.md；related = 其它节里按 cwd 末段 + 词边界命中的条目，见 `modules/injection.md`）。
+- 内容 = `readInjectionSourcesForSlug(cache, slug, cwd)` → 协议 + 人设（`PERSONA.md`，全局一份、可缺）+ USER.md + **当前项目一节 + related**（不是整份 MEMORY.md；related = 其它节里按 cwd 末段 + 词边界命中的条目，见 `modules/injection.md`）。
 - **每会话只求值一次**：`WeakMap<agent, string>` 缓存；无 `agent`/`scope` 时不缓存（宁可重算，也不让 A 项目小节串给 B 项目）。
 - 文本里**无时间/计数/随机**——字节恒定是宿主缓存不失效的前提。
-- ⚠️ **不读 `inject.*` 闸门**（`enabled` / `includeAgents` / `excludeAgents` 只在 OpenCode 生效）。
+- ⚠️ **不读 `inject.*` 闸门**（`enabled` / `includeAgents` / `excludeAgents` / `persona` 只在 OpenCode 生效）——**在 DSH 侧关 `inject.persona` 不会让少注入人设块**。
 
 ## ② 工具（`ctx.tools.register`）
 
@@ -105,7 +105,7 @@ turn/end          → queueMicrotask（绝不 await）
 ## 已知限制
 
 - 本会话新写的记忆本会话不可见（注入每会话一次）。
-- 装配上下文缺 `agent`/`scope` 时不缓存（slug 也取不到 → 只出协议 + 画像）。
+- 装配上下文缺 `agent`/`scope` 时不缓存（slug 也取不到 → 只出协议 + 人设 + 画像，缺的只是项目小节）。
 - `createUserMessage` 动态 import 可能失败 → 只跳过"已记住 N 条"提示，写盘不受影响。
 - 设置页「记忆」**只改配置**，不显示计数/诊断；诊断在内存 + 宿主日志 `[memx] …`，重启清零。
 - `inject.*` 闸门未接；云同步未接；`turn/end` 未按 `reason` 过滤（见 [CONVENTIONS.md](../CONVENTIONS.md) §5）。
@@ -113,4 +113,4 @@ turn/end          → queueMicrotask（绝不 await）
 
 ## 测试
 
-`tests/hosts-dsh.test.ts`：假 `ctx`（systemPrompt / tools / llm / agents / workingDirectory）覆盖插件契约（导出 / `Config` 校验）、注入段注册与字节恒定、`memory_write` / `memory_search` / `forget` 的成功与失败回执、轮末补记（触发 / 节流 / 本轮已写跳过 / autoRefine=false / 无模型）与 volatile 配置现读。**未覆盖**：`agent.inject` 的「已记住 N 条」提示（依赖宿主 `createUserMessage`，代码里只做降级容错）。
+`tests/hosts-dsh.test.ts`：假 `ctx`（systemPrompt / tools / llm / agents / workingDirectory）覆盖插件契约（导出 / `Config` 校验）、注入段注册与字节恒定、`memory_write` / `memory_search` / `forget` 的成功与失败回执、轮末补记（触发 / 节流 / 本轮已写跳过 / autoRefine=false / 无模型）与 volatile 配置现读。人设四块的顺序 / 缺块退场 / `inject.persona=false` 语义在 OpenCode 侧由 `tests/persona-injection.test.ts` 覆盖（DSH 走同一条 `buildInjectionParts`，不重复断言）。**未覆盖**：`agent.inject` 的「已记住 N 条」提示（依赖宿主 `createUserMessage`，代码里只做降级容错）。
